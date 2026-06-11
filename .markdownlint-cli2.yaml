@@ -1,0 +1,15 @@
+# Markdown lint configuration
+config:
+  # Allow long lines in tables, code blocks, and headings.
+  line-length:
+    tables: false
+    code_blocks: false
+    headings: false
+  # .tmpl.md files and tools/ don't start with headings.
+  first-line-heading: false
+
+# Exclude build artifacts and template files.
+ignores:
+  - "target/**"
+  - "wip/**"
+  - "**/*.tmpl.md"

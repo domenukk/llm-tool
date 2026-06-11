@@ -1,0 +1,29 @@
+[package]
+name = "llm-tool-macros"
+version = "0.1.2"
+edition = "2024"
+rust-version = "1.85"
+description = "Proc macros for llm-tool (#[llm_tool] attribute)"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/domenukk/llm-tool"
+readme = "README.md"
+keywords = ["llm", "tool", "proc-macro", "function-calling", "agent"]
+categories = ["development-tools::procedural-macro-helpers"]
+
+[lib]
+proc-macro = true
+
+[features]
+default = []
+# Enables compile-time template parsing for `description = "..."` attributes.
+prompt-templates = ["dep:prompt-templates"]
+
+[dependencies]
+prompt-templates = { version = "0.1.2", optional = true }
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+convert_case = "0.7"
+
+[lints]
+workspace = true

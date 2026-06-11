@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      # Check out llm-tool into a subdirectory so ../prompt-templates resolves.
+      - uses: actions/checkout@v4
+        with:
+          path: llm-tool
+
+      - name: Clone prompt-templates (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: domenukk/prompt-templates
+          path: prompt-templates
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: llm-tool
+
+      - name: Test (default features)
+        run: cargo test
+        working-directory: llm-tool
+
+      - name: Test (prompt-templates)
+        run: cargo test --features prompt-templates
+        working-directory: llm-tool
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: llm-tool
+
+      - name: Clone prompt-templates
+        uses: actions/checkout@v4
+        with:
+          repository: domenukk/prompt-templates
+          path: prompt-templates
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: llm-tool
+
+      - name: Clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: llm-tool
+
+      - name: Clippy (prompt-templates)
+        run: cargo clippy --all-targets --features prompt-templates -- -D warnings
+        working-directory: llm-tool
+
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo +nightly fmt -- --check
+
+  doc:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: llm-tool
+
+      - name: Clone prompt-templates
+        uses: actions/checkout@v4
+        with:
+          repository: domenukk/prompt-templates
+          path: prompt-templates
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: llm-tool
+
+      - name: Build docs (default)
+        run: cargo doc --no-deps
+        working-directory: llm-tool
+
+      - name: Build docs (prompt-templates)
+        run: cargo doc --no-deps --features prompt-templates
+        working-directory: llm-tool

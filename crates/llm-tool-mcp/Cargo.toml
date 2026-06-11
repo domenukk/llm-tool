@@ -1,0 +1,25 @@
+[package]
+name = "llm-tool-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "MCP (Model Context Protocol) stdio server for llm-tool registries"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/domenukk/llm-tool"
+readme = "README.md"
+keywords = ["llm", "mcp", "tool", "agent", "function-calling"]
+categories = ["api-bindings"]
+
+[dependencies]
+llm-tool = { path = "../..", version = "0.1.2" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
+tracing = "0.1"
+
+[dev-dependencies]
+schemars = "0.8"
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+
+[lints]
+workspace = true
