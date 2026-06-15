@@ -1,6 +1,6 @@
 [package]
 name = "llm-tool-macros"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.85"
 description = "Proc macros for llm-tool (#[llm_tool] attribute)"
@@ -19,7 +19,7 @@ default = []
 prompt-templates = ["dep:prompt-templates"]
 
 [dependencies]
-prompt-templates = { version = "0.1.2", optional = true }
+prompt-templates = { version = "0.1.3", optional = true }
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
