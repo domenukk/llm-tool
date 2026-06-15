@@ -28,7 +28,10 @@ use std::{
 use llm_tool::{ToolContext, ToolDefinition, ToolRegistry};
 use tracing::{debug, error, info};
 
-use crate::protocol::{self, JsonRpcRequest, JsonRpcResponse};
+use crate::protocol::{
+    self, Capabilities, ContentItem, InitializeResult, JsonRpcRequest, JsonRpcResponse,
+    McpToolSchema, ServerInfo, ToolCallParams, ToolCallResult, ToolCapabilities, ToolsListResult,
+};
 
 /// An MCP server that serves tools from a [`ToolRegistry`] over JSON-RPC.
 ///
@@ -72,7 +75,7 @@ pub struct McpServer {
     context: ToolContext,
     /// Pre-computed MCP tool schemas — built once at construction,
     /// wrapped in `Arc` so `tools/list` clones a pointer, not the tree.
-    cached_tools_list: Arc<serde_json::Value>,
+    cached_tools_list: Arc<ToolsListResult>,
 }
 
 impl McpServer {
@@ -227,7 +230,7 @@ impl McpServer {
             "initialize" => self.handle_initialize(id),
             // MCP clients may send `initialized` as a notification — acknowledge it.
             "notifications/initialized" | "initialized" => {
-                JsonRpcResponse::success(id, serde_json::json!({}))
+                JsonRpcResponse::success(id, serde_json::Map::new())
             }
             "tools/list" => self.handle_tools_list(id),
             "tools/call" => self.handle_tools_call(id, request.params).await,
@@ -245,20 +248,22 @@ impl McpServer {
         info!(server = %self.name, version = %self.version, "MCP initialize");
         JsonRpcResponse::success(
             id,
-            serde_json::json!({
-                "serverInfo": {
-                    "name": self.name,
-                    "version": self.version,
+            InitializeResult {
+                protocol_version: "2024-11-05",
+                server_info: ServerInfo {
+                    name: self.name.clone(),
+                    version: self.version.clone(),
                 },
-                "capabilities": {
-                    "tools": {}
-                }
-            }),
+                capabilities: Capabilities {
+                    tools: ToolCapabilities {},
+                },
+            },
         )
     }
 
     fn handle_tools_list(&self, id: Option<serde_json::Value>) -> JsonRpcResponse {
         info!(count = self.registry.len(), "tools/list");
+        // Clone the Arc's inner value; the Serialize impl handles conversion.
         JsonRpcResponse::success(id, (*self.cached_tools_list).clone())
     }
 
@@ -267,7 +272,7 @@ impl McpServer {
         id: Option<serde_json::Value>,
         params: Option<serde_json::Value>,
     ) -> JsonRpcResponse {
-        let Some(params) = params else {
+        let Some(raw_params) = params else {
             return JsonRpcResponse::error(
                 id,
                 protocol::INVALID_PARAMS,
@@ -275,31 +280,33 @@ impl McpServer {
             );
         };
 
-        let Some(tool_name) = params.get("name").and_then(serde_json::Value::as_str) else {
-            return JsonRpcResponse::error(
-                id,
-                protocol::INVALID_PARAMS,
-                "missing 'name' in tools/call params",
-            );
+        let call_params: ToolCallParams = match serde_json::from_value(raw_params) {
+            Ok(p) => p,
+            Err(e) => {
+                return JsonRpcResponse::error(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    format!("invalid tools/call params: {e}"),
+                );
+            }
         };
 
-        let arguments = params
-            .get("arguments")
-            .cloned()
-            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-
-        debug!(tool = %tool_name, "tools/call");
+        debug!(tool = %call_params.name, "tools/call");
 
         match self
             .registry
-            .dispatch(tool_name, arguments, &self.context)
+            .dispatch(&call_params.name, call_params.arguments, &self.context)
             .await
         {
             Ok(output) => JsonRpcResponse::success(
                 id,
-                serde_json::json!({
-                    "content": [{ "type": "text", "text": output.content() }]
-                }),
+                ToolCallResult {
+                    content: vec![ContentItem {
+                        content_type: "text",
+                        text: output.content().to_owned(),
+                    }],
+                    is_error: false,
+                },
             ),
             Err(e) => {
                 // MCP spec: tool execution errors are returned as success with
@@ -307,10 +314,13 @@ impl McpServer {
                 // reserved for protocol-level failures.
                 JsonRpcResponse::success(
                     id,
-                    serde_json::json!({
-                        "content": [{ "type": "text", "text": e.to_string() }],
-                        "isError": true
-                    }),
+                    ToolCallResult {
+                        content: vec![ContentItem {
+                            content_type: "text",
+                            text: e.to_string(),
+                        }],
+                        is_error: true,
+                    },
                 )
             }
         }
@@ -323,22 +333,22 @@ impl McpServer {
 ///
 /// Called once at [`McpServer::new`] — the result is wrapped in an
 /// `Arc` so `tools/list` clones a pointer, not the full JSON tree.
-fn build_tools_list_response(registry: &ToolRegistry) -> serde_json::Value {
-    let tools: Vec<serde_json::Value> = registry
+fn build_tools_list_response(registry: &ToolRegistry) -> ToolsListResult {
+    let tools = registry
         .definitions()
         .iter()
         .map(definition_to_mcp_schema)
         .collect();
-    serde_json::json!({ "tools": tools })
+    ToolsListResult { tools }
 }
 
 /// Convert a [`ToolDefinition`] to the MCP `tools/list` schema format.
-fn definition_to_mcp_schema(def: &ToolDefinition) -> serde_json::Value {
-    serde_json::json!({
-        "name": def.name,
-        "description": def.description,
-        "inputSchema": def.parameter_schema,
-    })
+fn definition_to_mcp_schema(def: &ToolDefinition) -> McpToolSchema {
+    McpToolSchema {
+        name: def.name.clone(),
+        description: def.description.clone(),
+        input_schema: def.parameter_schema.clone(),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -426,6 +436,7 @@ mod tests {
 
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
+        assert_eq!(result["protocolVersion"], "2024-11-05");
         assert_eq!(result["serverInfo"]["name"], "test-server");
         assert_eq!(result["serverInfo"]["version"], "0.0.1");
         assert!(result["capabilities"]["tools"].is_object());
@@ -698,8 +709,8 @@ mod tests {
             parameter_schema: serde_json::json!({"type": "object"}),
         };
         let schema = definition_to_mcp_schema(&def);
-        assert_eq!(schema["name"], "my_tool");
-        assert_eq!(schema["description"], "Does stuff.");
-        assert_eq!(schema["inputSchema"]["type"], "object");
+        assert_eq!(schema.name, "my_tool");
+        assert_eq!(schema.description, "Does stuff.");
+        assert_eq!(schema.input_schema["type"], "object");
     }
 }

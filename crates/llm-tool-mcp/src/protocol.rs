@@ -72,13 +72,20 @@ pub struct JsonRpcError {
 }
 
 impl JsonRpcResponse {
-    /// Build a success response.
+    /// Build a success response from any serializable result type.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `result` cannot be serialized to JSON. This should never
+    /// happen for the well-formed MCP structs in this module.
     #[must_use]
-    pub fn success(id: Option<serde_json::Value>, result: serde_json::Value) -> Self {
+    pub fn success(id: Option<serde_json::Value>, result: impl Serialize) -> Self {
         Self {
             jsonrpc: "2.0",
             id,
-            result: Some(result),
+            result: Some(
+                serde_json::to_value(result).expect("MCP result type must be JSON-serializable"),
+            ),
             error: None,
         }
     }
@@ -96,6 +103,97 @@ impl JsonRpcResponse {
             }),
         }
     }
+}
+
+// ── MCP-specific types ──────────────────────────────────────────────
+
+/// Result body for `initialize`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitializeResult {
+    /// MCP protocol version (e.g. `"2024-11-05"`).
+    pub protocol_version: &'static str,
+    /// Server name and version.
+    pub server_info: ServerInfo,
+    /// Advertised capabilities.
+    pub capabilities: Capabilities,
+}
+
+/// Server identification returned in `initialize`.
+#[derive(Debug, Serialize)]
+pub struct ServerInfo {
+    /// Human-readable server name.
+    pub name: String,
+    /// Server version string.
+    pub version: String,
+}
+
+/// Server capabilities advertised during `initialize`.
+#[derive(Debug, Serialize)]
+pub struct Capabilities {
+    /// Tool support — presence signals that `tools/list` and `tools/call`
+    /// are available. The inner struct is currently empty (no pagination).
+    pub tools: ToolCapabilities,
+}
+
+/// Tool-specific capabilities (currently empty per MCP spec).
+#[derive(Debug, Default, Serialize)]
+pub struct ToolCapabilities {}
+
+/// Result body for `tools/list`.
+#[derive(Clone, Debug, Serialize)]
+pub struct ToolsListResult {
+    /// Available tools.
+    pub tools: Vec<McpToolSchema>,
+}
+
+/// A single tool's schema in the `tools/list` response.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolSchema {
+    /// Tool name.
+    pub name: String,
+    /// Human-readable description.
+    pub description: String,
+    /// JSON Schema for the tool's input parameters.
+    pub input_schema: serde_json::Value,
+}
+
+/// Deserialized `tools/call` request parameters.
+#[derive(Debug, Deserialize)]
+pub struct ToolCallParams {
+    /// Name of the tool to invoke.
+    pub name: String,
+    /// Tool arguments (defaults to `{}` if absent).
+    #[serde(default = "empty_object")]
+    pub arguments: serde_json::Value,
+}
+
+/// Returns an empty JSON object — used as the serde default for
+/// `ToolCallParams::arguments`.
+fn empty_object() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+/// Result body for a successful `tools/call`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCallResult {
+    /// Response content blocks.
+    pub content: Vec<ContentItem>,
+    /// `true` when the tool returned an error (MCP-level, not JSON-RPC).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub is_error: bool,
+}
+
+/// A single content block in a `tools/call` response.
+#[derive(Debug, Serialize)]
+pub struct ContentItem {
+    /// Content type — currently always `"text"`.
+    #[serde(rename = "type")]
+    pub content_type: &'static str,
+    /// The text content.
+    pub text: String,
 }
 
 #[cfg(test)]

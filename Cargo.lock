@@ -241,11 +241,11 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "llm-tool"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "futures",
  "llm-tool-macros",
- "prompt-templates 0.1.2",
+ "prompt-templates",
  "schemars",
  "serde",
  "serde_json",
@@ -257,18 +257,18 @@ dependencies = [
 
 [[package]]
 name = "llm-tool-macros"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "convert_case",
  "proc-macro2",
- "prompt-templates 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "prompt-templates",
  "quote",
  "syn",
 ]
 
 [[package]]
 name = "llm-tool-mcp"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "llm-tool",
  "schemars",
@@ -286,9 +286,9 @@ checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
 name = "memchr"
-version = "2.8.1"
+version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
+checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "once_cell"
@@ -323,22 +323,14 @@ dependencies = [
 
 [[package]]
 name = "prompt-templates"
-version = "0.1.2"
-dependencies = [
- "const-str",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "prompt-templates"
-version = "0.1.2"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f767e2b35d7bc38a7e04727fe40e539858ac82f7869f56983806e22d622ad055"
+checksum = "35e29e979df765eabbd5b7680e5f086bd0c4679ee1981b8e415e449efe990f42"
 dependencies = [
  "const-str",
+ "serde",
  "thiserror",
- "tracing",
+ "typed-builder",
 ]
 
 [[package]]
@@ -631,6 +623,26 @@ dependencies = [
  "target-triple",
  "termcolor",
  "toml",
+]
+
+[[package]]
+name = "typed-builder"
+version = "0.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd9d30e3a08026c78f246b173243cf07b3696d274debd26680773b6773c2afc7"
+dependencies = [
+ "typed-builder-macro",
+]
+
+[[package]]
+name = "typed-builder-macro"
+version = "0.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c36781cc0e46a83726d9879608e4cf6c2505237e263a8eb8c24502989cfdb28"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

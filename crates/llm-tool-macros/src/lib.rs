@@ -162,7 +162,8 @@ impl syn::parse::Parse for ToolAttr {
                     // Suppress unused-variable warnings in the no-feature path.
                     #[cfg(not(feature = "prompt-templates"))]
                     {
-                        let _ = (key, value);
+                        drop(key);
+                        drop(value);
                     }
                     if !content.is_empty() {
                         let _: Token![,] = content.parse()?;
@@ -578,7 +579,12 @@ fn resolve_context_description(
     has_declarations: bool,
     dep_tracking: proc_macro2::TokenStream,
 ) -> syn::Result<DescriptionInfo> {
-    let context_fn = attr.context_fn.as_ref().unwrap();
+    let context_fn = attr.context_fn.as_ref().ok_or_else(|| {
+        syn::Error::new(
+            template_lit.span(),
+            "internal error: resolve_context_description called without context_fn",
+        )
+    })?;
 
     if !has_declarations {
         return Err(syn::Error::new(
