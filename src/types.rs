@@ -525,10 +525,16 @@ pub struct Json<T>(pub T);
 
 impl<T: serde::Serialize> From<Json<T>> for ToolOutput {
     fn from(json: Json<T>) -> Self {
-        Self::new(
-            serde_json::to_string(&json.0)
-                .expect("Json<T> serialization failed — this is a bug in the Serialize impl"),
-        )
+        let json_value = serde_json::to_value(&json.0)
+            .expect("Json<T> serialization failed — this is a bug in the Serialize impl");
+        let content = json_value.to_string();
+        match json_value {
+            serde_json::Value::Object(map) => Self {
+                content,
+                metadata: map.into_iter().collect(),
+            },
+            _ => Self::new(content),
+        }
     }
 }
 
@@ -740,7 +746,16 @@ pub mod __private {
 
     impl<T: serde::Serialize> SerializeFallback for Wrap<T> {
         fn __convert(self) -> Result<ToolOutput, ToolError> {
-            ToolOutput::json(&self.0)
+            let json_value = serde_json::to_value(&self.0)
+                .map_err(|e| ToolError::new(format!("serialization failed: {e}")))?;
+            let content = json_value.to_string();
+            match json_value {
+                serde_json::Value::Object(map) => Ok(ToolOutput {
+                    content,
+                    metadata: map.into_iter().collect(),
+                }),
+                _ => Ok(ToolOutput::new(content)),
+            }
         }
     }
 }

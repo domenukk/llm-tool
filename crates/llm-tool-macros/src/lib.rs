@@ -5,7 +5,9 @@
 //! implementation.
 //!
 //! With the `prompt-templates` feature enabled, tool descriptions can be
-//! loaded from `.tmpl.md` template files via `template = "..."`.
+//! loaded from `.tmpl.md` template files via `template = "..."`, and tool
+//! responses can be auto-rendered through templates via
+//! `response_template = "..."`.
 
 use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
@@ -32,6 +34,7 @@ use syn::{
 /// |--------|------|---------|
 /// | `#[llm_tool]` + doc comment | Zero (static `&str`) | — |
 /// | `#[llm_tool(description = "inline text")]` | Zero (static `&str`) | — |
+/// | `#[llm_tool(response_template = "...")]` | Runtime render | `prompt-templates` |
 /// | `#[llm_tool(template = "tools/x.tmpl.md")]` | Zero (compiled) | `prompt-templates` |
 /// | `#[llm_tool(template = "...", params(k = "v"))]` | Zero (compiled) | `prompt-templates` |
 /// | `#[llm_tool(template = "...", context = fn)]` | Runtime `Cow::Owned` | `prompt-templates` |
@@ -80,6 +83,13 @@ use syn::{
 /// Parameters may use `&str` — the generated params struct stores an owned
 /// `String` and the macro auto-borrows it before passing to your function body.
 ///
+/// # Response templates
+///
+/// When `response_template = "path/to/response.tmpl.md"` is provided, the
+/// tool's return value (`T: Serialize`) is used to build a template context
+/// via `Context::from_serialize`, rendered through the template, and returned
+/// as `ToolOutput`. The struct is also attached as metadata.
+///
 /// # Return types
 ///
 /// The return type can be `Result<T, E>` or just `T` (infallible):
@@ -114,11 +124,14 @@ pub fn llm_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `template = "path.tmpl.md"` — template file (requires `prompt-templates`)
 /// - `params(key = "value", ...)` — compile-time template variables
 /// - `context = path::to::fn` — runtime template context function
+/// - `response_template = "path.tmpl.md"` — response rendering template
 struct ToolAttr {
     /// Inline description string (mutually exclusive with `template_path`).
     description_inline: Option<LitStr>,
     /// Path to a `.tmpl.md` file (mutually exclusive with `description_inline`).
     template_path: Option<LitStr>,
+    /// Path to a response `.tmpl.md` file for auto-rendering tool output.
+    response_template_path: Option<LitStr>,
     /// Compile-time key-value pairs for template rendering.
     /// Mutually exclusive with `context_fn`.
     #[cfg(feature = "prompt-templates")]
@@ -132,6 +145,7 @@ impl syn::parse::Parse for ToolAttr {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut description_inline = None;
         let mut template_path = None;
+        let mut response_template_path = None;
         #[cfg(feature = "prompt-templates")]
         let mut inline_params = Vec::new();
         #[cfg(feature = "prompt-templates")]
@@ -150,6 +164,9 @@ impl syn::parse::Parse for ToolAttr {
             } else if ident == "template" {
                 let _: Token![=] = input.parse()?;
                 template_path = Some(input.parse::<LitStr>()?);
+            } else if ident == "response_template" {
+                let _: Token![=] = input.parse()?;
+                response_template_path = Some(input.parse::<LitStr>()?);
             } else if ident == "params" {
                 let content;
                 syn::parenthesized!(content in input);
@@ -187,7 +204,8 @@ impl syn::parse::Parse for ToolAttr {
             } else {
                 return Err(syn::Error::new(
                     ident.span(),
-                    "expected `description`, `template`, `params`, or `context`",
+                    "expected `description`, `template`, `response_template`, \
+                     `params`, or `context`",
                 ));
             }
 
@@ -206,9 +224,20 @@ impl syn::parse::Parse for ToolAttr {
             has_context_fn,
         )?;
 
+        // Validate response_template requires prompt-templates feature.
+        #[cfg(not(feature = "prompt-templates"))]
+        if response_template_path.is_some() {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "the `prompt-templates` feature must be enabled to use \
+                 `response_template = \"...\"`",
+            ));
+        }
+
         Ok(Self {
             description_inline,
             template_path,
+            response_template_path,
             #[cfg(feature = "prompt-templates")]
             inline_params,
             #[cfg(feature = "prompt-templates")]
@@ -303,6 +332,9 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
         dep_tracking,
     } = resolve_description(func, attr)?;
 
+    // Resolve response template (if provided).
+    let response_info = resolve_response_template(attr)?;
+
     // Extract parameters, separating ToolContext from regular params.
     let all_params = extract_params(func)?;
     let ctx_param = all_params.iter().find(|p| p.is_context);
@@ -333,7 +365,7 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
 
     let (param_struct_types, borrow_bindings) = build_param_types_and_borrows(&params);
     let serde_defaults = build_serde_defaults(&params);
-    let body_tokens = build_body_tokens(func, &return_info, &crate_path);
+    let body_tokens = build_body_tokens(func, &return_info, &crate_path, &response_info);
 
     let vis = &func.vis;
 
@@ -351,9 +383,14 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
         quote! {}
     };
 
+    let response_dep_tracking = &response_info.dep_tracking;
+    let response_helper_tokens = &response_info.helper_tokens;
+
     Ok(quote! {
         #dep_tracking
+        #response_dep_tracking
         #helper_tokens
+        #response_helper_tokens
 
         #[doc = #params_doc]
         #[derive(::serde::Deserialize, ::schemars::JsonSchema)]
@@ -366,8 +403,10 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
         }
 
         #[doc = #struct_doc]
+        #[allow(dead_code)] // Constructed at runtime and used via Box<dyn ErasedTool>
         #vis struct #struct_name;
 
+        #[allow(dead_code)] // Methods called through trait-object dispatch (dyn ErasedTool)
         impl #crate_path::RustTool for #struct_name {
             type Params = #params_name;
             const NAME: &'static str = #tool_name_str;
@@ -601,9 +640,9 @@ fn resolve_context_description(
     // when multiple dynamic-description tools exist in the same module.
     let description_method = quote! {
         fn description(&self) -> ::std::borrow::Cow<'static, str> {
-            static TEMPLATE: ::std::sync::LazyLock<::prompt_templates::Template> =
+            static TEMPLATE: ::std::sync::LazyLock<::llm_tool::__prompt_templates::Template> =
                 ::std::sync::LazyLock::new(|| {
-                    ::prompt_templates::Template::from_source(
+                    ::llm_tool::__prompt_templates::Template::from_source(
                         include_str!(#path_str)
                     ).expect("Valid template (verified at compile time)")
                 });
@@ -736,10 +775,15 @@ fn build_serde_defaults(params: &[&ParamInfo]) -> Vec<proc_macro2::TokenStream> 
 /// the compiler resolves the correct conversion (inherent method for
 /// `String`/`ToolOutput`/`Json<T>`, or `SerializeFallback` trait for
 /// `T: Serialize`) without any proc-macro type-name matching.
+///
+/// When a `response_template` is specified, the return value is instead
+/// rendered through the template and returned as `ToolOutput` with the
+/// struct attached as metadata.
 fn build_body_tokens(
     func: &ItemFn,
     return_info: &ReturnInfo,
     crate_path: &proc_macro2::TokenStream,
+    response_info: &ResponseTemplateInfo,
 ) -> proc_macro2::TokenStream {
     let is_async = func.sig.asyncness.is_some();
     let body_stmts = &func.block.stmts;
@@ -757,10 +801,11 @@ fn build_body_tokens(
                     let __r: ::std::result::Result<#ok_type, #err_type> = (|| { #( #body_stmts )* })();
                 }
             };
+            let ok_branch = build_ok_branch(crate_path, response_info);
             quote! {
                 #inner
                 match __r {
-                    ::std::result::Result::Ok(__v) => #crate_path::__private::Wrap(__v).__convert(),
+                    ::std::result::Result::Ok(__v) => { #ok_branch },
                     ::std::result::Result::Err(__e) => ::std::result::Result::Err(::std::convert::Into::into(__e)),
                 }
             }
@@ -775,12 +820,139 @@ fn build_body_tokens(
                     let __v = (|| { #( #body_stmts )* })();
                 }
             };
+            let ok_branch = build_ok_branch(crate_path, response_info);
             quote! {
                 #inner
-                #crate_path::__private::Wrap(__v).__convert()
+                #ok_branch
             }
         }
     }
+}
+
+/// Build the Ok-branch conversion: either the standard `Wrap(v).__convert()`
+/// or template-based rendering when `response_template` is set.
+fn build_ok_branch(
+    crate_path: &proc_macro2::TokenStream,
+    response_info: &ResponseTemplateInfo,
+) -> proc_macro2::TokenStream {
+    if let Some(ref render_tokens) = response_info.render_tokens {
+        render_tokens.clone()
+    } else {
+        quote! { #crate_path::__private::Wrap(__v).__convert() }
+    }
+}
+
+// ── Response Template Resolution ────────────────────────────────────────────
+
+/// Structured output from response template resolution.
+struct ResponseTemplateInfo {
+    /// Cargo dependency-tracking tokens.
+    dep_tracking: proc_macro2::TokenStream,
+    /// Helper tokens (e.g. static `LazyLock` declarations).
+    helper_tokens: proc_macro2::TokenStream,
+    /// Token stream that converts `__v` into `Result<ToolOutput, ToolError>`
+    /// via template rendering. `None` = use default `__convert()` path.
+    render_tokens: Option<proc_macro2::TokenStream>,
+}
+
+impl Default for ResponseTemplateInfo {
+    fn default() -> Self {
+        Self {
+            dep_tracking: quote! {},
+            helper_tokens: quote! {},
+            render_tokens: None,
+        }
+    }
+}
+
+/// Resolve response template from the tool attribute.
+///
+/// When `response_template = "..."` is set (and `prompt-templates` feature is
+/// enabled), reads the template file at compile time, validates it, and
+/// generates a `LazyLock`-based renderer that converts the tool's return
+/// value (any `T: Serialize`) into rendered text.
+fn resolve_response_template(attr: Option<&ToolAttr>) -> syn::Result<ResponseTemplateInfo> {
+    let Some(ToolAttr {
+        response_template_path: Some(response_path),
+        ..
+    }) = attr
+    else {
+        return Ok(ResponseTemplateInfo::default());
+    };
+
+    #[cfg(not(feature = "prompt-templates"))]
+    {
+        Err(syn::Error::new(
+            response_path.span(),
+            "the `prompt-templates` feature must be enabled to use \
+             `response_template = \"...\"`",
+        ))
+    }
+
+    #[cfg(feature = "prompt-templates")]
+    resolve_response_template_impl(response_path)
+}
+
+/// Feature-gated implementation of response template resolution.
+#[cfg(feature = "prompt-templates")]
+fn resolve_response_template_impl(response_path: &LitStr) -> syn::Result<ResponseTemplateInfo> {
+    let rel_path = response_path.value();
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let full_path = std::path::Path::new(&manifest_dir).join(&rel_path);
+    let path_str = full_path.to_string_lossy().to_string();
+
+    // Validate the template file exists and parses at compile time.
+    let source = std::fs::read_to_string(&full_path).map_err(|e| {
+        syn::Error::new(
+            response_path.span(),
+            format!(
+                "failed to read response template '{}': {e}",
+                full_path.display()
+            ),
+        )
+    })?;
+
+    // Parse to validate syntax at compile time.
+    prompt_templates::Template::from_source(&source).map_err(|e| {
+        syn::Error::new(
+            response_path.span(),
+            format!("response template '{rel_path}' parse error: {e}"),
+        )
+    })?;
+
+    let dep_tracking = quote! {
+        const _: &str = include_str!(#path_str);
+    };
+
+    let render_tokens = quote! {
+        {
+            static __RESPONSE_TMPL: ::std::sync::LazyLock<::llm_tool::__prompt_templates::Template> =
+                ::std::sync::LazyLock::new(|| {
+                    ::llm_tool::__prompt_templates::Template::from_source(
+                        include_str!(#path_str)
+                    ).expect("valid response template (verified at compile time)")
+                });
+            let __ctx = ::llm_tool::__prompt_templates::Context::from_serialize(&__v)
+                .map_err(|e| ::llm_tool::ToolError::new(
+                    format!("response template context error: {e}")
+                ))?;
+            let __rendered = __RESPONSE_TMPL.render(&__ctx)
+                .map_err(|e| ::llm_tool::ToolError::new(
+                    format!("response template render error: {e}")
+                ))?;
+            ::llm_tool::ToolOutput::new(__rendered)
+                .with_metadata(&__v)
+                .map_err(|e| ::llm_tool::ToolError::new(
+                    format!("response metadata error: {e}")
+                ))
+        }
+    };
+
+    Ok(ResponseTemplateInfo {
+        dep_tracking,
+        helper_tokens: quote! {},
+        render_tokens: Some(render_tokens),
+    })
 }
 
 /// Check whether `ty` is `Option<T>` (or `std::option::Option<T>`).

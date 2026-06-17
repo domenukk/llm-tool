@@ -8,6 +8,12 @@ mod registry;
 mod rust_tool;
 mod types;
 
+/// Re-export `prompt_templates` so `response_template` generated code can
+/// reference `::llm_tool::__prompt_templates::` without requiring the user
+/// to add `prompt-templates` as a direct dependency.
+#[cfg(feature = "prompt-templates")]
+#[doc(hidden)]
+pub use prompt_templates as __prompt_templates;
 pub use registry::*;
 pub use rust_tool::*;
 pub use types::*;

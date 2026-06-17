@@ -1397,4 +1397,83 @@ mod tests {
             "Expected object error, got: {err}"
         );
     }
+
+    #[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+    struct StructuredResult {
+        success: bool,
+        code: i32,
+    }
+
+    /// Returns structured struct.
+    #[llm_tool]
+    fn return_structured_struct() -> Result<StructuredResult, ToolError> {
+        Ok(StructuredResult {
+            success: true,
+            code: 200,
+        })
+    }
+
+    #[tokio::test]
+    async fn macro_tool_returning_struct_populates_metadata_automatically() {
+        let mut d = ToolRegistry::new();
+        d.register(ReturnStructuredStruct);
+
+        let result = d
+            .dispatch("return_structured_struct", serde_json::json!({}), &test_ctx())
+            .await
+            .unwrap();
+
+        assert!(result.content().contains("success"));
+        assert!(result.content().contains("true"));
+        assert!(result.content().contains("code"));
+        assert!(result.content().contains("200"));
+
+        assert_eq!(result.metadata()["success"], true);
+        assert_eq!(result.metadata()["code"], 200);
+        assert_eq!(result.metadata().len(), 2);
+    }
+
+    /// Returns a primitive.
+    #[llm_tool]
+    fn return_primitive() -> Result<i32, ToolError> {
+        Ok(42)
+    }
+
+    #[tokio::test]
+    async fn macro_tool_returning_primitive_leaves_metadata_empty() {
+        let mut d = ToolRegistry::new();
+        d.register(ReturnPrimitive);
+
+        let result = d
+            .dispatch("return_primitive", serde_json::json!({}), &test_ctx())
+            .await
+            .unwrap();
+
+        assert_eq!(result.content(), "42");
+        assert!(result.metadata().is_empty());
+    }
+
+    /// Returns JSON wrapper.
+    #[llm_tool]
+    fn return_json_wrapper() -> Result<crate::Json<StructuredResult>, ToolError> {
+        Ok(crate::Json(StructuredResult {
+            success: false,
+            code: 500,
+        }))
+    }
+
+    #[tokio::test]
+    async fn macro_tool_returning_json_wrapper_populates_metadata() {
+        let mut d = ToolRegistry::new();
+        d.register(ReturnJsonWrapper);
+
+        let result = d
+            .dispatch("return_json_wrapper", serde_json::json!({}), &test_ctx())
+            .await
+            .unwrap();
+
+        assert!(result.content().contains("success"));
+        assert_eq!(result.metadata()["success"], false);
+        assert_eq!(result.metadata()["code"], 500);
+    }
 }
