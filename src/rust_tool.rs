@@ -122,7 +122,7 @@ pub fn definition_of<T: RustTool>(tool: &T) -> Result<ToolDefinition, ToolError>
 /// Recursively sanitize JSON Schema `"type"` fields for Go genai compatibility.
 ///
 /// `schemars` emits `"type": ["string", "null"]` for `Option<String>` fields
-/// (JSON Schema draft 7 nullable syntax). The Go genai SDK's `Schema.Type`
+/// (the nullable type-array form). The Go genai SDK's `Schema.Type`
 /// is a single `genai.Type` enum, so it can't unmarshal an array.
 ///
 /// This function walks the schema tree and replaces any array `type` with the
