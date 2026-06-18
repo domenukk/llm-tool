@@ -512,7 +512,7 @@ framework:
 3. **Convert** `ToolDefinition`s into whatever format your framework expects
    (e.g. `OpenAI` function-calling JSON, Anthropic tool-use blocks, Gemini
    `FunctionDeclaration`s, etc.). The `parameter_schema` is standard
-   JSON Schema (draft 7, with nullable arrays already sanitized to scalar
+   JSON Schema (draft 2020-12, with nullable arrays already sanitized to scalar
    `"type"` strings for Go genai compatibility).
 4. **On tool call**, extract the tool name and JSON arguments from your
    framework's response, then call `registry.dispatch(name, args, &ctx)`.

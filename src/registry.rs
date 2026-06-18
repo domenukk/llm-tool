@@ -989,6 +989,47 @@ mod tests {
         );
     }
 
+    /// Tool with optional parameters of distinct primitive types, used to pin
+    /// down the schema shape that [`definition_of`]'s `sanitize_schema_types`
+    /// must produce for `Option<T>` fields.
+    #[llm_tool]
+    fn optional_primitives(
+        /// Optional string filter.
+        tag: Option<String>,
+        /// Optional integer limit.
+        max: Option<i64>,
+    ) -> Result<String, ToolError> {
+        let _ = (tag, max);
+        Ok(String::new())
+    }
+
+    /// `sanitize_schema_types` must collapse the nullable form `schemars`
+    /// emits for `Option<T>` (`"type": ["string", "null"]`) down to a single
+    /// scalar `"type"` string, for Go genai compatibility. This is a behavioral
+    /// contract that survives across `schemars` major versions, so assert the
+    /// final shape directly rather than trusting the upstream representation.
+    #[test]
+    fn tool_macro_option_param_type_is_scalar_string() {
+        let def = definition_of(&OptionalPrimitives).expect("schema");
+        let props = def.parameter_schema["properties"]
+            .as_object()
+            .expect("properties object");
+
+        for (field, expected) in [("tag", "string"), ("max", "integer")] {
+            let ty = &props[field]["type"];
+            assert!(
+                ty.is_string(),
+                "'{field}' type should be a scalar string, got: {ty}"
+            );
+            assert_eq!(ty, expected, "'{field}' type mismatch");
+            // No leftover nullable array / union markers should remain.
+            assert!(
+                props[field].get("anyOf").is_none() && props[field].get("oneOf").is_none(),
+                "'{field}' should not retain an anyOf/oneOf union after sanitizing"
+            );
+        }
+    }
+
     // ── IntoIterator tests ──────────────────────────────────────────
 
     #[test]

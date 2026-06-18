@@ -31,7 +31,7 @@ prompt-templates = ["dep:prompt-templates", "llm-tool-macros/prompt-templates"]
 [dependencies]
 llm-tool-macros = { path = "crates/llm-tool-macros", version = "0.1.4" }
 prompt-templates = { version = "0.1.4", optional = true }
-schemars = "0.8"
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"

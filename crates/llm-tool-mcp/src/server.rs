@@ -150,7 +150,7 @@ impl McpServer {
     ///
     /// Panics if called from within an existing tokio runtime.
     /// Use [`handle_request`](Self::handle_request) instead for async
-    /// contexts, or use [`run_async`](Self::run_async) with
+    /// contexts, or use [`run_with_runtime`](Self::run_with_runtime) with
     /// [`tokio::task::spawn_blocking`].
     ///
     /// # Errors
