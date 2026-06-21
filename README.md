@@ -46,8 +46,8 @@ assert_eq!(defs[0].name, "add");
 **Rules for `#[llm_tool]` functions:**
 
 - Must have a **doc comment** (becomes the tool description),
-  `#[llm_tool(description = "inline text")]` for an inline override, or
-  `#[llm_tool(template = "path.tmpl.md")]` with the `prompt-templates` feature.
+  `#[llm_tool(prompt = "inline text")]` for an inline override, or
+  `#[llm_tool(prompt_file = "path.tmpl.md")]` with the `prompt-templates` feature.
 - Every parameter must have a **doc comment** (becomes the JSON Schema
   description for that field).
 - Return type can be `Result<T, E>` or a bare `T` (infallible tools):
@@ -313,10 +313,10 @@ params: []
 Fetch the current weather for any city worldwide.
 ```
 
-Reference it with `template = "..."`:
+Reference it with `prompt_file = "..."`:
 
 ```text
-#[llm_tool(template = "tools/get_weather.tmpl.md")]
+#[llm_tool(prompt_file = "tools/get_weather.tmpl.md")]
 fn get_weather(
     /// The city to look up.
     city: String,
@@ -325,7 +325,7 @@ fn get_weather(
 }
 ```
 
-Doc comments are optional when using `template = "..."` or `description = "..."`.
+Doc comments are optional when using `prompt_file = "..."` or `prompt = "..."`.
 
 #### Compile-time params
 
@@ -347,7 +347,7 @@ Weather lookup (API {{ api_version }}, {{ env_name }} environment).
 
 ```text
 #[llm_tool(
-    template = "tools/weather_api.tmpl.md",
+    prompt_file = "tools/weather_api.tmpl.md",
     params(api_version = "v3.1", env_name = "production")
 )]
 fn get_weather(
@@ -374,7 +374,7 @@ fn weather_context(_tool: &GetWeatherDynamic) -> prompt_templates::Context {
 }
 
 #[llm_tool(
-    template = "tools/dynamic_desc.tmpl.md",
+    prompt_file = "tools/dynamic_desc.tmpl.md",
     context = weather_context
 )]
 fn get_weather_dynamic(
@@ -390,7 +390,7 @@ fn get_weather_dynamic(
 For short descriptions, skip the template file entirely:
 
 ```text
-#[llm_tool(description = "Look up the current weather for a city.")]
+#[llm_tool(prompt = "Look up the current weather for a city.")]
 fn get_weather(
     /// The city name.
     city: String,
@@ -401,11 +401,11 @@ fn get_weather(
 
 | Attribute form                      | Cost    | Feature            |
 | ----------------------------------- | ------- | ------------------ |
-| `#[llm_tool]` + doc comment         | Zero    | —                  |
-| `description = "inline text"`       | Zero    | —                  |
-| `template = "path.tmpl.md"`         | Zero    | `prompt-templates` |
-| `template = "...", params(k = "v")` | Zero    | `prompt-templates` |
-| `template = "...", context = fn`    | Runtime | `prompt-templates` |
+| `#[llm_tool]` + doc comment              | Zero    | —                  |
+| `prompt = "inline text"`                 | Zero    | —                  |
+| `prompt_file = "path.tmpl.md"`           | Zero    | `prompt-templates` |
+| `prompt_file = "...", params(k = "v")`   | Zero    | `prompt-templates` |
+| `prompt_file = "...", context = fn`      | Runtime | `prompt-templates` |
 
 | Behaviour        | Detail                                                                                                         |
 | ---------------- | -------------------------------------------------------------------------------------------------------------- |
@@ -413,7 +413,7 @@ fn get_weather(
 | Rendering        | `description()` renders the template at runtime with the provided context.                                     |
 | Caching          | Templates are parsed once (via `LazyLock`) and cached for zero-cost repeated calls.                            |
 | Missing params   | If the template declares parameters but neither `params(...)` nor `context = ...` is provided, compile error.  |
-| Mutual exclusion | `params(...)` and `context = ...` are mutually exclusive. `description` and `template` are mutually exclusive. |
+| Mutual exclusion | `params(...)` and `context = ...` are mutually exclusive. `prompt` and `prompt_file` are mutually exclusive.   |
 | Fallback const   | The `DESCRIPTION` const still holds the raw template body (or rendered text) as a fallback.                    |
 
 #### Why use template descriptions?

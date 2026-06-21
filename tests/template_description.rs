@@ -6,7 +6,7 @@
 
 use llm_tool::{RustTool, ToolRegistry, llm_tool};
 
-#[llm_tool(template = "tools/static_desc.tmpl.md")]
+#[llm_tool(prompt_file = "tools/static_desc.tmpl.md")]
 fn get_weather(
     /// The city to get weather for.
     city: String,
@@ -52,7 +52,7 @@ fn template_description_in_registry() {
 }
 
 /// Doc comments are optional when using template descriptions.
-#[llm_tool(template = "tools/static_desc.tmpl.md")]
+#[llm_tool(prompt_file = "tools/static_desc.tmpl.md")]
 fn tool_without_docs(
     /// A parameter.
     value: i64,
@@ -79,7 +79,7 @@ fn get_weather_context(_tool: &GetWeatherDynamic) -> prompt_templates::Context {
 }
 
 #[llm_tool(
-    template = "tools/dynamic_desc.tmpl.md",
+    prompt_file = "tools/dynamic_desc.tmpl.md",
     context = get_weather_context
 )]
 fn get_weather_dynamic(
@@ -123,7 +123,7 @@ fn dynamic_description_propagates_to_registry() {
 
 // ── Inline Description Tests ──
 
-#[llm_tool(description = "Get the current temperature for a location.")]
+#[llm_tool(prompt = "Get the current temperature for a location.")]
 fn inline_description_tool(
     /// The city name.
     city: String,
@@ -150,7 +150,7 @@ fn inline_description_in_registry() {
 // ── Compile-time Params Tests ──
 
 #[llm_tool(
-    template = "tools/parameterized_desc.tmpl.md",
+    prompt_file = "tools/parameterized_desc.tmpl.md",
     params(api_version = "v4.2", env_name = "production")
 )]
 fn parameterized_tool(

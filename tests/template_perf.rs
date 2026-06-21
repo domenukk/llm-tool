@@ -11,7 +11,7 @@ use llm_tool::{RustTool, ToolRegistry, llm_tool};
 
 // ── Static template description ──
 
-#[llm_tool(template = "tools/static_desc.tmpl.md")]
+#[llm_tool(prompt_file = "tools/static_desc.tmpl.md")]
 fn static_tool(
     /// A value.
     x: i64,
@@ -28,7 +28,7 @@ fn bench_context(_tool: &DynamicTool) -> prompt_templates::Context {
     ctx
 }
 
-#[llm_tool(template = "tools/dynamic_desc.tmpl.md", context = bench_context)]
+#[llm_tool(prompt_file = "tools/dynamic_desc.tmpl.md", context = bench_context)]
 fn dynamic_tool(
     /// A value.
     x: i64,

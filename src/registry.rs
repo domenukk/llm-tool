@@ -1,11 +1,12 @@
 //! Tool registry: registry and concurrent dispatch of named tools.
 
-use std::collections::HashMap;
+use alloc::{boxed::Box, format, vec::Vec};
 
 use super::{
     rust_tool::{ErasedTool, RustTool, definition_of},
     types::{ToolContext, ToolDefinition, ToolError, ToolOutput},
 };
+use crate::compat::HashMap;
 
 /// Entry holding a cached [`ToolDefinition`] alongside the type-erased tool.
 ///
@@ -21,8 +22,8 @@ pub struct ToolRegistry {
     tools: HashMap<&'static str, RegisteredTool>,
 }
 
-impl std::fmt::Debug for ToolRegistry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for ToolRegistry {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let names: Vec<&str> = self
             .tools
             .values()
@@ -1419,7 +1420,11 @@ mod tests {
         d.register(ReturnStructuredStruct);
 
         let result = d
-            .dispatch("return_structured_struct", serde_json::json!({}), &test_ctx())
+            .dispatch(
+                "return_structured_struct",
+                serde_json::json!({}),
+                &test_ctx(),
+            )
             .await
             .unwrap();
 

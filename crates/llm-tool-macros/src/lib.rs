@@ -5,9 +5,9 @@
 //! implementation.
 //!
 //! With the `prompt-templates` feature enabled, tool descriptions can be
-//! loaded from `.tmpl.md` template files via `template = "..."`, and tool
+//! loaded from `.tmpl.md` template files via `prompt_file = "..."`, and tool
 //! responses can be auto-rendered through templates via
-//! `response_template = "..."`.
+//! `response_file = "..."`.
 
 use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
@@ -33,18 +33,18 @@ use syn::{
 /// | Syntax | Cost | Feature |
 /// |--------|------|---------|
 /// | `#[llm_tool]` + doc comment | Zero (static `&str`) | — |
-/// | `#[llm_tool(description = "inline text")]` | Zero (static `&str`) | — |
-/// | `#[llm_tool(response_template = "...")]` | Runtime render | `prompt-templates` |
-/// | `#[llm_tool(template = "tools/x.tmpl.md")]` | Zero (compiled) | `prompt-templates` |
-/// | `#[llm_tool(template = "...", params(k = "v"))]` | Zero (compiled) | `prompt-templates` |
-/// | `#[llm_tool(template = "...", context = fn)]` | Runtime `Cow::Owned` | `prompt-templates` |
+/// | `#[llm_tool(prompt = "inline text")]` | Zero (static `&str`) | — |
+/// | `#[llm_tool(response_file = "...")]` | Runtime render | `prompt-templates` |
+/// | `#[llm_tool(prompt_file = "tools/x.tmpl.md")]` | Zero (compiled) | `prompt-templates` |
+/// | `#[llm_tool(prompt_file = "...", params(k = "v"))]` | Zero (compiled) | `prompt-templates` |
+/// | `#[llm_tool(prompt_file = "...", context = fn)]` | Runtime `Cow::Owned` | `prompt-templates` |
 ///
 /// ## Inline description
 ///
 /// Override or replace the doc comment with an inline string:
 ///
 /// ```text
-/// #[llm_tool(description = "Get the current weather for a city.")]
+/// #[llm_tool(prompt = "Get the current weather for a city.")]
 /// fn get_weather(/* … */) -> Result<String, ToolError> { /* … */ }
 /// ```
 ///
@@ -53,14 +53,14 @@ use syn::{
 /// Load the description from a `.tmpl.md` file:
 ///
 /// ```text
-/// #[llm_tool(template = "tools/weather.tmpl.md")]
+/// #[llm_tool(prompt_file = "tools/weather.tmpl.md")]
 /// fn get_weather(/* … */) -> Result<String, ToolError> { /* … */ }
 /// ```
 ///
 /// For templates with variables, provide **compile-time** key-value pairs:
 ///
 /// ```text
-/// #[llm_tool(template = "tools/weather.tmpl.md", params(api = "v3", env = "prod"))]
+/// #[llm_tool(prompt_file = "tools/weather.tmpl.md", params(api = "v3", env = "prod"))]
 /// fn get_weather(/* … */) -> Result<String, ToolError> { /* … */ }
 /// ```
 ///
@@ -71,7 +71,7 @@ use syn::{
 /// For **runtime** context (e.g. values from config), provide a context function:
 ///
 /// ```text
-/// #[llm_tool(template = "tools/weather.tmpl.md", context = build_ctx)]
+/// #[llm_tool(prompt_file = "tools/weather.tmpl.md", context = build_ctx)]
 /// fn get_weather(/* … */) -> Result<String, ToolError> { /* … */ }
 /// ```
 ///
@@ -85,7 +85,7 @@ use syn::{
 ///
 /// # Response templates
 ///
-/// When `response_template = "path/to/response.tmpl.md"` is provided, the
+/// When `response_file = "path/to/response.tmpl.md"` is provided, the
 /// tool's return value (`T: Serialize`) is used to build a template context
 /// via `Context::from_serialize`, rendered through the template, and returned
 /// as `ToolOutput`. The struct is also attached as metadata.
@@ -120,18 +120,18 @@ pub fn llm_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Parsed `#[llm_tool(...)]` attribute.
 ///
 /// Supports:
-/// - `description = "inline text"` — static inline description
-/// - `template = "path.tmpl.md"` — template file (requires `prompt-templates`)
+/// - `prompt = "inline text"` — static inline description
+/// - `prompt_file = "path.tmpl.md"` — template file (requires `prompt-templates`)
 /// - `params(key = "value", ...)` — compile-time template variables
 /// - `context = path::to::fn` — runtime template context function
-/// - `response_template = "path.tmpl.md"` — response rendering template
+/// - `response_file = "path.tmpl.md"` — response rendering template
 struct ToolAttr {
-    /// Inline description string (mutually exclusive with `template_path`).
-    description_inline: Option<LitStr>,
-    /// Path to a `.tmpl.md` file (mutually exclusive with `description_inline`).
-    template_path: Option<LitStr>,
+    /// Inline description string (mutually exclusive with `prompt_file_path`).
+    prompt_inline: Option<LitStr>,
+    /// Path to a `.tmpl.md` file (mutually exclusive with `prompt_inline`).
+    prompt_file_path: Option<LitStr>,
     /// Path to a response `.tmpl.md` file for auto-rendering tool output.
-    response_template_path: Option<LitStr>,
+    response_file_path: Option<LitStr>,
     /// Compile-time key-value pairs for template rendering.
     /// Mutually exclusive with `context_fn`.
     #[cfg(feature = "prompt-templates")]
@@ -143,9 +143,9 @@ struct ToolAttr {
 
 impl syn::parse::Parse for ToolAttr {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let mut description_inline = None;
-        let mut template_path = None;
-        let mut response_template_path = None;
+        let mut prompt_inline = None;
+        let mut prompt_file_path = None;
+        let mut response_file_path = None;
         #[cfg(feature = "prompt-templates")]
         let mut inline_params = Vec::new();
         #[cfg(feature = "prompt-templates")]
@@ -158,15 +158,15 @@ impl syn::parse::Parse for ToolAttr {
 
         while !input.is_empty() {
             let ident: Ident = input.parse()?;
-            if ident == "description" {
+            if ident == "prompt" {
                 let _: Token![=] = input.parse()?;
-                description_inline = Some(input.parse::<LitStr>()?);
-            } else if ident == "template" {
+                prompt_inline = Some(input.parse::<LitStr>()?);
+            } else if ident == "prompt_file" {
                 let _: Token![=] = input.parse()?;
-                template_path = Some(input.parse::<LitStr>()?);
-            } else if ident == "response_template" {
+                prompt_file_path = Some(input.parse::<LitStr>()?);
+            } else if ident == "response_file" {
                 let _: Token![=] = input.parse()?;
-                response_template_path = Some(input.parse::<LitStr>()?);
+                response_file_path = Some(input.parse::<LitStr>()?);
             } else if ident == "params" {
                 let content;
                 syn::parenthesized!(content in input);
@@ -204,7 +204,7 @@ impl syn::parse::Parse for ToolAttr {
             } else {
                 return Err(syn::Error::new(
                     ident.span(),
-                    "expected `description`, `template`, `response_template`, \
+                    "expected `prompt`, `prompt_file`, `response_file`, \
                      `params`, or `context`",
                 ));
             }
@@ -218,26 +218,26 @@ impl syn::parse::Parse for ToolAttr {
         let (has_inline_params, has_context_fn) = (!inline_params.is_empty(), context_fn.is_some());
 
         validate_tool_attr(
-            description_inline.as_ref(),
-            template_path.as_ref(),
+            prompt_inline.as_ref(),
+            prompt_file_path.as_ref(),
             has_inline_params,
             has_context_fn,
         )?;
 
-        // Validate response_template requires prompt-templates feature.
+        // Validate response_file requires prompt-templates feature.
         #[cfg(not(feature = "prompt-templates"))]
-        if response_template_path.is_some() {
+        if response_file_path.is_some() {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
                 "the `prompt-templates` feature must be enabled to use \
-                 `response_template = \"...\"`",
+                 `response_file = \"...\"`",
             ));
         }
 
         Ok(Self {
-            description_inline,
-            template_path,
-            response_template_path,
+            prompt_inline,
+            prompt_file_path,
+            response_file_path,
             #[cfg(feature = "prompt-templates")]
             inline_params,
             #[cfg(feature = "prompt-templates")]
@@ -249,30 +249,30 @@ impl syn::parse::Parse for ToolAttr {
 /// Validate mutual-exclusion and presence constraints for parsed `#[llm_tool(...)]`
 /// attribute fields.
 fn validate_tool_attr(
-    description_inline: Option<&LitStr>,
-    template_path: Option<&LitStr>,
+    prompt_inline: Option<&LitStr>,
+    prompt_file_path: Option<&LitStr>,
     has_inline_params: bool,
     has_context_fn: bool,
 ) -> syn::Result<()> {
-    // Mutual exclusion: description vs template.
-    if description_inline.is_some() && template_path.is_some() {
+    // Mutual exclusion: prompt vs prompt_file.
+    if prompt_inline.is_some() && prompt_file_path.is_some() {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            "`description` and `template` are mutually exclusive",
+            "`prompt` and `prompt_file` are mutually exclusive",
         ));
     }
 
-    // params/context only make sense with template.
-    if template_path.is_none() && has_inline_params {
+    // params/context only make sense with prompt_file.
+    if prompt_file_path.is_none() && has_inline_params {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            "`params(...)` requires `template = \"...\"`",
+            "`params(...)` requires `prompt_file = \"...\"`",
         ));
     }
-    if template_path.is_none() && has_context_fn {
+    if prompt_file_path.is_none() && has_context_fn {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            "`context = ...` requires `template = \"...\"`",
+            "`context = ...` requires `prompt_file = \"...\"`",
         ));
     }
 
@@ -285,12 +285,14 @@ fn validate_tool_attr(
         ));
     }
 
-    // Must have at least description or template.
-    if description_inline.is_none() && template_path.is_none() {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "expected `description = \"...\"` or `template = \"...\"`",
-        ));
+    // Must have at least prompt or prompt_file (unless only response_file
+    // is set, in which case doc comments serve as the description).
+    if prompt_inline.is_none()
+        && prompt_file_path.is_none()
+        && !has_inline_params
+        && !has_context_fn
+    {
+        // This is fine — doc comments will be used as fallback.
     }
 
     Ok(())
@@ -414,7 +416,7 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
 
             #description_method
 
-            async fn call(&self, params: Self::Params, _ctx: &#crate_path::ToolContext) -> ::std::result::Result<#crate_path::ToolOutput, #crate_path::ToolError> {
+            async fn call(&self, params: Self::Params, _ctx: &#crate_path::ToolContext) -> ::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError> {
                 // Import the fallback trait so `Wrap<T>::__convert()` resolves
                 // for `T: Serialize` types that lack an inherent `__convert`.
                 use #crate_path::__private::SerializeFallback as _;
@@ -447,27 +449,9 @@ struct DescriptionInfo {
 /// Resolve the tool description from attribute or doc comments.
 fn resolve_description(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<DescriptionInfo> {
     match attr {
-        // No attribute — use doc comment.
-        None => {
-            let desc = extract_doc_string(&func.attrs);
-            if desc.is_empty() {
-                return Err(syn::Error::new_spanned(
-                    &func.sig.ident,
-                    "#[llm_tool] functions must have a doc comment \
-                     (used as the tool description), or use \
-                     #[llm_tool(description = \"...\")]",
-                ));
-            }
-            Ok(DescriptionInfo {
-                static_description: desc,
-                helper_tokens: quote! {},
-                description_method: None,
-                dep_tracking: quote! {},
-            })
-        }
-        // Inline description string.
+        // Inline prompt string.
         Some(ToolAttr {
-            description_inline: Some(desc),
+            prompt_inline: Some(desc),
             ..
         }) => Ok(DescriptionInfo {
             static_description: desc.value(),
@@ -478,15 +462,28 @@ fn resolve_description(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<De
         // Template file.
         Some(
             tool_attr @ ToolAttr {
-                template_path: Some(_),
+                prompt_file_path: Some(_),
                 ..
             },
         ) => resolve_template_description(tool_attr),
-        // Should be unreachable (parser validates at least one is set).
-        _ => Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "expected `description = \"...\"` or `template = \"...\"`",
-        )),
+        // No attribute, or attribute with only response_file — use doc comment.
+        _ => {
+            let desc = extract_doc_string(&func.attrs);
+            if desc.is_empty() {
+                return Err(syn::Error::new_spanned(
+                    &func.sig.ident,
+                    "#[llm_tool] functions must have a doc comment \
+                     (used as the tool description), or use \
+                     #[llm_tool(prompt = \"...\")]",
+                ));
+            }
+            Ok(DescriptionInfo {
+                static_description: desc,
+                helper_tokens: quote! {},
+                description_method: None,
+                dep_tracking: quote! {},
+            })
+        }
     }
 }
 
@@ -502,13 +499,13 @@ fn resolve_template_description(attr: &ToolAttr) -> syn::Result<DescriptionInfo>
     #[cfg(not(feature = "prompt-templates"))]
     {
         let span = attr
-            .template_path
+            .prompt_file_path
             .as_ref()
             .map_or(proc_macro2::Span::call_site(), LitStr::span);
         Err(syn::Error::new(
             span,
             "the `prompt-templates` feature must be enabled to use \
-             `#[llm_tool(template = \"...\")]`. \
+             `#[llm_tool(prompt_file = \"...\")]`. \
              Add `features = [\"prompt-templates\"]` to your llm-tool dependency.",
         ))
     }
@@ -526,9 +523,9 @@ fn resolve_template_description(attr: &ToolAttr) -> syn::Result<DescriptionInfo>
 #[cfg(feature = "prompt-templates")]
 fn resolve_template_description_impl(attr: &ToolAttr) -> syn::Result<DescriptionInfo> {
     let template_lit = attr
-        .template_path
+        .prompt_file_path
         .as_ref()
-        .expect("template_path validated");
+        .expect("prompt_file_path validated");
     let rel_path = template_lit.value();
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let full_path = std::path::Path::new(&manifest_dir).join(&rel_path);
@@ -639,17 +636,20 @@ fn resolve_context_description(
     // Generate LazyLock inside description() to avoid name collisions
     // when multiple dynamic-description tools exist in the same module.
     let description_method = quote! {
-        fn description(&self) -> ::std::borrow::Cow<'static, str> {
-            static TEMPLATE: ::std::sync::LazyLock<::llm_tool::__prompt_templates::Template> =
-                ::std::sync::LazyLock::new(|| {
+        fn description(&self) -> ::llm_tool::__private::Cow<'static, str> {
+            static TEMPLATE: ::llm_tool::__private::Lazy<::llm_tool::__prompt_templates::Template> =
+                ::llm_tool::__private::Lazy::new(|| {
                     ::llm_tool::__prompt_templates::Template::from_source(
                         include_str!(#path_str)
                     ).expect("Valid template (verified at compile time)")
                 });
             let ctx = #context_fn(self);
-            let rendered = TEMPLATE.render(&ctx)
+            let rendered = TEMPLATE.render_with(
+                &ctx,
+                ::llm_tool::__prompt_templates::RenderOptions::default().allow_extra(true),
+            )
                 .expect("Failed to render tool description template");
-            ::std::borrow::Cow::Owned(rendered)
+            ::llm_tool::__private::Cow::Owned(rendered)
         }
     };
 
@@ -792,21 +792,21 @@ fn build_body_tokens(
         ReturnInfo::ResultType { ok_type, err_type } => {
             let inner = if is_async {
                 quote! {
-                    let __r: ::std::result::Result<#ok_type, #err_type> = async move {
+                    let __r: ::core::result::Result<#ok_type, #err_type> = async move {
                         #( #body_stmts )*
                     }.await;
                 }
             } else {
                 quote! {
-                    let __r: ::std::result::Result<#ok_type, #err_type> = (|| { #( #body_stmts )* })();
+                    let __r: ::core::result::Result<#ok_type, #err_type> = (|| { #( #body_stmts )* })();
                 }
             };
             let ok_branch = build_ok_branch(crate_path, response_info);
             quote! {
                 #inner
                 match __r {
-                    ::std::result::Result::Ok(__v) => { #ok_branch },
-                    ::std::result::Result::Err(__e) => ::std::result::Result::Err(::std::convert::Into::into(__e)),
+                    ::core::result::Result::Ok(__v) => { #ok_branch },
+                    ::core::result::Result::Err(__e) => ::core::result::Result::Err(::core::convert::Into::into(__e)),
                 }
             }
         }
@@ -867,13 +867,13 @@ impl Default for ResponseTemplateInfo {
 
 /// Resolve response template from the tool attribute.
 ///
-/// When `response_template = "..."` is set (and `prompt-templates` feature is
+/// When `response_file = "..."` is set (and `prompt-templates` feature is
 /// enabled), reads the template file at compile time, validates it, and
-/// generates a `LazyLock`-based renderer that converts the tool's return
+/// generates a `Lazy`-based renderer that converts the tool's return
 /// value (any `T: Serialize`) into rendered text.
 fn resolve_response_template(attr: Option<&ToolAttr>) -> syn::Result<ResponseTemplateInfo> {
     let Some(ToolAttr {
-        response_template_path: Some(response_path),
+        response_file_path: Some(response_path),
         ..
     }) = attr
     else {
@@ -885,7 +885,7 @@ fn resolve_response_template(attr: Option<&ToolAttr>) -> syn::Result<ResponseTem
         Err(syn::Error::new(
             response_path.span(),
             "the `prompt-templates` feature must be enabled to use \
-             `response_template = \"...\"`",
+             `response_file = \"...\"`",
         ))
     }
 
@@ -926,8 +926,8 @@ fn resolve_response_template_impl(response_path: &LitStr) -> syn::Result<Respons
 
     let render_tokens = quote! {
         {
-            static __RESPONSE_TMPL: ::std::sync::LazyLock<::llm_tool::__prompt_templates::Template> =
-                ::std::sync::LazyLock::new(|| {
+            static __RESPONSE_TMPL: ::llm_tool::__private::Lazy<::llm_tool::__prompt_templates::Template> =
+                ::llm_tool::__private::Lazy::new(|| {
                     ::llm_tool::__prompt_templates::Template::from_source(
                         include_str!(#path_str)
                     ).expect("valid response template (verified at compile time)")

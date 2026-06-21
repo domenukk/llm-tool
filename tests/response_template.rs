@@ -18,8 +18,8 @@ struct WeatherResponse {
 }
 
 #[llm_tool(
-    description = "Get the weather for a city.",
-    response_template = "tools/weather_response.tmpl.md"
+    prompt = "Get the weather for a city.",
+    response_file = "tools/weather_response.tmpl.md"
 )]
 fn get_weather_templated(
     /// The city to get weather for.

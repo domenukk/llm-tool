@@ -1,6 +1,7 @@
 //! Strongly-typed Rust tool trait and type-erasure machinery.
 
-use std::{borrow::Cow, future::Future, pin::Pin};
+use alloc::{borrow::Cow, boxed::Box, format, string::ToString};
+use core::{future::Future, pin::Pin};
 
 use super::types::{ToolContext, ToolDefinition, ToolError, ToolOutput};
 
@@ -90,13 +91,13 @@ pub trait RustTool: Send + Sync {
         &self,
         params: Self::Params,
         ctx: &ToolContext,
-    ) -> impl std::future::Future<Output = Result<ToolOutput, ToolError>> + Send;
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send;
 }
 
 /// Build a [`ToolDefinition`] from any [`RustTool`] implementor.
 ///
-/// The generated schema is sanitized to be compatible with the Go-based
-/// localharness, which expects `"type"` to always be a single string
+/// The generated schema is sanitized for broad compatibility with LLM
+/// SDKs that expect `"type"` to always be a single string
 /// (not the array form `["string", "null"]` that schemars emits for
 /// `Option<T>` fields).
 ///

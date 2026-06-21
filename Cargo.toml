@@ -1,6 +1,6 @@
 [package]
 name = "llm-tool"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Framework-agnostic Rust tool definitions for LLM agents"
@@ -22,19 +22,24 @@ all = { level = "deny", priority = -1 }
 warnings = "deny"
 
 [features]
-default = []
-# Enable `#[llm_tool(description = "path.tmpl.md")]` for template-based
-# tool descriptions. Requires `prompt-templates` as a direct dependency
-# for runtime context types (`Context`, `Template`).
-prompt-templates = ["dep:prompt-templates", "llm-tool-macros/prompt-templates"]
+default = ["std"]
+std = ["serde_json/std", "serde/std", "schemars/std", "hashbrown/default"]
+# Enable `#[llm_tool(prompt_file = "path.tmpl.md")]` or
+# `#[llm_tool(response_file = "path.tmpl.md")]` for template-based
+# tool descriptions and response rendering. Requires `prompt-templates`
+# as a direct dependency for runtime context types (`Context`, `Template`).
+prompt-templates = ["dep:prompt-templates", "dep:prompt-templates-macros", "llm-tool-macros/prompt-templates"]
 
 [dependencies]
-llm-tool-macros = { path = "crates/llm-tool-macros", version = "0.1.4" }
-prompt-templates = { version = "0.1.4", optional = true }
-schemars = "0.8"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tracing = "0.1"
+llm-tool-macros = { path = "crates/llm-tool-macros", version = "0.2.0" }
+prompt-templates = { path = "../prompt-templates/crates/prompt-templates", optional = true }
+prompt-templates-macros = { path = "../prompt-templates/crates/prompt-templates-macros", optional = true, default-features = false, features = ["serde"] }
+hashbrown = { version = "0.15", default-features = false, features = ["allocator-api2", "default-hasher"] }
+schemars = { version = "1", default-features = false, features = ["derive"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+spin = { version = "0.9", default-features = false, features = ["rwlock", "lazy"] }
+tracing = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "sync", "fs"] }

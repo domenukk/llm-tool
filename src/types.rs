@@ -1,18 +1,23 @@
-//! Custom tool registration for the Antigravity SDK bridge.
+//! Core types for `llm-tool`: tool output, errors, context, and definitions.
 //!
-//! Defines Rust-side tool metadata and a registry that tracks tools by name.
-//! The actual Python wrapping (converting Rust async fns into Python callables)
-//! requires the Python runtime and is gated behind integration tests.
+//! Defines the types that tools produce ([`ToolOutput`], [`ToolError`]),
+//! the execution context ([`ToolContext`]) shared across tool calls, and
+//! the [`ToolDefinition`] metadata sent to models.
 
-use std::{
-    any::{Any, TypeId},
-    collections::HashMap,
-    sync::{Arc, RwLock},
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    format,
+    string::{String, ToString},
+    sync::Arc,
 };
+use core::any::{Any, TypeId};
 
 use serde::{Deserialize, Serialize};
 
-/// Context passed to Rust tools during dispatch, mirroring the Python SDK's `ToolContext`.
+use crate::compat::{HashMap, RwLock, read_lock, write_lock};
+
+/// Context passed to Rust tools during dispatch.
 ///
 /// Provides access to the current conversation ID, a shared key-value state
 /// store that persists across tool calls within the same agent turn, and an
@@ -109,7 +114,7 @@ impl ToolContext {
     /// returns `default`. See the [struct-level docs](Self) for rationale.
     #[must_use]
     pub fn get_state(&self, key: &str, default: serde_json::Value) -> serde_json::Value {
-        match self.state.read() {
+        match read_lock(&self.state) {
             Ok(guard) => guard.get(key).cloned().unwrap_or(default),
             Err(e) => {
                 tracing::warn!(key, error = %e, "ToolContext::get_state: lock poisoned, returning default");
@@ -129,7 +134,7 @@ impl ToolContext {
     /// Returns [`ToolError`]
     /// if the lock is poisoned.
     pub fn set_state(&self, key: &str, value: serde_json::Value) -> Result<(), ToolError> {
-        match self.state.write() {
+        match write_lock(&self.state) {
             Ok(mut guard) => {
                 guard.insert(key.to_owned(), value);
                 Ok(())
@@ -157,10 +162,7 @@ impl ToolContext {
     ///
     /// Panics if the extensions `RwLock` is poisoned (indicates a prior panic).
     pub fn set_ext<T: Send + Sync + 'static>(&self, value: T) {
-        let mut exts = self
-            .extensions
-            .write()
-            .expect("ToolContext extensions lock poisoned");
+        let mut exts = write_lock(&self.extensions).expect("ToolContext extensions lock poisoned");
         exts.insert(TypeId::of::<T>(), Box::new(value));
     }
 
@@ -174,10 +176,7 @@ impl ToolContext {
     /// Panics if the extensions `RwLock` is poisoned (indicates a prior panic).
     #[must_use]
     pub fn get_ext<T: Clone + Send + Sync + 'static>(&self) -> Option<T> {
-        let exts = self
-            .extensions
-            .read()
-            .expect("ToolContext extensions lock poisoned");
+        let exts = read_lock(&self.extensions).expect("ToolContext extensions lock poisoned");
         exts.get(&TypeId::of::<T>())
             .and_then(|v| v.downcast_ref::<T>())
             .cloned()
@@ -274,7 +273,7 @@ pub struct ToolOutput {
     content: String,
     /// Structured metadata for hooks / policies / logging.
     /// NOT sent to the model.
-    metadata: std::collections::HashMap<String, serde_json::Value>,
+    metadata: HashMap<String, serde_json::Value>,
 }
 
 impl ToolOutput {
@@ -282,7 +281,7 @@ impl ToolOutput {
     pub fn new(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
-            metadata: std::collections::HashMap::new(),
+            metadata: HashMap::new(),
         }
     }
 
@@ -441,13 +440,13 @@ impl ToolOutput {
 
     /// The structured metadata map.
     #[must_use]
-    pub fn metadata(&self) -> &std::collections::HashMap<String, serde_json::Value> {
+    pub fn metadata(&self) -> &HashMap<String, serde_json::Value> {
         &self.metadata
     }
 }
 
-impl std::fmt::Display for ToolOutput {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ToolOutput {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(&self.content)
     }
 }
@@ -582,7 +581,7 @@ pub struct ToolError {
     pub message: String,
     /// Structured metadata for hooks / policies / logging.
     /// NOT sent to the model.
-    metadata: std::collections::HashMap<String, serde_json::Value>,
+    metadata: HashMap<String, serde_json::Value>,
 }
 
 impl ToolError {
@@ -590,7 +589,7 @@ impl ToolError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            metadata: std::collections::HashMap::new(),
+            metadata: HashMap::new(),
         }
     }
 
@@ -634,18 +633,18 @@ impl ToolError {
 
     /// The structured metadata map.
     #[must_use]
-    pub fn metadata(&self) -> &std::collections::HashMap<String, serde_json::Value> {
+    pub fn metadata(&self) -> &HashMap<String, serde_json::Value> {
         &self.metadata
     }
 }
 
-impl std::fmt::Display for ToolError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ToolError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.message)
     }
 }
 
-impl std::error::Error for ToolError {}
+impl core::error::Error for ToolError {}
 
 impl From<String> for ToolError {
     fn from(message: String) -> Self {
@@ -659,6 +658,7 @@ impl From<&str> for ToolError {
     }
 }
 
+#[cfg(feature = "std")]
 impl From<std::io::Error> for ToolError {
     fn from(e: std::io::Error) -> Self {
         Self::new(e.to_string())
@@ -673,14 +673,14 @@ impl From<serde_json::Error> for ToolError {
     }
 }
 
-impl From<Box<dyn std::error::Error + Send + Sync>> for ToolError {
-    fn from(e: Box<dyn std::error::Error + Send + Sync>) -> Self {
+impl From<Box<dyn core::error::Error + Send + Sync>> for ToolError {
+    fn from(e: Box<dyn core::error::Error + Send + Sync>) -> Self {
         Self::new(e.to_string())
     }
 }
 
-impl From<std::convert::Infallible> for ToolError {
-    fn from(never: std::convert::Infallible) -> Self {
+impl From<core::convert::Infallible> for ToolError {
+    fn from(never: core::convert::Infallible) -> Self {
         match never {}
     }
 }
@@ -704,6 +704,27 @@ pub fn __serialize_tool_result<T: serde::Serialize>(value: &T) -> Result<ToolOut
 /// **Not public API** — used only by the `#[llm_tool]` proc macro.
 #[doc(hidden)]
 pub mod __private {
+    // Re-exports for generated code to work in no_std contexts.
+    #[cfg(not(feature = "std"))]
+    pub use alloc::borrow::Cow;
+    #[cfg(not(feature = "std"))]
+    use alloc::{
+        format,
+        string::{String, ToString},
+    };
+    pub use core::{convert::Into, result::Result};
+    #[cfg(feature = "std")]
+    pub use std::borrow::Cow;
+    /// Lazy initializer — [`std::sync::LazyLock`] under `std`,
+    /// [`spin::Lazy`] under `no_std`.
+    #[cfg(feature = "std")]
+    pub use std::sync::LazyLock as Lazy;
+
+    /// Lazy initializer — [`std::sync::LazyLock`] under `std`,
+    /// [`spin::Lazy`] under `no_std`.
+    #[cfg(not(feature = "std"))]
+    pub use spin::Lazy;
+
     use super::{Json, ToolError, ToolOutput};
 
     /// Wrapper enabling compile-time method dispatch for tool output conversion.

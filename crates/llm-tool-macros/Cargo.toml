@@ -1,6 +1,6 @@
 [package]
 name = "llm-tool-macros"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Proc macros for llm-tool (#[llm_tool] attribute)"
@@ -15,7 +15,7 @@ proc-macro = true
 
 [features]
 default = []
-# Enables compile-time template parsing for `description = "..."` attributes.
+# Enables compile-time template parsing for `prompt_file = "..."` attributes.
 prompt-templates = ["dep:prompt-templates"]
 
 [dependencies]
