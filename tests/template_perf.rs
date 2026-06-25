@@ -3,9 +3,8 @@
 //! Run with: `cargo test --features prompt-templates --release -- perf --nocapture`
 
 #![cfg(feature = "prompt-templates")]
-#![allow(clippy::cast_precision_loss)] // Benchmark display values; precision loss is fine.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use llm_tool::{RustTool, ToolRegistry, llm_tool};
 
@@ -51,6 +50,11 @@ fn doc_comment_tool(
 
 const ITERATIONS: u32 = 100_000;
 
+/// Convert a duration to nanoseconds-per-call without `as f64` precision loss.
+fn ns_per_call(elapsed: Duration, iterations: u32) -> f64 {
+    elapsed.as_secs_f64() * 1e9 / f64::from(iterations)
+}
+
 #[test]
 fn perf_description_methods() {
     let static_tool = StaticTool;
@@ -85,17 +89,17 @@ fn perf_description_methods() {
     println!(
         "  Doc comment (baseline): {:>8.2?}  ({:.0} ns/call)",
         doc_elapsed,
-        doc_elapsed.as_nanos() as f64 / f64::from(ITERATIONS)
+        ns_per_call(doc_elapsed, ITERATIONS)
     );
     println!(
         "  Static template:        {:>8.2?}  ({:.0} ns/call)",
         static_elapsed,
-        static_elapsed.as_nanos() as f64 / f64::from(ITERATIONS)
+        ns_per_call(static_elapsed, ITERATIONS)
     );
     println!(
         "  Dynamic template:       {:>8.2?}  ({:.0} ns/call)",
         dynamic_elapsed,
-        dynamic_elapsed.as_nanos() as f64 / f64::from(ITERATIONS)
+        ns_per_call(dynamic_elapsed, ITERATIONS)
     );
 
     // Also benchmark registry definition generation
@@ -112,7 +116,7 @@ fn perf_description_methods() {
     println!(
         "  definitions() x1000:    {:>8.2?}  ({:.0} µs/call)",
         defn_elapsed,
-        defn_elapsed.as_micros() as f64 / 1000.0
+        defn_elapsed.as_secs_f64() * 1e6 / 1000.0
     );
     println!();
 }

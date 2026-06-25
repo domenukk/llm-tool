@@ -39,22 +39,25 @@ mod lock {
 }
 
 #[cfg(not(feature = "std"))]
-#[allow(clippy::unnecessary_wraps)] // Intentional: unified API with std path.
 mod lock {
     use spin::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-    /// Acquire a read lock — infallible under `spin`.
+    /// Acquire a read lock — infallible under `spin`, but returns `Result`
+    /// to maintain a unified API with the `std` path.
     pub(crate) fn read_lock<T>(
         lock: &RwLock<T>,
     ) -> Result<RwLockReadGuard<'_, T>, alloc::string::String> {
-        Ok(lock.read())
+        // Unified signature with std::sync::RwLock — spin locks never fail.
+        Result::<_, core::convert::Infallible>::Ok(lock.read()).map_err(|e| match e {})
     }
 
-    /// Acquire a write lock — infallible under `spin`.
+    /// Acquire a write lock — infallible under `spin`, but returns `Result`
+    /// to maintain a unified API with the `std` path.
     pub(crate) fn write_lock<T>(
         lock: &RwLock<T>,
     ) -> Result<RwLockWriteGuard<'_, T>, alloc::string::String> {
-        Ok(lock.write())
+        // Unified signature with std::sync::RwLock — spin locks never fail.
+        Result::<_, core::convert::Infallible>::Ok(lock.write()).map_err(|e| match e {})
     }
 }
 

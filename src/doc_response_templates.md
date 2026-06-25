@@ -71,10 +71,10 @@ assert_eq!(output.metadata()["temp_f"], 72);
 # });
 ```
 
-| Behaviour        | Detail                                                                          |
-| ---------------- | ------------------------------------------------------------------------------- |
-| Context building | Struct is serialized via `Context::from_serialize` — all fields become vars.    |
-| Template caching | Parsed once at startup via `LazyLock`, zero overhead on subsequent calls.       |
+| Behaviour        | Detail                                                                           |
+| ---------------- | -------------------------------------------------------------------------------- |
+| Context building | Struct is serialized via `Context::from_serialize` — all fields become vars.     |
+| Template caching | Parsed once at startup via `LazyLock`, zero overhead on subsequent calls.        |
 | Metadata         | The full struct is attached as `ToolOutput` metadata for hooks and logging.      |
-| Compile-time     | Missing template files and syntax errors are caught during `cargo build`.       |
-| Combinable       | Works with `/// doc comments` or `prompt_file = "..."` for the tool description.|
+| Compile-time     | Missing template files and syntax errors are caught during `cargo build`.        |
+| Combinable       | Works with `/// doc comments` or `prompt_file = "..."` for the tool description. |

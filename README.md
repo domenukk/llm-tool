@@ -399,22 +399,22 @@ fn get_weather(
 }
 ```
 
-| Attribute form                      | Cost    | Feature            |
-| ----------------------------------- | ------- | ------------------ |
-| `#[llm_tool]` + doc comment              | Zero    | —                  |
-| `prompt = "inline text"`                 | Zero    | —                  |
-| `prompt_file = "path.tmpl.md"`           | Zero    | `prompt-templates` |
-| `prompt_file = "...", params(k = "v")`   | Zero    | `prompt-templates` |
-| `prompt_file = "...", context = fn`      | Runtime | `prompt-templates` |
+| Attribute form                         | Cost    | Feature            |
+| -------------------------------------- | ------- | ------------------ |
+| `#[llm_tool]` + doc comment            | Zero    | —                  |
+| `prompt = "inline text"`               | Zero    | —                  |
+| `prompt_file = "path.tmpl.md"`         | Zero    | `prompt-templates` |
+| `prompt_file = "...", params(k = "v")` | Zero    | `prompt-templates` |
+| `prompt_file = "...", context = fn`    | Runtime | `prompt-templates` |
 
-| Behaviour        | Detail                                                                                                         |
-| ---------------- | -------------------------------------------------------------------------------------------------------------- |
-| Context receiver | The context function receives `&Self` (the tool struct) and returns a `prompt_templates::Context`.             |
-| Rendering        | `description()` renders the template at runtime with the provided context.                                     |
-| Caching          | Templates are parsed once (via `LazyLock`) and cached for zero-cost repeated calls.                            |
-| Missing params   | If the template declares parameters but neither `params(...)` nor `context = ...` is provided, compile error.  |
-| Mutual exclusion | `params(...)` and `context = ...` are mutually exclusive. `prompt` and `prompt_file` are mutually exclusive.   |
-| Fallback const   | The `DESCRIPTION` const still holds the raw template body (or rendered text) as a fallback.                    |
+| Behaviour        | Detail                                                                                                        |
+| ---------------- | ------------------------------------------------------------------------------------------------------------- |
+| Context receiver | The context function receives `&Self` (the tool struct) and returns a `prompt_templates::Context`.            |
+| Rendering        | `description()` renders the template at runtime with the provided context.                                    |
+| Caching          | Templates are parsed once (via `LazyLock`) and cached for zero-cost repeated calls.                           |
+| Missing params   | If the template declares parameters but neither `params(...)` nor `context = ...` is provided, compile error. |
+| Mutual exclusion | `params(...)` and `context = ...` are mutually exclusive. `prompt` and `prompt_file` are mutually exclusive.  |
+| Fallback const   | The `DESCRIPTION` const still holds the raw template body (or rendered text) as a fallback.                   |
 
 #### Why use template descriptions?
 

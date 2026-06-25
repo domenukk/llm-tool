@@ -60,7 +60,8 @@ use crate::compat::{HashMap, RwLock, read_lock, write_lock};
 /// let ctx = ToolContext::new(None);
 /// ctx.set_ext(Arc::new(MyState {
 ///     session_dir: "/tmp".into(),
-/// }));
+/// }))
+/// .unwrap();
 ///
 /// let state: Arc<MyState> = ctx.get_ext::<Arc<MyState>>().unwrap();
 /// assert_eq!(state.session_dir, "/tmp");
@@ -158,28 +159,42 @@ impl ToolContext {
     /// Values are keyed by `TypeId`, so each concrete type can only appear
     /// once. Typically used to store `Arc<T>` for shared, cloneable access.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the extensions `RwLock` is poisoned (indicates a prior panic).
-    pub fn set_ext<T: Send + Sync + 'static>(&self, value: T) {
-        let mut exts = write_lock(&self.extensions).expect("ToolContext extensions lock poisoned");
-        exts.insert(TypeId::of::<T>(), Box::new(value));
+    /// Returns [`ToolError`] if the lock is poisoned.
+    pub fn set_ext<T: Send + Sync + 'static>(&self, value: T) -> Result<(), ToolError> {
+        match write_lock(&self.extensions) {
+            Ok(mut exts) => {
+                exts.insert(TypeId::of::<T>(), Box::new(value));
+                Ok(())
+            }
+            Err(e) => {
+                let msg = format!(
+                    "ToolContext::set_ext: lock poisoned for type '{}': {e}",
+                    core::any::type_name::<T>()
+                );
+                tracing::warn!("{msg}");
+                Err(ToolError::new(msg))
+            }
+        }
     }
 
     /// Retrieve a clone of a typed value from the extensions map.
     ///
     /// Returns `None` if no value of type `T` has been stored via
     /// [`set_ext`](Self::set_ext).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the extensions `RwLock` is poisoned (indicates a prior panic).
     #[must_use]
     pub fn get_ext<T: Clone + Send + Sync + 'static>(&self) -> Option<T> {
-        let exts = read_lock(&self.extensions).expect("ToolContext extensions lock poisoned");
-        exts.get(&TypeId::of::<T>())
-            .and_then(|v| v.downcast_ref::<T>())
-            .cloned()
+        match read_lock(&self.extensions) {
+            Ok(exts) => exts
+                .get(&TypeId::of::<T>())
+                .and_then(|v| v.downcast_ref::<T>())
+                .cloned(),
+            Err(e) => {
+                tracing::warn!(error = %e, "ToolContext::get_ext: lock poisoned, returning None");
+                None
+            }
+        }
     }
 }
 
@@ -429,6 +444,12 @@ impl ToolOutput {
     /// The text content sent back to the model.
     #[must_use]
     pub fn content(&self) -> &str {
+        &self.content
+    }
+
+    /// Get the text content returned to the model (alias for `content()`).
+    #[must_use]
+    pub fn text(&self) -> &str {
         &self.content
     }
 
@@ -685,15 +706,6 @@ impl From<core::convert::Infallible> for ToolError {
     }
 }
 
-/// Serialize a tool's return value to a JSON string.
-///
-/// **Deprecated**: Use [`ToolOutput::json()`] instead.
-#[doc(hidden)]
-#[deprecated(since = "0.2.0", note = "Use ToolOutput::json() instead")]
-pub fn __serialize_tool_result<T: serde::Serialize>(value: &T) -> Result<ToolOutput, ToolError> {
-    ToolOutput::json(value)
-}
-
 /// Compile-time dispatch for converting tool return values into [`ToolOutput`].
 ///
 /// Uses the "autoref specialization" pattern: the compiler checks inherent
@@ -721,9 +733,9 @@ pub mod __private {
     pub use std::sync::LazyLock as Lazy;
 
     /// Lazy initializer — [`std::sync::LazyLock`] under `std`,
-    /// [`spin::Lazy`] under `no_std`.
+    /// [`spin::LazyLock`] under `no_std`.
     #[cfg(not(feature = "std"))]
-    pub use spin::Lazy;
+    pub use spin::LazyLock as Lazy;
 
     use super::{Json, ToolError, ToolOutput};
 

@@ -8,13 +8,20 @@
 //! loaded from `.tmpl.md` template files via `prompt_file = "..."`, and tool
 //! responses can be auto-rendered through templates via
 //! `response_file = "..."`.
+#[cfg(feature = "prompt-templates")]
+mod response_struct_gen;
+#[cfg(feature = "prompt-templates")]
+mod template_codegen;
+#[cfg(feature = "prompt-templates")]
+mod template_compile;
 
 use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
+#[cfg(feature = "prompt-templates")]
+use syn::Ident;
 use syn::{
-    FnArg, GenericArgument, Ident, ItemFn, LitStr, Pat, PatType, PathArguments, Token, Type,
-    parse::ParseStream, parse_macro_input,
+    FnArg, GenericArgument, ItemFn, LitStr, Pat, PatType, PathArguments, Type, parse_macro_input,
 };
 
 /// Transforms a function into a `RustTool` implementation.
@@ -132,6 +139,8 @@ struct ToolAttr {
     prompt_file_path: Option<LitStr>,
     /// Path to a response `.tmpl.md` file for auto-rendering tool output.
     response_file_path: Option<LitStr>,
+    /// Inline response template string (mutually exclusive with `response_file_path`).
+    response_inline: Option<LitStr>,
     /// Compile-time key-value pairs for template rendering.
     /// Mutually exclusive with `context_fn`.
     #[cfg(feature = "prompt-templates")]
@@ -139,109 +148,138 @@ struct ToolAttr {
     /// Runtime context function (mutually exclusive with `inline_params`).
     #[cfg(feature = "prompt-templates")]
     context_fn: Option<syn::Path>,
+    has_inline_params: bool,
+    has_context_fn: bool,
+}
+
+#[derive(Default)]
+struct ToolAttrBuilder {
+    prompt_inline: Option<syn::LitStr>,
+    prompt_file_path: Option<syn::LitStr>,
+    response_file_path: Option<syn::LitStr>,
+    response_inline: Option<syn::LitStr>,
+    #[cfg(feature = "prompt-templates")]
+    inline_params: Vec<(syn::Ident, syn::LitStr)>,
+    #[cfg(feature = "prompt-templates")]
+    context_fn: Option<syn::Path>,
+    #[cfg(not(feature = "prompt-templates"))]
+    has_inline_params: bool,
+    #[cfg(not(feature = "prompt-templates"))]
+    has_context_fn: bool,
+}
+
+impl ToolAttrBuilder {
+    fn parse_single(&mut self, input: syn::parse::ParseStream) -> syn::Result<()> {
+        let ident: syn::Ident = input.parse()?;
+        if ident == "prompt" {
+            let _: syn::Token![=] = input.parse()?;
+            self.prompt_inline = Some(input.parse::<syn::LitStr>()?);
+        } else if ident == "prompt_file" {
+            let _: syn::Token![=] = input.parse()?;
+            self.prompt_file_path = Some(input.parse::<syn::LitStr>()?);
+        } else if ident == "response_file" {
+            let _: syn::Token![=] = input.parse()?;
+            self.response_file_path = Some(input.parse::<syn::LitStr>()?);
+        } else if ident == "response" {
+            let _: syn::Token![=] = input.parse()?;
+            self.response_inline = Some(input.parse::<syn::LitStr>()?);
+        } else if ident == "params" {
+            let content;
+            syn::parenthesized!(content in input);
+            while !content.is_empty() {
+                let key: syn::Ident = content.parse()?;
+                let _: syn::Token![=] = content.parse()?;
+                let value: syn::LitStr = content.parse()?;
+                #[cfg(feature = "prompt-templates")]
+                self.inline_params.push((key, value));
+                #[cfg(not(feature = "prompt-templates"))]
+                {
+                    drop(key);
+                    drop(value);
+                }
+                if !content.is_empty() {
+                    let _: syn::Token![,] = content.parse()?;
+                }
+            }
+            #[cfg(not(feature = "prompt-templates"))]
+            {
+                self.has_inline_params = true;
+            }
+        } else if ident == "context" {
+            let _: syn::Token![=] = input.parse()?;
+            #[cfg(feature = "prompt-templates")]
+            {
+                self.context_fn = Some(input.parse::<syn::Path>()?);
+            }
+            #[cfg(not(feature = "prompt-templates"))]
+            {
+                let _path: syn::Path = input.parse()?;
+                self.has_context_fn = true;
+            }
+        } else {
+            return Err(syn::Error::new(
+                ident.span(),
+                "expected `prompt`, `prompt_file`, `response`, `response_file`, `params`, or `context`",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl syn::parse::Parse for ToolAttr {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let mut prompt_inline = None;
-        let mut prompt_file_path = None;
-        let mut response_file_path = None;
-        #[cfg(feature = "prompt-templates")]
-        let mut inline_params = Vec::new();
-        #[cfg(feature = "prompt-templates")]
-        let mut context_fn = None;
-        // Track presence for validation even when not storing values.
-        #[cfg(not(feature = "prompt-templates"))]
-        let mut has_inline_params = false;
-        #[cfg(not(feature = "prompt-templates"))]
-        let mut has_context_fn = false;
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let mut builder = ToolAttrBuilder::default();
 
         while !input.is_empty() {
-            let ident: Ident = input.parse()?;
-            if ident == "prompt" {
-                let _: Token![=] = input.parse()?;
-                prompt_inline = Some(input.parse::<LitStr>()?);
-            } else if ident == "prompt_file" {
-                let _: Token![=] = input.parse()?;
-                prompt_file_path = Some(input.parse::<LitStr>()?);
-            } else if ident == "response_file" {
-                let _: Token![=] = input.parse()?;
-                response_file_path = Some(input.parse::<LitStr>()?);
-            } else if ident == "params" {
-                let content;
-                syn::parenthesized!(content in input);
-                while !content.is_empty() {
-                    let key: Ident = content.parse()?;
-                    let _: Token![=] = content.parse()?;
-                    let value: LitStr = content.parse()?;
-                    #[cfg(feature = "prompt-templates")]
-                    inline_params.push((key, value));
-                    // Suppress unused-variable warnings in the no-feature path.
-                    #[cfg(not(feature = "prompt-templates"))]
-                    {
-                        drop(key);
-                        drop(value);
-                    }
-                    if !content.is_empty() {
-                        let _: Token![,] = content.parse()?;
-                    }
-                }
-                #[cfg(not(feature = "prompt-templates"))]
-                {
-                    has_inline_params = true;
-                }
-            } else if ident == "context" {
-                let _: Token![=] = input.parse()?;
-                #[cfg(feature = "prompt-templates")]
-                {
-                    context_fn = Some(input.parse::<syn::Path>()?);
-                }
-                #[cfg(not(feature = "prompt-templates"))]
-                {
-                    let _path: syn::Path = input.parse()?;
-                    has_context_fn = true;
-                }
-            } else {
-                return Err(syn::Error::new(
-                    ident.span(),
-                    "expected `prompt`, `prompt_file`, `response_file`, \
-                     `params`, or `context`",
-                ));
-            }
-
+            builder.parse_single(input)?;
             if !input.is_empty() {
-                let _: Token![,] = input.parse()?;
+                let _: syn::Token![,] = input.parse()?;
             }
         }
 
         #[cfg(feature = "prompt-templates")]
-        let (has_inline_params, has_context_fn) = (!inline_params.is_empty(), context_fn.is_some());
+        let (has_inline_params, has_context_fn) = (
+            !builder.inline_params.is_empty(),
+            builder.context_fn.is_some(),
+        );
+        #[cfg(not(feature = "prompt-templates"))]
+        let (has_inline_params, has_context_fn) =
+            (builder.has_inline_params, builder.has_context_fn);
 
         validate_tool_attr(
-            prompt_inline.as_ref(),
-            prompt_file_path.as_ref(),
+            builder.prompt_inline.as_ref(),
+            builder.prompt_file_path.as_ref(),
             has_inline_params,
             has_context_fn,
         )?;
 
-        // Validate response_file requires prompt-templates feature.
-        #[cfg(not(feature = "prompt-templates"))]
-        if response_file_path.is_some() {
+        if builder.response_inline.is_some() && builder.response_file_path.is_some() {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
-                "the `prompt-templates` feature must be enabled to use \
-                 `response_file = \"...\"`",
+                "cannot specify both `response` and `response_file`",
+            ));
+        }
+
+        // Validate response_file requires prompt-templates feature.
+        #[cfg(not(feature = "prompt-templates"))]
+        if builder.response_file_path.is_some() || builder.response_inline.is_some() {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "the `prompt-templates` feature must be enabled to use `response = \"...\"` or `response_file = \"...\"`",
             ));
         }
 
         Ok(Self {
-            prompt_inline,
-            prompt_file_path,
-            response_file_path,
+            prompt_inline: builder.prompt_inline,
+            prompt_file_path: builder.prompt_file_path,
+            response_file_path: builder.response_file_path,
+            response_inline: builder.response_inline,
             #[cfg(feature = "prompt-templates")]
-            inline_params,
+            inline_params: builder.inline_params,
             #[cfg(feature = "prompt-templates")]
-            context_fn,
+            context_fn: builder.context_fn,
+            has_inline_params,
+            has_context_fn,
         })
     }
 }
@@ -335,7 +373,7 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
     } = resolve_description(func, attr)?;
 
     // Resolve response template (if provided).
-    let response_info = resolve_response_template(attr)?;
+    let response_info = resolve_response_template(attr, &struct_name, fn_name)?;
 
     // Extract parameters, separating ToolContext from regular params.
     let all_params = extract_params(func)?;
@@ -405,10 +443,8 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
         }
 
         #[doc = #struct_doc]
-        #[allow(dead_code)] // Constructed at runtime and used via Box<dyn ErasedTool>
         #vis struct #struct_name;
 
-        #[allow(dead_code)] // Methods called through trait-object dispatch (dyn ErasedTool)
         impl #crate_path::RustTool for #struct_name {
             type Params = #params_name;
             const NAME: &'static str = #tool_name_str;
@@ -449,16 +485,13 @@ struct DescriptionInfo {
 /// Resolve the tool description from attribute or doc comments.
 fn resolve_description(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<DescriptionInfo> {
     match attr {
-        // Inline prompt string.
-        Some(ToolAttr {
-            prompt_inline: Some(desc),
-            ..
-        }) => Ok(DescriptionInfo {
-            static_description: desc.value(),
-            helper_tokens: quote! {},
-            description_method: None,
-            dep_tracking: quote! {},
-        }),
+        // Inline prompt template or string.
+        Some(
+            tool_attr @ ToolAttr {
+                prompt_inline: Some(_),
+                ..
+            },
+        ) => resolve_inline_description(tool_attr),
         // Template file.
         Some(
             tool_attr @ ToolAttr {
@@ -487,14 +520,34 @@ fn resolve_description(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<De
     }
 }
 
+/// Resolve dynamic/static description from inline template string.
+fn resolve_inline_description(attr: &ToolAttr) -> syn::Result<DescriptionInfo> {
+    #[cfg(not(feature = "prompt-templates"))]
+    {
+        let span = attr
+            .prompt_inline
+            .as_ref()
+            .map_or(proc_macro2::Span::call_site(), LitStr::span);
+        if attr.has_inline_params || attr.has_context_fn {
+            return Err(syn::Error::new(
+                span,
+                "the `prompt-templates` feature must be enabled to use dynamic inline prompts",
+            ));
+        }
+        let desc = attr.prompt_inline.as_ref().unwrap().value();
+        Ok(DescriptionInfo {
+            static_description: desc,
+            helper_tokens: quote! {},
+            description_method: None,
+            dep_tracking: quote! {},
+        })
+    }
+
+    #[cfg(feature = "prompt-templates")]
+    resolve_inline_description_impl(attr)
+}
+
 /// Read a `.tmpl.md` template file and extract its body as the tool description.
-///
-/// Handles three sub-cases:
-/// 1. Static template (no declared variables) → `const DESCRIPTION`
-/// 2. Template + `params(...)` → compile-time render → `const DESCRIPTION`
-/// 3. Template + `context = fn` → runtime render via `description()` method
-///
-/// Without the `prompt-templates` feature: produces a compile error.
 fn resolve_template_description(attr: &ToolAttr) -> syn::Result<DescriptionInfo> {
     #[cfg(not(feature = "prompt-templates"))]
     {
@@ -577,15 +630,16 @@ fn resolve_template_description_impl(attr: &ToolAttr) -> syn::Result<Description
         )
     } else if has_context {
         // Case 3: Runtime context function.
-        resolve_context_description(
+        resolve_context_description(ResolveContextArgs {
             attr,
-            &rel_path,
+            rel_path: &rel_path,
             template_lit,
-            &body_str,
-            &path_str,
+            source: &source,
+            full_path: &full_path,
+            body_str: &body_str,
             has_declarations,
             dep_tracking,
-        )
+        })
     } else {
         // Template declares variables but neither params nor context provided.
         let declared: Vec<&str> = fm.declarations.iter().map(|d| d.name.as_str()).collect();
@@ -600,21 +654,124 @@ fn resolve_template_description_impl(attr: &ToolAttr) -> syn::Result<Description
     }
 }
 
+/// Implementation of inline template description resolution (feature-gated).
+#[cfg(feature = "prompt-templates")]
+fn resolve_inline_description_impl(attr: &ToolAttr) -> syn::Result<DescriptionInfo> {
+    let template_lit = attr
+        .prompt_inline
+        .as_ref()
+        .expect("prompt_inline validated");
+    let source = template_lit.value();
+    let trimmed = source.trim_start();
+    if !trimmed.starts_with("---") {
+        return Ok(DescriptionInfo {
+            static_description: source,
+            helper_tokens: quote! {},
+            description_method: None,
+            dep_tracking: quote! {},
+        });
+    }
+
+    let (fm, body) = prompt_templates::parse_frontmatter(&source)
+        .map_err(|e| syn::Error::new(template_lit.span(), format!("inline template error: {e}")))?;
+
+    let body_str = body.trim().to_string();
+
+    let has_params = attr.has_inline_params;
+    let has_context = attr.has_context_fn;
+    let has_declarations = !fm.declarations.is_empty();
+
+    if !has_declarations && !has_params && !has_context {
+        // Case 1: Static template — no variables, no params, no context.
+        Ok(DescriptionInfo {
+            static_description: body_str,
+            helper_tokens: quote! {},
+            description_method: None,
+            dep_tracking: quote! {},
+        })
+    } else if has_params {
+        // Case 2: Compile-time params — render at build time.
+        resolve_template_with_params(
+            attr,
+            &fm,
+            &source,
+            "<inline>",
+            template_lit.span(),
+            quote! {},
+        )
+    } else if has_context {
+        // Case 3: Runtime context function.
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        let base_dir = std::path::Path::new(&manifest_dir);
+        let ast = template_compile::compile_template_to_ast(&source, base_dir).map_err(|e| {
+            syn::Error::new(
+                template_lit.span(),
+                format!("inline template compilation error: {e}"),
+            )
+        })?;
+        let tmpl_tokens = template_codegen::codegen_template(&ast);
+
+        let context_fn = attr.context_fn.as_ref().unwrap();
+
+        let description_method = quote! {
+            fn description(&self) -> ::llm_tool::__private::Cow<'static, str> {
+                static TEMPLATE: ::llm_tool::__private::Lazy<::llm_tool::__prompt_templates::Template> =
+                    ::llm_tool::__private::Lazy::new(|| #tmpl_tokens);
+                let ctx = #context_fn(self);
+                let rendered = TEMPLATE.render_ctx(&ctx)
+                    .expect("Failed to render tool description template");
+                ::llm_tool::__private::Cow::Owned(rendered)
+            }
+        };
+
+        Ok(DescriptionInfo {
+            static_description: body_str.clone(),
+            helper_tokens: quote! {},
+            description_method: Some(description_method),
+            dep_tracking: quote! {},
+        })
+    } else {
+        let declared: Vec<&str> = fm.declarations.iter().map(|d| d.name.as_str()).collect();
+        Err(syn::Error::new(
+            template_lit.span(),
+            format!(
+                "inline template declares parameters ({}) but neither \
+                 `params(...)` nor `context = ...` was provided",
+                declared.join(", ")
+            ),
+        ))
+    }
+}
+
+#[cfg(feature = "prompt-templates")]
+struct ResolveContextArgs<'a> {
+    attr: &'a ToolAttr,
+    rel_path: &'a str,
+    template_lit: &'a LitStr,
+    source: &'a str,
+    full_path: &'a std::path::Path,
+    body_str: &'a str,
+    has_declarations: bool,
+    dep_tracking: proc_macro2::TokenStream,
+}
+
 /// Resolve a template description with a runtime context function.
 ///
 /// Generates a `description(&self)` method that uses `LazyLock` to parse
 /// the template once, then renders it with the user-provided context function
 /// on every call.
 #[cfg(feature = "prompt-templates")]
-fn resolve_context_description(
-    attr: &ToolAttr,
-    rel_path: &str,
-    template_lit: &LitStr,
-    body_str: &str,
-    path_str: &str,
-    has_declarations: bool,
-    dep_tracking: proc_macro2::TokenStream,
-) -> syn::Result<DescriptionInfo> {
+fn resolve_context_description(args: ResolveContextArgs<'_>) -> syn::Result<DescriptionInfo> {
+    let ResolveContextArgs {
+        attr,
+        rel_path,
+        template_lit,
+        source,
+        full_path,
+        body_str,
+        has_declarations,
+        dep_tracking,
+    } = args;
     let context_fn = attr.context_fn.as_ref().ok_or_else(|| {
         syn::Error::new(
             template_lit.span(),
@@ -633,28 +790,30 @@ fn resolve_context_description(
         ));
     }
 
+    let base_dir = full_path.parent().unwrap_or(std::path::Path::new("."));
+    let ast = template_compile::compile_template_to_ast(source, base_dir).map_err(|e| {
+        syn::Error::new(
+            template_lit.span(),
+            format!("template '{rel_path}' compilation error: {e}"),
+        )
+    })?;
+    let tmpl_tokens = template_codegen::codegen_template(&ast);
+
     // Generate LazyLock inside description() to avoid name collisions
     // when multiple dynamic-description tools exist in the same module.
     let description_method = quote! {
         fn description(&self) -> ::llm_tool::__private::Cow<'static, str> {
             static TEMPLATE: ::llm_tool::__private::Lazy<::llm_tool::__prompt_templates::Template> =
-                ::llm_tool::__private::Lazy::new(|| {
-                    ::llm_tool::__prompt_templates::Template::from_source(
-                        include_str!(#path_str)
-                    ).expect("Valid template (verified at compile time)")
-                });
+                ::llm_tool::__private::Lazy::new(|| #tmpl_tokens);
             let ctx = #context_fn(self);
-            let rendered = TEMPLATE.render_with(
-                &ctx,
-                ::llm_tool::__prompt_templates::RenderOptions::default().allow_extra(true),
-            )
+            let rendered = TEMPLATE.render_ctx(&ctx)
                 .expect("Failed to render tool description template");
             ::llm_tool::__private::Cow::Owned(rendered)
         }
     };
 
     Ok(DescriptionInfo {
-        static_description: body_str.to_owned(),
+        static_description: body_str.to_string(),
         helper_tokens: quote! {},
         description_method: Some(description_method),
         dep_tracking,
@@ -725,7 +884,7 @@ fn resolve_template_with_params(
     }
 
     let rendered = template
-        .render(&ctx)
+        .render_ctx(&ctx)
         .map_err(|e| syn::Error::new(span, format!("template '{rel_path}' render error: {e}")))?;
 
     Ok(DescriptionInfo {
@@ -865,37 +1024,52 @@ impl Default for ResponseTemplateInfo {
     }
 }
 
-/// Resolve response template from the tool attribute.
-///
-/// When `response_file = "..."` is set (and `prompt-templates` feature is
-/// enabled), reads the template file at compile time, validates it, and
-/// generates a `Lazy`-based renderer that converts the tool's return
-/// value (any `T: Serialize`) into rendered text.
-fn resolve_response_template(attr: Option<&ToolAttr>) -> syn::Result<ResponseTemplateInfo> {
-    let Some(ToolAttr {
-        response_file_path: Some(response_path),
-        ..
-    }) = attr
-    else {
+#[allow(unused_variables)]
+fn resolve_response_template(
+    attr: Option<&ToolAttr>,
+    struct_name: &syn::Ident,
+    fn_name: &syn::Ident,
+) -> syn::Result<ResponseTemplateInfo> {
+    let Some(attr) = attr else {
         return Ok(ResponseTemplateInfo::default());
     };
 
-    #[cfg(not(feature = "prompt-templates"))]
-    {
-        Err(syn::Error::new(
-            response_path.span(),
-            "the `prompt-templates` feature must be enabled to use \
-             `response_file = \"...\"`",
-        ))
+    if let Some(response_path) = &attr.response_file_path {
+        #[cfg(not(feature = "prompt-templates"))]
+        {
+            return Err(syn::Error::new(
+                response_path.span(),
+                "the `prompt-templates` feature must be enabled to use `response_file`",
+            ));
+        }
+        #[cfg(feature = "prompt-templates")]
+        {
+            return resolve_response_template_file(response_path, struct_name, fn_name);
+        }
     }
-
-    #[cfg(feature = "prompt-templates")]
-    resolve_response_template_impl(response_path)
+    if let Some(response_inline) = &attr.response_inline {
+        #[cfg(not(feature = "prompt-templates"))]
+        {
+            return Err(syn::Error::new(
+                response_inline.span(),
+                "the `prompt-templates` feature must be enabled to use `response`",
+            ));
+        }
+        #[cfg(feature = "prompt-templates")]
+        {
+            return resolve_response_template_inline(response_inline, struct_name, fn_name);
+        }
+    }
+    Ok(ResponseTemplateInfo::default())
 }
 
-/// Feature-gated implementation of response template resolution.
+/// Feature-gated implementation of response template resolution from file.
 #[cfg(feature = "prompt-templates")]
-fn resolve_response_template_impl(response_path: &LitStr) -> syn::Result<ResponseTemplateInfo> {
+fn resolve_response_template_file(
+    response_path: &LitStr,
+    struct_name: &syn::Ident,
+    fn_name: &syn::Ident,
+) -> syn::Result<ResponseTemplateInfo> {
     let rel_path = response_path.value();
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let full_path = std::path::Path::new(&manifest_dir).join(&rel_path);
@@ -912,31 +1086,37 @@ fn resolve_response_template_impl(response_path: &LitStr) -> syn::Result<Respons
         )
     })?;
 
-    // Parse to validate syntax at compile time.
-    prompt_templates::Template::from_source(&source).map_err(|e| {
-        syn::Error::new(
-            response_path.span(),
-            format!("response template '{rel_path}' parse error: {e}"),
-        )
-    })?;
-
     let dep_tracking = quote! {
         const _: &str = include_str!(#path_str);
     };
 
+    let (fm, _) = prompt_templates::parse_frontmatter(&source).map_err(|e| {
+        syn::Error::new(
+            response_path.span(),
+            format!("response template '{rel_path}' frontmatter error: {e}"),
+        )
+    })?;
+
+    let response_struct_name_str = format!("{struct_name}Response");
+    let generated_idents = response_struct_gen::collect_generated_type_names(
+        &response_struct_name_str,
+        &fm.declarations,
+    );
+
+    let response_struct_name = format_ident!("{}", response_struct_name_str);
+    let response_mod_name = format_ident!("__{}_response_mod", fn_name);
+
+    let helper_tokens = quote! {
+        ::llm_tool::__prompt_templates_macros::include_template!(
+            #path_str as #response_struct_name => #response_mod_name,
+            crate = ::llm_tool::__prompt_templates
+        );
+        pub use #response_mod_name::{ #( #generated_idents ),* };
+    };
+
     let render_tokens = quote! {
         {
-            static __RESPONSE_TMPL: ::llm_tool::__private::Lazy<::llm_tool::__prompt_templates::Template> =
-                ::llm_tool::__private::Lazy::new(|| {
-                    ::llm_tool::__prompt_templates::Template::from_source(
-                        include_str!(#path_str)
-                    ).expect("valid response template (verified at compile time)")
-                });
-            let __ctx = ::llm_tool::__prompt_templates::Context::from_serialize(&__v)
-                .map_err(|e| ::llm_tool::ToolError::new(
-                    format!("response template context error: {e}")
-                ))?;
-            let __rendered = __RESPONSE_TMPL.render(&__ctx)
+            let __rendered = #response_mod_name::template().render(&__v)
                 .map_err(|e| ::llm_tool::ToolError::new(
                     format!("response template render error: {e}")
                 ))?;
@@ -950,7 +1130,65 @@ fn resolve_response_template_impl(response_path: &LitStr) -> syn::Result<Respons
 
     Ok(ResponseTemplateInfo {
         dep_tracking,
-        helper_tokens: quote! {},
+        helper_tokens,
+        render_tokens: Some(render_tokens),
+    })
+}
+
+/// Feature-gated implementation of response template resolution from inline string.
+#[cfg(feature = "prompt-templates")]
+fn resolve_response_template_inline(
+    response_inline: &LitStr,
+    struct_name: &syn::Ident,
+    fn_name: &syn::Ident,
+) -> syn::Result<ResponseTemplateInfo> {
+    let source = response_inline.value();
+
+    // Validate the inline template parses at compile time.
+    let fm = match prompt_templates::parse_frontmatter(&source) {
+        Ok((fm, _)) => fm,
+        Err(e) => {
+            return Err(syn::Error::new(
+                response_inline.span(),
+                format!("inline response template error: {e}"),
+            ));
+        }
+    };
+
+    let response_struct_name_str = format!("{struct_name}Response");
+    let generated_idents = response_struct_gen::collect_generated_type_names(
+        &response_struct_name_str,
+        &fm.declarations,
+    );
+
+    let response_struct_name = format_ident!("{}", response_struct_name_str);
+    let response_mod_name = format_ident!("__{}_response_mod", fn_name);
+
+    let helper_tokens = quote! {
+        ::llm_tool::__prompt_templates_macros::template!(
+            #response_inline as #response_struct_name => #response_mod_name,
+            crate = ::llm_tool::__prompt_templates
+        );
+        pub use #response_mod_name::{ #( #generated_idents ),* };
+    };
+
+    let render_tokens = quote! {
+        {
+            let __rendered = #response_mod_name::template().render(&__v)
+                .map_err(|e| ::llm_tool::ToolError::new(
+                    format!("response template render error: {e}")
+                ))?;
+            ::llm_tool::ToolOutput::new(__rendered)
+                .with_metadata(&__v)
+                .map_err(|e| ::llm_tool::ToolError::new(
+                    format!("response metadata error: {e}")
+                ))
+        }
+    };
+
+    Ok(ResponseTemplateInfo {
+        dep_tracking: quote! {},
+        helper_tokens,
         render_tokens: Some(render_tokens),
     })
 }
