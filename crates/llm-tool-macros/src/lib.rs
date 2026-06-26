@@ -590,7 +590,8 @@ fn resolve_template_description_impl(attr: &ToolAttr) -> syn::Result<Description
         )
     })?;
 
-    let (fm, body) = prompt_templates::parse_frontmatter(&source).map_err(|e| {
+    let base_dir = full_path.parent().unwrap_or(std::path::Path::new("."));
+    let (fm, body) = prompt_templates::parse_frontmatter_with_base_dir(&source, base_dir).map_err(|e| {
         syn::Error::new(
             template_lit.span(),
             format!("template '{rel_path}' error: {e}"),
@@ -1090,7 +1091,8 @@ fn resolve_response_template_file(
         const _: &str = include_str!(#path_str);
     };
 
-    let (fm, _) = prompt_templates::parse_frontmatter(&source).map_err(|e| {
+    let base_dir = full_path.parent().unwrap_or(std::path::Path::new("."));
+    let (fm, _) = prompt_templates::parse_frontmatter_with_base_dir(&source, base_dir).map_err(|e| {
         syn::Error::new(
             response_path.span(),
             format!("response template '{rel_path}' frontmatter error: {e}"),
