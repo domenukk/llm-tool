@@ -20,8 +20,8 @@ fn static_tool(
 
 // ── Dynamic template description ──
 
-fn bench_context(_tool: &DynamicTool) -> prompt_templates::Context {
-    prompt_templates::Context::from_serialize(&serde_json::json!({
+fn bench_context(_tool: &DynamicTool) -> llm_tool::md_tmpl::Context {
+    llm_tool::md_tmpl::Context::from_serialize(&serde_json::json!({
         "context": {
             "api_version": "v3.1",
             "env_name": "production"

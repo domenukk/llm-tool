@@ -27,6 +27,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
+name = "bytes"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -286,13 +292,13 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "llm-tool"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "futures",
  "hashbrown",
  "llm-tool-macros",
- "prompt-templates",
- "prompt-templates-macros",
+ "md-tmpl",
+ "md-tmpl-macros",
  "schemars",
  "serde",
  "serde_json",
@@ -305,26 +311,57 @@ dependencies = [
 
 [[package]]
 name = "llm-tool-macros"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "convert_case",
  "hashbrown",
+ "md-tmpl",
  "proc-macro2",
- "prompt-templates",
  "quote",
  "syn 2.0.118",
 ]
 
 [[package]]
 name = "llm-tool-mcp"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "llm-tool",
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "md-tmpl"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "faf1775076e1a792399f60a22af77912f33fb6879a18d74de0810213af7de928"
+dependencies = [
+ "ciborium",
+ "const-str",
+ "flexbuffers",
+ "hashbrown",
+ "itoa",
+ "serde",
+ "spin",
+ "thiserror",
+ "typed-builder",
+]
+
+[[package]]
+name = "md-tmpl-macros"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67da50682f8ae4988cd13beebc5aa6fc483c74412e379910b849ef4fc06c8983"
+dependencies = [
+ "hashbrown",
+ "md-tmpl",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -332,6 +369,17 @@ name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
+
+[[package]]
+name = "mio"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02bd0af71c67b473010cbbc60715ee815645a4dc942899111f494b4b737d6fda"
+dependencies = [
+ "libc",
+ "wasi",
+ "windows-sys",
+]
 
 [[package]]
 name = "num_enum"
@@ -383,36 +431,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "prompt-templates"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6db180ec14e7c419079e4554392c15c231b5eabaf3ed3a0f81ba9f6b3ba7b8fe"
-dependencies = [
- "ciborium",
- "const-str",
- "flexbuffers",
- "hashbrown",
- "itoa",
- "serde",
- "spin",
- "thiserror",
- "typed-builder",
-]
-
-[[package]]
-name = "prompt-templates-macros"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b90b4bec6f54ca396135c0fd5451751d22c42340d5329b99aa85fb1f38c6a94"
-dependencies = [
- "hashbrown",
- "proc-macro2",
- "prompt-templates",
- "quote",
- "syn 2.0.118",
 ]
 
 [[package]]
@@ -558,6 +576,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
+name = "socket2"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
 name = "spin"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -639,8 +667,13 @@ version = "1.52.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
 dependencies = [
+ "bytes",
+ "libc",
+ "mio",
  "pin-project-lite",
+ "socket2",
  "tokio-macros",
+ "windows-sys",
 ]
 
 [[package]]
@@ -787,6 +820,12 @@ name = "unicode-segmentation"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
+
+[[package]]
+name = "wasi"
+version = "0.11.1+wasi-snapshot-preview1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "winapi-util"

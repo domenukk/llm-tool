@@ -15,7 +15,7 @@ use quote::format_ident;
 /// (list item structs, struct field structs, etc.).
 pub(crate) fn collect_generated_type_names(
     struct_name: &str,
-    declarations: &[prompt_templates::VarDecl],
+    declarations: &[md_tmpl::VarDecl],
 ) -> Vec<syn::Ident> {
     let mut names = vec![format_ident!("{}", struct_name)];
     for decl in declarations {
@@ -28,10 +28,10 @@ pub(crate) fn collect_generated_type_names(
 fn collect_nested_names(
     parent: &str,
     field: &str,
-    ty: &prompt_templates::VarType,
+    ty: &md_tmpl::VarType,
     names: &mut Vec<syn::Ident>,
 ) {
-    use prompt_templates::VarType;
+    use md_tmpl::VarType;
     match ty {
         VarType::List(fields)
             if !fields.is_empty() && (fields.len() != 1 || !fields[0].name.is_empty()) =>

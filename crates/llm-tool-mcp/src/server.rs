@@ -68,11 +68,12 @@ use crate::protocol::{
 /// let resp: serde_json::Value = serde_json::from_slice(&output).unwrap();
 /// assert_eq!(resp["result"]["content"][0]["text"], "3");
 /// ```
+#[derive(Clone)]
 pub struct McpServer {
     name: String,
     version: String,
-    registry: ToolRegistry,
-    context: ToolContext,
+    registry: Arc<ToolRegistry>,
+    context: Arc<ToolContext>,
     /// Pre-computed MCP tool schemas — built once at construction,
     /// wrapped in `Arc` so `tools/list` clones a pointer, not the tree.
     cached_tools_list: Arc<ToolsListResult>,
@@ -96,8 +97,8 @@ impl McpServer {
         Self {
             name: name.into(),
             version: version.into(),
-            registry,
-            context: ToolContext::new(None),
+            registry: Arc::new(registry),
+            context: Arc::new(ToolContext::new(None)),
             cached_tools_list,
         }
     }
@@ -108,7 +109,7 @@ impl McpServer {
     /// that persists across tool calls.
     #[must_use]
     pub fn with_context(mut self, context: ToolContext) -> Self {
-        self.context = context;
+        self.context = Arc::new(context);
         self
     }
 
@@ -203,6 +204,130 @@ impl McpServer {
 
         info!("input stream closed — shutting down");
         Ok(())
+    }
+
+    /// Run the server asynchronously on Tokio reader/writer streams.
+    ///
+    /// Reads line-delimited JSON-RPC requests from an async reader, dispatches
+    /// them asynchronously without blocking threads or spinning up nested runtimes,
+    /// and writes serialized responses back to an async writer.
+    ///
+    /// Ideal for integrating into existing Tokio applications, network servers,
+    /// or when running inside an existing async runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on fatal I/O errors reading requests or writing responses.
+    pub async fn run_async(
+        &self,
+        reader: impl tokio::io::AsyncBufRead + Unpin,
+        mut writer: impl tokio::io::AsyncWrite + Unpin,
+    ) -> io::Result<()> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let mut lines = reader.lines();
+        while let Some(line) = lines.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            debug!(request = %line, "mcp request");
+
+            let response = self.handle_request(&line).await;
+            let json = serde_json::to_string(&response).map_err(|e| {
+                error!(error = %e, "failed to serialize JSON-RPC response");
+                io::Error::other(e)
+            })?;
+
+            debug!(response = %json, "mcp response");
+
+            writer.write_all(format!("{json}\n").as_bytes()).await?;
+            writer.flush().await?;
+        }
+
+        info!("input stream closed — shutting down");
+        Ok(())
+    }
+
+    /// Listen for TCP connections and serve MCP requests asynchronously on each connection.
+    ///
+    /// This allows remote clients, IDEs, or multi-client agents to connect over TCP:
+    /// - Localhost only: `server.listen_tcp("127.0.0.1:3000").await?`
+    /// - External / Docker: `server.listen_tcp("0.0.0.0:8080").await?`
+    ///
+    /// For each incoming connection, a new Tokio task is spawned running [`run_async`](Self::run_async).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if binding to the TCP address fails.
+    pub async fn listen_tcp(&self, addr: impl tokio::net::ToSocketAddrs) -> io::Result<()> {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        info!(addr = ?listener.local_addr()?, "listening on TCP for MCP connections");
+        self.run_tcp_listener(listener).await
+    }
+
+    /// Serve MCP requests asynchronously on an existing [`tokio::net::TcpListener`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on fatal accept loop errors.
+    pub async fn run_tcp_listener(&self, listener: tokio::net::TcpListener) -> io::Result<()> {
+        loop {
+            let (mut socket, peer_addr) = listener.accept().await?;
+            info!(peer = %peer_addr, "accepted MCP TCP connection");
+
+            let server = self.clone();
+            tokio::spawn(async move {
+                let (reader, writer) = socket.split();
+                let reader = tokio::io::BufReader::new(reader);
+                if let Err(e) = server.run_async(reader, writer).await {
+                    error!(peer = %peer_addr, error = %e, "MCP TCP connection error");
+                }
+                info!(peer = %peer_addr, "MCP TCP connection closed");
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    /// Listen on a Unix domain socket and serve MCP requests asynchronously on each connection.
+    ///
+    /// This allows local IPC clients to connect over a filesystem domain socket
+    /// (e.g. `/tmp/my-agent.sock`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if binding to the domain socket path fails.
+    pub async fn listen_unix(&self, path: impl AsRef<std::path::Path>) -> io::Result<()> {
+        let path = path.as_ref();
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+        let listener = tokio::net::UnixListener::bind(path)?;
+        info!(path = ?path, "listening on Unix domain socket for MCP connections");
+        self.run_unix_listener(listener).await
+    }
+
+    #[cfg(unix)]
+    /// Serve MCP requests asynchronously on an existing [`tokio::net::UnixListener`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` on fatal accept loop errors.
+    pub async fn run_unix_listener(&self, listener: tokio::net::UnixListener) -> io::Result<()> {
+        loop {
+            let (mut socket, _) = listener.accept().await?;
+            info!("accepted MCP Unix domain socket connection");
+
+            let server = self.clone();
+            tokio::spawn(async move {
+                let (reader, writer) = socket.split();
+                let reader = tokio::io::BufReader::new(reader);
+                if let Err(e) = server.run_async(reader, writer).await {
+                    error!(error = %e, "MCP Unix connection error");
+                }
+                info!("MCP Unix connection closed");
+            });
+        }
     }
 
     /// Handle a single JSON-RPC request string.
@@ -689,6 +814,83 @@ mod tests {
         let resp: serde_json::Value =
             serde_json::from_str(String::from_utf8(output).unwrap().trim()).unwrap();
         assert_eq!(resp["result"]["content"][0]["text"], "30");
+    }
+
+    // ── run_async test ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_async_processes_requests() {
+        let server = test_server();
+        let input = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":100,"b":200}}}"#;
+        let input_str = format!("{input}\n");
+        let reader = input_str.as_bytes();
+        let mut output = Vec::new();
+
+        server.run_async(reader, &mut output).await.unwrap();
+
+        let resp: serde_json::Value =
+            serde_json::from_str(String::from_utf8(output).unwrap().trim()).unwrap();
+        assert_eq!(resp["result"]["content"][0]["text"], "300");
+    }
+
+    // ── TCP listener test ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tcp_listener_serves_requests() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let server = test_server();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let _ = server.run_tcp_listener(listener).await;
+        });
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":15,"b":25}}}"#;
+        stream
+            .write_all(format!("{req}\n").as_bytes())
+            .await
+            .unwrap();
+        stream.flush().await.unwrap();
+
+        let mut reader = tokio::io::BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+
+        let resp: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(resp["result"]["content"][0]["text"], "40");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_listener_serves_requests() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let server = test_server();
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("test_mcp.sock");
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+
+        tokio::spawn(async move {
+            let _ = server.run_unix_listener(listener).await;
+        });
+
+        let mut stream = tokio::net::UnixStream::connect(&sock_path).await.unwrap();
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":30,"b":50}}}"#;
+        stream
+            .write_all(format!("{req}\n").as_bytes())
+            .await
+            .unwrap();
+        stream.flush().await.unwrap();
+
+        let mut reader = tokio::io::BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+
+        let resp: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(resp["result"]["content"][0]["text"], "80");
     }
 
     // ── Accessor tests ──────────────────────────────────────────────

@@ -39,6 +39,30 @@ let resp: serde_json::Value = serde_json::from_slice(&output).unwrap();
 assert_eq!(resp["result"]["content"][0]["text"], "42");
 ```
 
+## Transports: Stdio vs TCP vs Unix Sockets
+
+`McpServer` is builder-style and supports all common execution models out-of-the-box:
+
+```rust
+# use llm_tool::ToolRegistry;
+# use llm_tool_mcp::McpServer;
+# tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+let server = McpServer::new("my-server", "0.1.0", ToolRegistry::new());
+
+// 1. Standard MCP desktop client transport (stdio subprocess):
+// server.run_stdio().expect("stdio server failed");
+
+// 2. TCP network server (localhost only):
+// server.listen_tcp("127.0.0.1:3000").await.expect("tcp bind failed");
+
+// 3. TCP network server (external / container / docker):
+// server.listen_tcp("0.0.0.0:8080").await.expect("tcp bind failed");
+
+// 4. Unix Domain Socket (local IPC):
+// server.listen_unix("/tmp/my-agent.sock").await.expect("unix bind failed");
+# })
+```
+
 ## What it handles
 
 | MCP method                  | Behavior                                                   |
@@ -51,9 +75,23 @@ assert_eq!(resp["result"]["content"][0]["text"], "42");
 Tool errors are returned as MCP content with `isError: true` (spec-compliant),
 not as JSON-RPC errors.
 
-## Custom transports
+## Async & custom transports
 
-For non-stdio transports, use `handle_request` directly:
+If running inside an existing Tokio application or network server, use `run_async`:
+
+```rust
+# use llm_tool::ToolRegistry;
+# use llm_tool_mcp::McpServer;
+# tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+let server = McpServer::new("s", "1", ToolRegistry::new());
+
+// Runs over any tokio::io::AsyncBufRead + AsyncWrite streams:
+// server.run_async(tokio::io::stdin(), tokio::io::stdout()).await.unwrap();
+# })
+```
+
+For custom request/response routing (e.g. Axum HTTP POST or `WebSockets`), use
+`handle_request` directly:
 
 ```rust
 # use llm_tool::ToolRegistry;

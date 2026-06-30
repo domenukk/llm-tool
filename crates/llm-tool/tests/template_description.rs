@@ -71,8 +71,8 @@ fn template_description_no_doc_comment_required() {
 
 // ── Dynamic Template Description Tests ──
 
-fn get_weather_context(_tool: &GetWeatherDynamic) -> prompt_templates::Context {
-    prompt_templates::Context::from_serialize(&serde_json::json!({
+fn get_weather_context(_tool: &GetWeatherDynamic) -> llm_tool::md_tmpl::Context {
+    llm_tool::md_tmpl::Context::from_serialize(&serde_json::json!({
         "context": {
             "api_version": "v3.1",
             "env_name": "staging"

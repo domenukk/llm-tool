@@ -12,16 +12,15 @@ use hashbrown::{HashMap, HashSet};
 
 /// Result of compiling a template at macro expansion time.
 pub(crate) struct CompiledTemplateAst {
-    pub(crate) frontmatter: prompt_templates::Frontmatter,
-    pub(crate) segments: Vec<prompt_templates::compiled::Segment>,
-    pub(crate) _inline_templates:
-        HashMap<String, prompt_templates::compiled::CompiledInlineTemplate>,
+    pub(crate) frontmatter: md_tmpl::Frontmatter,
+    pub(crate) segments: Vec<md_tmpl::compiled::Segment>,
+    pub(crate) _inline_templates: HashMap<String, md_tmpl::compiled::CompiledInlineTemplate>,
     pub(crate) source_hash: u64,
 }
 
 /// FNV-1a hash of the template source, for integrity checking.
 pub(crate) fn hash_source(source: &str) -> u64 {
-    prompt_templates::__private::fnv1a_hash(source.as_bytes())
+    md_tmpl::__private::fnv1a_hash(source.as_bytes())
 }
 
 pub(crate) const KW_LIST: &str = "list";
@@ -97,14 +96,14 @@ pub(crate) fn compile_template_to_ast(
     base_dir: &std::path::Path,
 ) -> Result<CompiledTemplateAst, String> {
     let source_hash = hash_source(source);
-    let (fm, body) = prompt_templates::parse_frontmatter_with_base_dir(source, base_dir)
-        .map_err(|e| e.to_string())?;
+    let (fm, body) =
+        md_tmpl::parse_frontmatter_with_base_dir(source, base_dir).map_err(|e| e.to_string())?;
 
     let (mut segments, inline_templates) =
-        prompt_templates::compiled::compile(body, &fm.type_aliases).map_err(|e| e.to_string())?;
+        md_tmpl::compiled::compile(body, &fm.type_aliases).map_err(|e| e.to_string())?;
 
     // Static analysis: enforce that all parameters referenced in the body are declared.
-    let referenced = prompt_templates::compiled::collect_referenced_params(&segments);
+    let referenced = md_tmpl::compiled::collect_referenced_params(&segments);
     let mut declared: HashSet<String> = fm.params.iter().cloned().collect();
     for c in &fm.consts {
         declared.insert(c.name.clone());
@@ -132,7 +131,7 @@ pub(crate) fn compile_template_to_ast(
     let tmpl_params: HashSet<String> = fm
         .declarations
         .iter()
-        .filter(|d| matches!(d.var_type, prompt_templates::VarType::Tmpl(_)))
+        .filter(|d| matches!(d.var_type, md_tmpl::VarType::Tmpl(_)))
         .map(|d| d.name.clone())
         .collect();
     let mut visited_paths = HashSet::new();
@@ -154,7 +153,7 @@ pub(crate) fn compile_template_to_ast(
         for c in &fm.consts {
             opaque_roots.insert(&c.name);
         }
-        let type_errors = prompt_templates::compiled::validate_field_accesses_with_opaque(
+        let type_errors = md_tmpl::compiled::validate_field_accesses_with_opaque(
             &segments,
             &fm.declarations,
             &opaque_roots,
@@ -183,10 +182,10 @@ fn max_compile_include_depth() -> usize {
 }
 
 fn resolve_includes_recursive(
-    segments: &mut [prompt_templates::compiled::Segment],
+    segments: &mut [md_tmpl::compiled::Segment],
     base_dir: &std::path::Path,
     visited_paths: &mut HashSet<std::path::PathBuf>,
-    inline_templates: &HashMap<String, prompt_templates::compiled::CompiledInlineTemplate>,
+    inline_templates: &HashMap<String, md_tmpl::compiled::CompiledInlineTemplate>,
     tmpl_params: &HashSet<String>,
     depth: usize,
 ) -> Result<(), String> {
@@ -200,7 +199,7 @@ fn resolve_includes_recursive(
 
     for seg in segments {
         match seg {
-            prompt_templates::compiled::Segment::Include(inc) => {
+            md_tmpl::compiled::Segment::Include(inc) => {
                 if tmpl_params.contains(inc.path.as_ref()) {
                     continue;
                 }
@@ -222,7 +221,7 @@ fn resolve_includes_recursive(
                 resolve_single_include(inc, base_dir, visited_paths, depth + 1)?;
                 visited_paths.remove(&canonical);
             }
-            prompt_templates::compiled::Segment::ForLoop { body, .. } => {
+            md_tmpl::compiled::Segment::ForLoop { body, .. } => {
                 resolve_includes_recursive(
                     body,
                     base_dir,
@@ -232,7 +231,7 @@ fn resolve_includes_recursive(
                     depth,
                 )?;
             }
-            prompt_templates::compiled::Segment::If {
+            md_tmpl::compiled::Segment::If {
                 branches,
                 else_body,
             } => {
@@ -255,7 +254,7 @@ fn resolve_includes_recursive(
                     depth,
                 )?;
             }
-            prompt_templates::compiled::Segment::Match { arms, .. } => {
+            md_tmpl::compiled::Segment::Match { arms, .. } => {
                 for (_, arm_body) in arms {
                     resolve_includes_recursive(
                         arm_body,
@@ -267,17 +266,17 @@ fn resolve_includes_recursive(
                     )?;
                 }
             }
-            prompt_templates::compiled::Segment::Static(_)
-            | prompt_templates::compiled::Segment::Expr { .. }
-            | prompt_templates::compiled::Segment::Raw(_)
-            | prompt_templates::compiled::Segment::Comment(_) => {}
+            md_tmpl::compiled::Segment::Static(_)
+            | md_tmpl::compiled::Segment::Expr { .. }
+            | md_tmpl::compiled::Segment::Raw(_)
+            | md_tmpl::compiled::Segment::Comment(_) => {}
         }
     }
     Ok(())
 }
 
 fn load_include_declarations(
-    inc: &mut prompt_templates::compiled::CompiledInclude,
+    inc: &mut md_tmpl::compiled::CompiledInclude,
     include_path: &std::path::Path,
 ) -> Result<(), String> {
     if inc.inline_compiled.is_some() {
@@ -292,18 +291,16 @@ fn load_include_declarations(
     let norm_inc_src =
         normalize_and_validate_syntax(&included_source, &include_path.display().to_string())?;
     let (included_fm, included_body) =
-        prompt_templates::parse_frontmatter_with_base_dir(&norm_inc_src, included_base_dir)
+        md_tmpl::parse_frontmatter_with_base_dir(&norm_inc_src, included_base_dir)
             .map_err(|e| format!("syntax error in include {}: {e}", include_path.display()))?;
     let (included_segments, _) =
-        prompt_templates::compiled::compile(included_body, &included_fm.type_aliases).map_err(
-            |e| {
-                format!(
-                    "compilation error in include {}: {e}",
-                    include_path.display()
-                )
-            },
-        )?;
-    inc.inline_compiled = Some(prompt_templates::compiled::CompiledInlineTemplate {
+        md_tmpl::compiled::compile(included_body, &included_fm.type_aliases).map_err(|e| {
+            format!(
+                "compilation error in include {}: {e}",
+                include_path.display()
+            )
+        })?;
+    inc.inline_compiled = Some(md_tmpl::compiled::CompiledInlineTemplate {
         segments: std::sync::Arc::from(included_segments),
         declarations: std::sync::Arc::from(included_fm.declarations),
         consts: std::sync::Arc::new(HashMap::default()),
@@ -313,7 +310,7 @@ fn load_include_declarations(
 }
 
 fn resolve_single_include(
-    inc: &mut prompt_templates::compiled::CompiledInclude,
+    inc: &mut md_tmpl::compiled::CompiledInclude,
     base_dir: &std::path::Path,
     visited_paths: &mut HashSet<std::path::PathBuf>,
     depth: usize,
@@ -326,25 +323,23 @@ fn resolve_single_include(
     let norm_inc_src =
         normalize_and_validate_syntax(&included_source, &include_path.display().to_string())?;
     let (included_fm, included_body) =
-        prompt_templates::parse_frontmatter_with_base_dir(&norm_inc_src, included_base_dir)
+        md_tmpl::parse_frontmatter_with_base_dir(&norm_inc_src, included_base_dir)
             .map_err(|e| format!("syntax error in include {}: {e}", include_path.display()))?;
 
     let (mut included_segments, included_inline_templates) =
-        prompt_templates::compiled::compile(included_body, &included_fm.type_aliases).map_err(
-            |e| {
-                format!(
-                    "compilation error in include {}: {e}",
-                    include_path.display()
-                )
-            },
-        )?;
+        md_tmpl::compiled::compile(included_body, &included_fm.type_aliases).map_err(|e| {
+            format!(
+                "compilation error in include {}: {e}",
+                include_path.display()
+            )
+        })?;
 
     let child_base_dir = include_path.parent().unwrap_or(base_dir);
     {
         let child_tmpl_params: HashSet<String> = included_fm
             .declarations
             .iter()
-            .filter(|d| matches!(d.var_type, prompt_templates::VarType::Tmpl(_)))
+            .filter(|d| matches!(d.var_type, md_tmpl::VarType::Tmpl(_)))
             .map(|d| d.name.clone())
             .collect();
         resolve_includes_recursive(
@@ -357,7 +352,7 @@ fn resolve_single_include(
         )?;
     }
 
-    inc.inline_compiled = Some(prompt_templates::compiled::CompiledInlineTemplate {
+    inc.inline_compiled = Some(md_tmpl::compiled::CompiledInlineTemplate {
         segments: std::sync::Arc::from(included_segments),
         declarations: std::sync::Arc::from(included_fm.declarations),
         consts: std::sync::Arc::new(HashMap::default()),

@@ -1,17 +1,5 @@
-[package]
-name = "llm-tool"
-version = "0.3.1"
-edition = "2024"
-rust-version = "1.85"
-description = "Framework-agnostic Rust tool definitions for LLM agents"
-license = "Apache-2.0 OR MIT"
-repository = "https://github.com/domenukk/llm-tool"
-readme = "README.md"
-keywords = ["llm", "tool", "agent", "function-calling"]
-categories = ["api-bindings"]
-
 [workspace]
-members = ["crates/llm-tool-macros", "crates/llm-tool-mcp"]
+members = ["crates/llm-tool", "crates/llm-tool-macros", "crates/llm-tool-mcp"]
 resolver = "3"
 
 [workspace.lints.clippy]
@@ -20,55 +8,3 @@ all = { level = "deny", priority = -1 }
 
 [workspace.lints.rust]
 warnings = "deny"
-
-[features]
-default = ["std"]
-std = [
-  "serde_json/std",
-  "serde/std",
-  "schemars/std",
-  "hashbrown/default",
-  "prompt-templates?/std",
-]
-# Enable `#[llm_tool(prompt_file = "path.tmpl.md")]` or
-# `#[llm_tool(response_file = "path.tmpl.md")]` for template-based
-# tool descriptions and response rendering. Requires `prompt-templates`
-# as a direct dependency for runtime context types (`Context`, `Template`).
-prompt-templates = [
-  "dep:prompt-templates",
-  "dep:prompt-templates-macros",
-  "llm-tool-macros/prompt-templates",
-]
-
-[dependencies]
-llm-tool-macros = { path = "crates/llm-tool-macros", version = "0.3.1" }
-prompt-templates = { version = "0.3.1", optional = true, default-features = false, features = [
-  "serde",
-] }
-prompt-templates-macros = { version = "0.3.1", optional = true, default-features = false, features = [
-  "serde",
-] }
-hashbrown = { version = "0.17", default-features = false, features = [
-  "allocator-api2",
-  "default-hasher",
-] }
-schemars = { version = "1", default-features = false, features = ["derive"] }
-serde = { version = "1", default-features = false, features = [
-  "derive",
-  "alloc",
-] }
-serde_json = { version = "1", default-features = false, features = ["alloc"] }
-spin = { version = "0.12", default-features = false, features = [
-  "rwlock",
-  "lazy",
-] }
-tracing = { version = "0.1", default-features = false }
-
-[dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros", "time", "sync", "fs"] }
-tempfile = "3"
-futures = "0.3"
-trybuild = "1"
-
-[lints]
-workspace = true

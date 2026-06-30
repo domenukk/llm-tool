@@ -605,13 +605,12 @@ fn resolve_template_description_impl(attr: &ToolAttr) -> syn::Result<Description
 
     let cur_dir = template_compile::REL_PREFIX_CUR.trim_end_matches(template_compile::CHAR_SLASH);
     let base_dir = full_path.parent().unwrap_or(std::path::Path::new(cur_dir));
-    let (fm, body) =
-        prompt_templates::parse_frontmatter_with_base_dir(&source, base_dir).map_err(|e| {
-            syn::Error::new(
-                template_lit.span(),
-                format!("template '{rel_path}' error: {e}"),
-            )
-        })?;
+    let (fm, body) = md_tmpl::parse_frontmatter_with_base_dir(&source, base_dir).map_err(|e| {
+        syn::Error::new(
+            template_lit.span(),
+            format!("template '{rel_path}' error: {e}"),
+        )
+    })?;
 
     let body_str = body.trim().to_string();
     let path_str = full_path.to_string_lossy().to_string();
@@ -691,7 +690,7 @@ fn resolve_inline_description_impl(attr: &ToolAttr) -> syn::Result<DescriptionIn
     let source =
         template_compile::normalize_and_validate_syntax(&source, template_compile::LABEL_INLINE)
             .map_err(|e| syn::Error::new(template_lit.span(), e))?;
-    let (fm, body) = prompt_templates::parse_frontmatter(&source)
+    let (fm, body) = md_tmpl::parse_frontmatter(&source)
         .map_err(|e| syn::Error::new(template_lit.span(), format!("inline template error: {e}")))?;
 
     let body_str = body.trim().to_string();
@@ -734,7 +733,7 @@ fn resolve_inline_description_impl(attr: &ToolAttr) -> syn::Result<DescriptionIn
 
         let description_method = quote! {
             fn description(&self) -> ::llm_tool::__private::Cow<'static, str> {
-                static TEMPLATE: ::llm_tool::__private::Lazy<::llm_tool::__prompt_templates::Template> =
+                static TEMPLATE: ::llm_tool::__private::Lazy<::llm_tool::__md_tmpl::Template> =
                     ::llm_tool::__private::Lazy::new(|| #tmpl_tokens);
                 let ctx = #context_fn(self);
                 let rendered = TEMPLATE.render_ctx(&ctx)
@@ -822,7 +821,7 @@ fn resolve_context_description(args: ResolveContextArgs<'_>) -> syn::Result<Desc
     // when multiple dynamic-description tools exist in the same module.
     let description_method = quote! {
         fn description(&self) -> ::llm_tool::__private::Cow<'static, str> {
-            static TEMPLATE: ::llm_tool::__private::Lazy<::llm_tool::__prompt_templates::Template> =
+            static TEMPLATE: ::llm_tool::__private::Lazy<::llm_tool::__md_tmpl::Template> =
                 ::llm_tool::__private::Lazy::new(|| #tmpl_tokens);
             let ctx = #context_fn(self);
             let rendered = TEMPLATE.render_ctx(&ctx)
@@ -848,7 +847,7 @@ fn resolve_context_description(args: ResolveContextArgs<'_>) -> syn::Result<Desc
 #[cfg(feature = "prompt-templates")]
 fn resolve_template_with_params(
     attr: &ToolAttr,
-    fm: &prompt_templates::Frontmatter,
+    fm: &md_tmpl::Frontmatter,
     source: &str,
     rel_path: &str,
     span: proc_macro2::Span,
@@ -859,7 +858,7 @@ fn resolve_template_with_params(
         std::collections::HashMap::new();
 
     for decl in &fm.declarations {
-        if let prompt_templates::VarType::Struct(fields) = &decl.var_type {
+        if let md_tmpl::VarType::Struct(fields) = &decl.var_type {
             for f in fields {
                 expected_names.insert(f.name.as_str());
                 struct_fields.insert(f.name.clone(), decl.name.clone());
@@ -907,14 +906,14 @@ fn resolve_template_with_params(
     }
 
     // Build context and render at compile time.
-    let template = prompt_templates::Template::from_source(source)
+    let template = md_tmpl::Template::from_source(source)
         .map_err(|e| syn::Error::new(span, format!("template '{rel_path}' parse error: {e}")))?;
 
-    let mut root_values: std::collections::HashMap<String, prompt_templates::Value> =
+    let mut root_values: std::collections::HashMap<String, md_tmpl::Value> =
         std::collections::HashMap::new();
     let mut struct_maps: std::collections::HashMap<
         String,
-        std::collections::HashMap<String, prompt_templates::Value>,
+        std::collections::HashMap<String, md_tmpl::Value>,
     > = std::collections::HashMap::new();
 
     for (key, value) in &attr.inline_params {
@@ -923,20 +922,20 @@ fn resolve_template_with_params(
             struct_maps
                 .entry(parent_struct.clone())
                 .or_default()
-                .insert(key_str, prompt_templates::Value::Str(value.value()));
+                .insert(key_str, md_tmpl::Value::Str(value.value()));
         } else {
-            root_values.insert(key_str, prompt_templates::Value::Str(value.value()));
+            root_values.insert(key_str, md_tmpl::Value::Str(value.value()));
         }
     }
 
     for (struct_name, s_map) in struct_maps {
         root_values.insert(
             struct_name,
-            prompt_templates::Value::Struct(std::sync::Arc::new(s_map.into_iter().collect())),
+            md_tmpl::Value::Struct(std::sync::Arc::new(s_map.into_iter().collect())),
         );
     }
 
-    let mut ctx = prompt_templates::Context::new();
+    let mut ctx = md_tmpl::Context::new();
     for (k, v) in root_values {
         ctx.set(k, v);
     }
@@ -1152,13 +1151,12 @@ fn resolve_response_template_file(
 
     let cur_dir = template_compile::REL_PREFIX_CUR.trim_end_matches(template_compile::CHAR_SLASH);
     let base_dir = full_path.parent().unwrap_or(std::path::Path::new(cur_dir));
-    let (fm, _) =
-        prompt_templates::parse_frontmatter_with_base_dir(&source, base_dir).map_err(|e| {
-            syn::Error::new(
-                response_path.span(),
-                format!("response template '{rel_path}' frontmatter error: {e}"),
-            )
-        })?;
+    let (fm, _) = md_tmpl::parse_frontmatter_with_base_dir(&source, base_dir).map_err(|e| {
+        syn::Error::new(
+            response_path.span(),
+            format!("response template '{rel_path}' frontmatter error: {e}"),
+        )
+    })?;
 
     let response_struct_name_str = format!("{struct_name}Response");
     let generated_idents = response_struct_gen::collect_generated_type_names(
@@ -1213,7 +1211,7 @@ fn resolve_response_template_inline(
     .map_err(|e| syn::Error::new(response_inline.span(), e))?;
 
     // Validate the inline template parses at compile time.
-    let fm = match prompt_templates::parse_frontmatter(&source) {
+    let fm = match md_tmpl::parse_frontmatter(&source) {
         Ok((fm, _)) => fm,
         Err(e) => {
             return Err(syn::Error::new(
