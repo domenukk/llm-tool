@@ -3,7 +3,7 @@
 //! Verifies the new canonical attribute names work correctly and produce
 //! identical behavior to the pre-rename API.
 
-#![cfg(feature = "prompt-templates")]
+#![cfg(feature = "md-tmpl")]
 
 use llm_tool::{RustTool, ToolContext, ToolError, ToolRegistry, llm_tool};
 

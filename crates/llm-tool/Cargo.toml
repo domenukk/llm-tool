@@ -1,6 +1,6 @@
 [package]
 name = "llm-tool"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Framework-agnostic Rust tool definitions for LLM agents"
@@ -23,27 +23,14 @@ std = [
 # `#[llm_tool(response_file = "path.tmpl.md")]` for template-based
 # tool descriptions and response rendering. Requires `md-tmpl`
 # as a direct dependency for runtime context types (`Context`, `Template`).
-md-tmpl = [
-  "dep:md-tmpl",
-  "dep:md-tmpl-macros",
-  "llm-tool-macros/md-tmpl",
-  "llm-tool-macros/prompt-templates",
-  "prompt-templates",
-]
-prompt-templates = [
-  "dep:md-tmpl",
-  "dep:md-tmpl-macros",
-  "llm-tool-macros/md-tmpl",
-  "llm-tool-macros/prompt-templates",
-  "md-tmpl",
-]
+md-tmpl = ["dep:md-tmpl", "dep:md-tmpl-macros", "llm-tool-macros/md-tmpl"]
 
 [dependencies]
-llm-tool-macros = { path = "../llm-tool-macros", version = "0.4.0" }
-md-tmpl = { version = "0.4.0", optional = true, default-features = false, features = [
+llm-tool-macros = { path = "../llm-tool-macros", version = "0.4.1" }
+md-tmpl = { version = "0.4.1", optional = true, default-features = false, features = [
   "serde",
 ] }
-md-tmpl-macros = { version = "0.4.0", optional = true, default-features = false, features = [
+md-tmpl-macros = { version = "0.4.1", optional = true, default-features = false, features = [
   "serde",
 ] }
 hashbrown = { version = "0.17", default-features = false, features = [

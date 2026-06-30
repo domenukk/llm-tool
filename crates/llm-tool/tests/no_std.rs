@@ -35,7 +35,7 @@ fn get_state_val(
     Ok(format!("{}", ext.value))
 }
 
-#[cfg(feature = "prompt-templates")]
+#[cfg(feature = "md-tmpl")]
 #[llm_tool(prompt_file = "tools/static_desc.tmpl.md")]
 fn static_tmpl_tool(
     /// Location
@@ -53,7 +53,7 @@ async fn test_no_std_paths() {
 
     registry.register(GetStateVal);
 
-    #[cfg(feature = "prompt-templates")]
+    #[cfg(feature = "md-tmpl")]
     {
         registry.register(StaticTmplTool);
         assert_eq!(
@@ -62,11 +62,7 @@ async fn test_no_std_paths() {
         );
     }
 
-    let expected_len = if cfg!(feature = "prompt-templates") {
-        3
-    } else {
-        2
-    };
+    let expected_len = if cfg!(feature = "md-tmpl") { 3 } else { 2 };
     assert_eq!(registry.len(), expected_len);
 
     let ctx = ToolContext::new(Some("test-conv".into()));
@@ -87,7 +83,7 @@ async fn test_no_std_paths() {
         .expect("dispatch get_state_val failed");
     assert_eq!(out.content(), "42");
 
-    #[cfg(feature = "prompt-templates")]
+    #[cfg(feature = "md-tmpl")]
     {
         let out = registry
             .dispatch(

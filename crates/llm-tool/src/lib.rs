@@ -15,29 +15,21 @@ mod types;
 /// Re-export `md_tmpl` so generated code can
 /// reference `::llm_tool::__md_tmpl::` without requiring the user
 /// to add `md-tmpl` as a direct dependency.
-#[cfg(any(feature = "md-tmpl", feature = "prompt-templates"))]
+#[cfg(feature = "md-tmpl")]
 #[doc(hidden)]
 pub use md_tmpl as __md_tmpl;
-#[cfg(any(feature = "md-tmpl", feature = "prompt-templates"))]
-#[doc(hidden)]
-pub use md_tmpl as __prompt_templates;
 /// Public re-export of `md_tmpl` for use in `context = fn` functions.
 ///
 /// Use `llm_tool::md_tmpl::Context` when writing a context function
 /// for `#[llm_tool(prompt_file = "...", context = my_fn)]`.
-#[cfg(any(feature = "md-tmpl", feature = "prompt-templates"))]
+#[cfg(feature = "md-tmpl")]
 pub use md_tmpl;
-#[cfg(any(feature = "md-tmpl", feature = "prompt-templates"))]
-pub use md_tmpl as prompt_templates;
 /// Re-export `md_tmpl_macros` so `response_file` generated code can
 /// auto-generate response types via `::llm_tool::__md_tmpl_macros::include_types!`
 /// without requiring the user to add `md-tmpl-macros` as a direct dependency.
-#[cfg(any(feature = "md-tmpl", feature = "prompt-templates"))]
+#[cfg(feature = "md-tmpl")]
 #[doc(hidden)]
 pub use md_tmpl_macros as __md_tmpl_macros;
-#[cfg(any(feature = "md-tmpl", feature = "prompt-templates"))]
-#[doc(hidden)]
-pub use md_tmpl_macros as __prompt_templates_macros;
 pub use registry::*;
 pub use rust_tool::*;
 pub use types::*;

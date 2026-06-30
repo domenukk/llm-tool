@@ -30,7 +30,7 @@ lint: lint-rust lint-toml lint-markdown lint-just
 # Lint Rust with clippy (pedantic + all, deny warnings)
 lint-rust:
     cargo clippy --all-targets -- -D warnings
-    cargo clippy --all-targets --features prompt-templates -- -D warnings
+    cargo clippy --all-targets --features md-tmpl -- -D warnings
 
 # Lint TOML files
 lint-toml:
@@ -46,17 +46,17 @@ lint-just:
 
 # ── Test ──────────────────────────────────────────────────────────────
 
-# Run all tests (both with and without prompt-templates feature)
+# Run all tests (both with and without md-tmpl feature)
 test:
     cargo test
-    cargo test --features prompt-templates
+    cargo test --features md-tmpl
 
 # ── Docs ──────────────────────────────────────────────────────────────
 
 # Build documentation (checks for broken intra-doc links)
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
-    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features prompt-templates
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features md-tmpl
 
 # ── Other ─────────────────────────────────────────────────────────────
 

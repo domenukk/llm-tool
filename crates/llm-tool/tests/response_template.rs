@@ -1,8 +1,8 @@
 //! Integration tests for response template rendering.
 //!
-//! Run with: `cargo test --features prompt-templates`
+//! Run with: `cargo test --features md-tmpl`
 
-#![cfg(feature = "prompt-templates")]
+#![cfg(feature = "md-tmpl")]
 
 use llm_tool::{ToolContext, ToolError, ToolRegistry, llm_tool};
 use serde::Serialize;

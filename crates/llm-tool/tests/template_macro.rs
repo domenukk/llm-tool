@@ -1,4 +1,4 @@
-#![cfg(feature = "prompt-templates")]
+#![cfg(feature = "md-tmpl")]
 
 #[test]
 fn template_compile_fail_tests() {

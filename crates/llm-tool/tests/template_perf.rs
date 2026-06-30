@@ -1,8 +1,8 @@
 //! Quick performance benchmark for template descriptions.
 //!
-//! Run with: `cargo test --features prompt-templates --release -- perf --nocapture`
+//! Run with: `cargo test --features md-tmpl --release -- perf --nocapture`
 
-#![cfg(feature = "prompt-templates")]
+#![cfg(feature = "md-tmpl")]
 
 use std::time::{Duration, Instant};
 

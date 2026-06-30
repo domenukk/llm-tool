@@ -4,21 +4,21 @@
 //! into a strongly-typed [`RustTool`](https://docs.rs/llm-tool/latest/llm_tool/trait.RustTool.html)
 //! implementation.
 //!
-//! With the `prompt-templates` feature enabled, tool descriptions can be
+//! With the `md-tmpl` feature enabled, tool descriptions can be
 //! loaded from `.tmpl.md` template files via `prompt_file = "..."`, and tool
 //! responses can be auto-rendered through templates via
 //! `response_file = "..."`.
-#[cfg(feature = "prompt-templates")]
+#[cfg(feature = "md-tmpl")]
 mod response_struct_gen;
-#[cfg(feature = "prompt-templates")]
+#[cfg(feature = "md-tmpl")]
 mod template_codegen;
-#[cfg(feature = "prompt-templates")]
+#[cfg(feature = "md-tmpl")]
 mod template_compile;
 
 use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-#[cfg(feature = "prompt-templates")]
+#[cfg(feature = "md-tmpl")]
 use syn::Ident;
 use syn::{
     FnArg, GenericArgument, ItemFn, LitStr, Pat, PatType, PathArguments, Type, parse_macro_input,
@@ -41,10 +41,10 @@ use syn::{
 /// |--------|------|---------|
 /// | `#[llm_tool]` + doc comment | Zero (static `&str`) | — |
 /// | `#[llm_tool(prompt = "inline text")]` | Zero (static `&str`) | — |
-/// | `#[llm_tool(response_file = "...")]` | Runtime render | `prompt-templates` |
-/// | `#[llm_tool(prompt_file = "tools/x.tmpl.md")]` | Zero (compiled) | `prompt-templates` |
-/// | `#[llm_tool(prompt_file = "...", params(k = "v"))]` | Zero (compiled) | `prompt-templates` |
-/// | `#[llm_tool(prompt_file = "...", context = fn)]` | Runtime `Cow::Owned` | `prompt-templates` |
+/// | `#[llm_tool(response_file = "...")]` | Runtime render | `md-tmpl` |
+/// | `#[llm_tool(prompt_file = "tools/x.tmpl.md")]` | Zero (compiled) | `md-tmpl` |
+/// | `#[llm_tool(prompt_file = "...", params(k = "v"))]` | Zero (compiled) | `md-tmpl` |
+/// | `#[llm_tool(prompt_file = "...", context = fn)]` | Runtime `Cow::Owned` | `md-tmpl` |
 ///
 /// ## Inline description
 ///
@@ -55,7 +55,7 @@ use syn::{
 /// fn get_weather(/* … */) -> Result<String, ToolError> { /* … */ }
 /// ```
 ///
-/// ## Template descriptions (feature: `prompt-templates`)
+/// ## Template descriptions (feature: `md-tmpl`)
 ///
 /// Load the description from a `.tmpl.md` file:
 ///
@@ -128,7 +128,7 @@ pub fn llm_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// Supports:
 /// - `prompt = "inline text"` — static inline description
-/// - `prompt_file = "path.tmpl.md"` — template file (requires `prompt-templates`)
+/// - `prompt_file = "path.tmpl.md"` — template file (requires `md-tmpl`)
 /// - `params(key = "value", ...)` — compile-time template variables
 /// - `context = path::to::fn` — runtime template context function
 /// - `response_file = "path.tmpl.md"` — response rendering template
@@ -143,10 +143,10 @@ struct ToolAttr {
     response_inline: Option<LitStr>,
     /// Compile-time key-value pairs for template rendering.
     /// Mutually exclusive with `context_fn`.
-    #[cfg(feature = "prompt-templates")]
+    #[cfg(feature = "md-tmpl")]
     inline_params: Vec<(Ident, LitStr)>,
     /// Runtime context function (mutually exclusive with `inline_params`).
-    #[cfg(feature = "prompt-templates")]
+    #[cfg(feature = "md-tmpl")]
     context_fn: Option<syn::Path>,
     has_inline_params: bool,
     has_context_fn: bool,
@@ -169,13 +169,13 @@ struct ToolAttrBuilder {
     prompt_file_path: Option<syn::LitStr>,
     response_file_path: Option<syn::LitStr>,
     response_inline: Option<syn::LitStr>,
-    #[cfg(feature = "prompt-templates")]
+    #[cfg(feature = "md-tmpl")]
     inline_params: Vec<(syn::Ident, syn::LitStr)>,
-    #[cfg(feature = "prompt-templates")]
+    #[cfg(feature = "md-tmpl")]
     context_fn: Option<syn::Path>,
-    #[cfg(not(feature = "prompt-templates"))]
+    #[cfg(not(feature = "md-tmpl"))]
     has_inline_params: bool,
-    #[cfg(not(feature = "prompt-templates"))]
+    #[cfg(not(feature = "md-tmpl"))]
     has_context_fn: bool,
 }
 
@@ -201,9 +201,9 @@ impl ToolAttrBuilder {
                 let key: syn::Ident = content.parse()?;
                 let _: syn::Token![=] = content.parse()?;
                 let value: syn::LitStr = content.parse()?;
-                #[cfg(feature = "prompt-templates")]
+                #[cfg(feature = "md-tmpl")]
                 self.inline_params.push((key, value));
-                #[cfg(not(feature = "prompt-templates"))]
+                #[cfg(not(feature = "md-tmpl"))]
                 {
                     drop(key);
                     drop(value);
@@ -212,17 +212,17 @@ impl ToolAttrBuilder {
                     let _: syn::Token![,] = content.parse()?;
                 }
             }
-            #[cfg(not(feature = "prompt-templates"))]
+            #[cfg(not(feature = "md-tmpl"))]
             {
                 self.has_inline_params = true;
             }
         } else if ident == ATTR_CONTEXT {
             let _: syn::Token![=] = input.parse()?;
-            #[cfg(feature = "prompt-templates")]
+            #[cfg(feature = "md-tmpl")]
             {
                 self.context_fn = Some(input.parse::<syn::Path>()?);
             }
-            #[cfg(not(feature = "prompt-templates"))]
+            #[cfg(not(feature = "md-tmpl"))]
             {
                 let _path: syn::Path = input.parse()?;
                 self.has_context_fn = true;
@@ -248,12 +248,12 @@ impl syn::parse::Parse for ToolAttr {
             }
         }
 
-        #[cfg(feature = "prompt-templates")]
+        #[cfg(feature = "md-tmpl")]
         let (has_inline_params, has_context_fn) = (
             !builder.inline_params.is_empty(),
             builder.context_fn.is_some(),
         );
-        #[cfg(not(feature = "prompt-templates"))]
+        #[cfg(not(feature = "md-tmpl"))]
         let (has_inline_params, has_context_fn) =
             (builder.has_inline_params, builder.has_context_fn);
 
@@ -271,12 +271,12 @@ impl syn::parse::Parse for ToolAttr {
             ));
         }
 
-        // Validate response_file requires prompt-templates feature.
-        #[cfg(not(feature = "prompt-templates"))]
+        // Validate response_file requires md-tmpl feature.
+        #[cfg(not(feature = "md-tmpl"))]
         if builder.response_file_path.is_some() || builder.response_inline.is_some() {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
-                "the `prompt-templates` feature must be enabled to use `response = \"...\"` or `response_file = \"...\"`",
+                "the `md-tmpl` feature must be enabled to use `response = \"...\"` or `response_file = \"...\"`",
             ));
         }
 
@@ -285,9 +285,9 @@ impl syn::parse::Parse for ToolAttr {
             prompt_file_path: builder.prompt_file_path,
             response_file_path: builder.response_file_path,
             response_inline: builder.response_inline,
-            #[cfg(feature = "prompt-templates")]
+            #[cfg(feature = "md-tmpl")]
             inline_params: builder.inline_params,
-            #[cfg(feature = "prompt-templates")]
+            #[cfg(feature = "md-tmpl")]
             context_fn: builder.context_fn,
             has_inline_params,
             has_context_fn,
@@ -533,7 +533,7 @@ fn resolve_description(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<De
 
 /// Resolve dynamic/static description from inline template string.
 fn resolve_inline_description(attr: &ToolAttr) -> syn::Result<DescriptionInfo> {
-    #[cfg(not(feature = "prompt-templates"))]
+    #[cfg(not(feature = "md-tmpl"))]
     {
         let span = attr
             .prompt_inline
@@ -542,7 +542,7 @@ fn resolve_inline_description(attr: &ToolAttr) -> syn::Result<DescriptionInfo> {
         if attr.has_inline_params || attr.has_context_fn {
             return Err(syn::Error::new(
                 span,
-                "the `prompt-templates` feature must be enabled to use dynamic inline prompts",
+                "the `md-tmpl` feature must be enabled to use dynamic inline prompts",
             ));
         }
         let desc = attr.prompt_inline.as_ref().unwrap().value();
@@ -554,13 +554,13 @@ fn resolve_inline_description(attr: &ToolAttr) -> syn::Result<DescriptionInfo> {
         })
     }
 
-    #[cfg(feature = "prompt-templates")]
+    #[cfg(feature = "md-tmpl")]
     resolve_inline_description_impl(attr)
 }
 
 /// Read a `.tmpl.md` template file and extract its body as the tool description.
 fn resolve_template_description(attr: &ToolAttr) -> syn::Result<DescriptionInfo> {
-    #[cfg(not(feature = "prompt-templates"))]
+    #[cfg(not(feature = "md-tmpl"))]
     {
         let span = attr
             .prompt_file_path
@@ -568,13 +568,13 @@ fn resolve_template_description(attr: &ToolAttr) -> syn::Result<DescriptionInfo>
             .map_or(proc_macro2::Span::call_site(), LitStr::span);
         Err(syn::Error::new(
             span,
-            "the `prompt-templates` feature must be enabled to use \
+            "the `md-tmpl` feature must be enabled to use \
              `#[llm_tool(prompt_file = \"...\")]`. \
-             Add `features = [\"prompt-templates\"]` to your llm-tool dependency.",
+             Add `features = [\"md-tmpl\"]` to your llm-tool dependency.",
         ))
     }
 
-    #[cfg(feature = "prompt-templates")]
+    #[cfg(feature = "md-tmpl")]
     resolve_template_description_impl(attr)
 }
 
@@ -584,7 +584,7 @@ fn resolve_template_description(attr: &ToolAttr) -> syn::Result<DescriptionInfo>
 /// 1. Static template (no declared variables) → `const DESCRIPTION`
 /// 2. Template + `params(...)` → compile-time render → `const DESCRIPTION`
 /// 3. Template + `context = fn` → runtime render via `description()` method
-#[cfg(feature = "prompt-templates")]
+#[cfg(feature = "md-tmpl")]
 fn resolve_template_description_impl(attr: &ToolAttr) -> syn::Result<DescriptionInfo> {
     let template_lit = attr
         .prompt_file_path
@@ -670,7 +670,7 @@ fn resolve_template_description_impl(attr: &ToolAttr) -> syn::Result<Description
 }
 
 /// Implementation of inline template description resolution (feature-gated).
-#[cfg(feature = "prompt-templates")]
+#[cfg(feature = "md-tmpl")]
 fn resolve_inline_description_impl(attr: &ToolAttr) -> syn::Result<DescriptionInfo> {
     let template_lit = attr
         .prompt_inline
@@ -761,7 +761,7 @@ fn resolve_inline_description_impl(attr: &ToolAttr) -> syn::Result<DescriptionIn
     }
 }
 
-#[cfg(feature = "prompt-templates")]
+#[cfg(feature = "md-tmpl")]
 struct ResolveContextArgs<'a> {
     attr: &'a ToolAttr,
     rel_path: &'a str,
@@ -778,7 +778,7 @@ struct ResolveContextArgs<'a> {
 /// Generates a `description(&self)` method that uses `LazyLock` to parse
 /// the template once, then renders it with the user-provided context function
 /// on every call.
-#[cfg(feature = "prompt-templates")]
+#[cfg(feature = "md-tmpl")]
 fn resolve_context_description(args: ResolveContextArgs<'_>) -> syn::Result<DescriptionInfo> {
     let ResolveContextArgs {
         attr,
@@ -844,7 +844,7 @@ fn resolve_context_description(args: ResolveContextArgs<'_>) -> syn::Result<Desc
 /// - Every declared template variable has a matching `params(...)` key
 /// - Every `params(...)` key matches a declared template variable
 /// - The template renders without errors
-#[cfg(feature = "prompt-templates")]
+#[cfg(feature = "md-tmpl")]
 fn resolve_template_with_params(
     attr: &ToolAttr,
     fm: &md_tmpl::Frontmatter,
@@ -1092,27 +1092,27 @@ fn resolve_response_template(
     };
 
     if let Some(response_path) = &attr.response_file_path {
-        #[cfg(not(feature = "prompt-templates"))]
+        #[cfg(not(feature = "md-tmpl"))]
         {
             return Err(syn::Error::new(
                 response_path.span(),
-                "the `prompt-templates` feature must be enabled to use `response_file`",
+                "the `md-tmpl` feature must be enabled to use `response_file`",
             ));
         }
-        #[cfg(feature = "prompt-templates")]
+        #[cfg(feature = "md-tmpl")]
         {
             return resolve_response_template_file(response_path, struct_name, fn_name);
         }
     }
     if let Some(response_inline) = &attr.response_inline {
-        #[cfg(not(feature = "prompt-templates"))]
+        #[cfg(not(feature = "md-tmpl"))]
         {
             return Err(syn::Error::new(
                 response_inline.span(),
-                "the `prompt-templates` feature must be enabled to use `response`",
+                "the `md-tmpl` feature must be enabled to use `response`",
             ));
         }
-        #[cfg(feature = "prompt-templates")]
+        #[cfg(feature = "md-tmpl")]
         {
             return resolve_response_template_inline(response_inline, struct_name, fn_name);
         }
@@ -1121,7 +1121,7 @@ fn resolve_response_template(
 }
 
 /// Feature-gated implementation of response template resolution from file.
-#[cfg(feature = "prompt-templates")]
+#[cfg(feature = "md-tmpl")]
 fn resolve_response_template_file(
     response_path: &LitStr,
     struct_name: &syn::Ident,
@@ -1168,9 +1168,9 @@ fn resolve_response_template_file(
     let response_mod_name = format_ident!("__{}_response_mod", fn_name);
 
     let helper_tokens = quote! {
-        ::llm_tool::__prompt_templates_macros::template!(
+        ::llm_tool::__md_tmpl_macros::template!(
             #source as #response_struct_name => #response_mod_name,
-            crate = ::llm_tool::__prompt_templates
+            crate = ::llm_tool::__md_tmpl
         );
         pub use #response_mod_name::{ #( #generated_idents ),* };
     };
@@ -1197,7 +1197,7 @@ fn resolve_response_template_file(
 }
 
 /// Feature-gated implementation of response template resolution from inline string.
-#[cfg(feature = "prompt-templates")]
+#[cfg(feature = "md-tmpl")]
 fn resolve_response_template_inline(
     response_inline: &LitStr,
     struct_name: &syn::Ident,
@@ -1231,9 +1231,9 @@ fn resolve_response_template_inline(
     let response_mod_name = format_ident!("__{}_response_mod", fn_name);
 
     let helper_tokens = quote! {
-        ::llm_tool::__prompt_templates_macros::template!(
+        ::llm_tool::__md_tmpl_macros::template!(
             #source as #response_struct_name => #response_mod_name,
-            crate = ::llm_tool::__prompt_templates
+            crate = ::llm_tool::__md_tmpl
         );
         pub use #response_mod_name::{ #( #generated_idents ),* };
     };

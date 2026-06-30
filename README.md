@@ -47,7 +47,7 @@ assert_eq!(defs[0].name, "add");
 
 - Must have a **doc comment** (becomes the tool description),
   `#[llm_tool(prompt = "inline text")]` for an inline override, or
-  `#[llm_tool(prompt_file = "path.tmpl.md")]` with the `prompt-templates` feature.
+  `#[llm_tool(prompt_file = "path.tmpl.md")]` with the `md-tmpl` feature.
 - Every parameter must have a **doc comment** (becomes the JSON Schema
   description for that field).
 - Return type can be `Result<T, E>` or a bare `T` (infallible tools):
@@ -285,17 +285,17 @@ fn whoami(
 }
 ```
 
-### Template Descriptions (feature: `prompt-templates`)
+### Template Descriptions (feature: `md-tmpl`)
 
 Instead of writing tool descriptions as doc comments, you can write them in
-`.tmpl.md` template files using the `prompt-templates` crate syntax.
+`.tmpl.md` template files using the `md-tmpl` crate syntax.
 
 **Enable the feature** in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-llm-tool = { version = "0.1", features = ["prompt-templates"] }
-prompt-templates = "0.1"
+llm-tool = { version = "0.1", features = ["md-tmpl"] }
+md-tmpl = "0.1"
 ```
 
 #### Static descriptions
@@ -366,8 +366,8 @@ and that no extra keys are passed — **at compile time**.
 For values that aren't known until runtime, use a `context` function:
 
 ```text
-fn weather_context(_tool: &GetWeatherDynamic) -> prompt_templates::Context {
-    let mut ctx = prompt_templates::Context::new();
+fn weather_context(_tool: &GetWeatherDynamic) -> md_tmpl::Context {
+    let mut ctx = md_tmpl::Context::new();
     ctx.set("api_version", "v3.1");
     ctx.set("env_name", "production");
     ctx
@@ -399,17 +399,17 @@ fn get_weather(
 }
 ```
 
-| Attribute form                         | Cost    | Feature            |
-| -------------------------------------- | ------- | ------------------ |
-| `#[llm_tool]` + doc comment            | Zero    | —                  |
-| `prompt = "inline text"`               | Zero    | —                  |
-| `prompt_file = "path.tmpl.md"`         | Zero    | `prompt-templates` |
-| `prompt_file = "...", params(k = "v")` | Zero    | `prompt-templates` |
-| `prompt_file = "...", context = fn`    | Runtime | `prompt-templates` |
+| Attribute form                         | Cost    | Feature   |
+| -------------------------------------- | ------- | --------- |
+| `#[llm_tool]` + doc comment            | Zero    | —         |
+| `prompt = "inline text"`               | Zero    | —         |
+| `prompt_file = "path.tmpl.md"`         | Zero    | `md-tmpl` |
+| `prompt_file = "...", params(k = "v")` | Zero    | `md-tmpl` |
+| `prompt_file = "...", context = fn`    | Runtime | `md-tmpl` |
 
 | Behaviour        | Detail                                                                                                        |
 | ---------------- | ------------------------------------------------------------------------------------------------------------- |
-| Context receiver | The context function receives `&Self` (the tool struct) and returns a `prompt_templates::Context`.            |
+| Context receiver | The context function receives `&Self` (the tool struct) and returns an `md_tmpl::Context`.                    |
 | Rendering        | `description()` renders the template at runtime with the provided context.                                    |
 | Caching          | Templates are parsed once (via `LazyLock`) and cached for zero-cost repeated calls.                           |
 | Missing params   | If the template declares parameters but neither `params(...)` nor `context = ...` is provided, compile error. |
@@ -568,9 +568,9 @@ async fn handle_tool_call(
 | `EmptyParams`    | Convenience struct for tools that take no parameters.                 |
 | `#[llm_tool]`    | Proc-macro attribute for defining tools from plain functions.         |
 
-| Feature            | Description                                                                |
-| ------------------ | -------------------------------------------------------------------------- |
-| `prompt-templates` | Enables `.tmpl.md` template descriptions via the `prompt-templates` crate. |
+| Feature   | Description                                                       |
+| --------- | ----------------------------------------------------------------- |
+| `md-tmpl` | Enables `.tmpl.md` template descriptions via the `md-tmpl` crate. |
 
 ## License
 

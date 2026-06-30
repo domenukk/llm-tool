@@ -1,4 +1,4 @@
-### Response Templates (feature: `prompt-templates`)
+### Response Templates (feature: `md-tmpl`)
 
 Tool **responses** can also be rendered through templates. The tool's return
 value (`T: Serialize`) is serialized into a template context, rendered, and

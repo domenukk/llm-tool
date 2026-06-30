@@ -1,4 +1,16 @@
-//! Template codegen adapted from `prompt-templates-macros` for `llm-tool-macros`.
+//! Template codegen adapted from `md-tmpl-macros` for `llm-tool-macros`.
+//!
+//! Generates efficient, compile-time checked code for template rendering.
+//!
+//! # Design Overview
+//!
+//! When `#[llm_tool(prompt_file = "...", params(...))]` or `context = fn` is used,
+//! `llm-tool-macros` needs to generate code that builds a template context and
+//! renders the template at runtime (or at initial access time for zero-param tools).
+//!
+//! `llm-tool-macros` has a direct build-time dependency on `md-tmpl`.
+//! During macro expansion, we:
+//! 1. Read and compile the template file using `md_tmpl::compiled::compile()`.
 //!
 //! This module mirrors the codegen functions from `md_tmpl_macros::codegen`,
 //! but rewrites all generated runtime paths from `::md_tmpl::` to
@@ -7,7 +19,7 @@
 //! `__md_tmpl` module).
 //!
 //! Function signatures still reference `md_tmpl::` types directly because
-//! `llm-tool-macros` has a direct build-time dependency on `prompt-templates`.
+//! `llm-tool-macros` has a direct build-time dependency on `md-tmpl`.
 
 use quote::quote;
 

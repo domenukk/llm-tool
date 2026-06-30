@@ -1,9 +1,9 @@
-//! Predict auto-generated type names from response template frontmatter.
+//! Helper logic for `response_file` response struct prediction.
 //!
-//! When `response_file = "..."` is used, the macro delegates struct generation
-//! to `include_template!` from `prompt-templates-macros`. This module predicts
-//! the type names that `include_template!` will generate, so we can emit
-//! selective `pub use` re-exports.
+//! When `#[llm_tool(response_file = "path.tmpl.md")]` is used, the macro delegates
+//! to `include_template!` from `md-tmpl-macros`. This module predicts
+//! what type names `include_template!` will generate so `llm-tool-macros` can
+//! generate appropriate `pub use` statements to bring them into scope.
 
 use convert_case::{Case, Casing};
 use quote::format_ident;

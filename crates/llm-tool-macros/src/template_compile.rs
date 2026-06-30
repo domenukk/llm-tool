@@ -6,7 +6,7 @@
 //! `#[llm_tool(prompt_file = "...", context = fn)]` code paths
 //! to emit `Template::from_precompiled(...)` instead of runtime parsing.
 //!
-//! Adapted from `prompt-templates-macros/src/compile.rs`.
+//! Adapted from `md-tmpl-macros/src/compile.rs`.
 
 use hashbrown::{HashMap, HashSet};
 
@@ -31,7 +31,7 @@ pub(crate) const KW_TMPL: &str = "tmpl";
 
 pub(crate) const ANGLE_OPEN: char = '<';
 pub(crate) const BRACKET_OPEN: char = '[';
-#[cfg(feature = "prompt-templates")]
+#[cfg(feature = "md-tmpl")]
 pub(crate) const CHAR_SLASH: char = '/';
 
 pub(crate) const PAREN_SYNTAX: &str = "(...)";
@@ -41,9 +41,9 @@ pub(crate) const FRONTMATTER_DELIM: &str = "---";
 pub(crate) const NEWLINE_DELIM_LF: &str = "\n---";
 pub(crate) const NEWLINE_DELIM_CRLF: &str = "\r\n---";
 pub(crate) const REL_PREFIX_CUR: &str = "./";
-#[cfg(feature = "prompt-templates")]
+#[cfg(feature = "md-tmpl")]
 pub(crate) const LABEL_INLINE: &str = "inline";
-#[cfg(feature = "prompt-templates")]
+#[cfg(feature = "md-tmpl")]
 pub(crate) const LABEL_INLINE_RESP: &str = "inline response";
 
 pub(crate) fn normalize_and_validate_syntax(
@@ -68,7 +68,7 @@ pub(crate) fn normalize_and_validate_syntax(
     let fm_str = &source[prefix_len..prefix_len + end_idx];
 
     // Reject legacy angle-bracket and square-bracket syntax for compound types.
-    // prompt-templates now requires parentheses exclusively.
+    // md-tmpl now requires parentheses exclusively.
     let illegal_keywords = [KW_LIST, KW_STRUCT, KW_OPTION, KW_ENUM, KW_TMPL];
     for kw in &illegal_keywords {
         if fm_str.contains(&format!("{kw}{ANGLE_OPEN}"))
@@ -82,14 +82,14 @@ pub(crate) fn normalize_and_validate_syntax(
         }
     }
 
-    // Source already uses () syntax which prompt-templates handles natively.
+    // Source already uses () syntax which md-tmpl handles natively.
     // No normalization needed.
     Ok(source.to_string())
 }
 
 /// Compile a template source string into a pre-compiled AST.
 ///
-/// Performs all the same validation as `prompt-templates-macros`: undeclared
+/// Performs all the same validation as `md-tmpl-macros`: undeclared
 /// variable detection, include resolution, and flow-sensitive type checking.
 pub(crate) fn compile_template_to_ast(
     source: &str,
@@ -175,7 +175,7 @@ pub(crate) fn compile_template_to_ast(
 const DEFAULT_MAX_COMPILE_INCLUDE_DEPTH: usize = 64;
 
 fn max_compile_include_depth() -> usize {
-    std::env::var("PROMPT_TEMPLATES_MAX_INCLUDE_DEPTH")
+    std::env::var("MD_TMPL_MAX_INCLUDE_DEPTH")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_MAX_COMPILE_INCLUDE_DEPTH)
@@ -193,7 +193,7 @@ fn resolve_includes_recursive(
     if depth > max_depth {
         return Err(format!(
             "compile-time include depth ({depth}) exceeds maximum ({max_depth}). \
-             Set PROMPT_TEMPLATES_MAX_INCLUDE_DEPTH to increase the limit"
+             Set MD_TMPL_MAX_INCLUDE_DEPTH to increase the limit"
         ));
     }
 
