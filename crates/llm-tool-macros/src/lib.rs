@@ -152,6 +152,17 @@ struct ToolAttr {
     has_context_fn: bool,
 }
 
+const ATTR_PROMPT: &str = "prompt";
+const ATTR_PROMPT_FILE: &str = "prompt_file";
+const ATTR_RESPONSE_FILE: &str = "response_file";
+const ATTR_RESPONSE: &str = "response";
+const ATTR_PARAMS: &str = "params";
+const ATTR_CONTEXT: &str = "context";
+const TYPE_OPTION: &str = "Option";
+const TYPE_TOOL_CONTEXT: &str = "ToolContext";
+const TYPE_STR: &str = "str";
+const ATTR_LLM_TOOL: &str = "llm_tool";
+
 #[derive(Default)]
 struct ToolAttrBuilder {
     prompt_inline: Option<syn::LitStr>,
@@ -171,19 +182,19 @@ struct ToolAttrBuilder {
 impl ToolAttrBuilder {
     fn parse_single(&mut self, input: syn::parse::ParseStream) -> syn::Result<()> {
         let ident: syn::Ident = input.parse()?;
-        if ident == "prompt" {
+        if ident == ATTR_PROMPT {
             let _: syn::Token![=] = input.parse()?;
             self.prompt_inline = Some(input.parse::<syn::LitStr>()?);
-        } else if ident == "prompt_file" {
+        } else if ident == ATTR_PROMPT_FILE {
             let _: syn::Token![=] = input.parse()?;
             self.prompt_file_path = Some(input.parse::<syn::LitStr>()?);
-        } else if ident == "response_file" {
+        } else if ident == ATTR_RESPONSE_FILE {
             let _: syn::Token![=] = input.parse()?;
             self.response_file_path = Some(input.parse::<syn::LitStr>()?);
-        } else if ident == "response" {
+        } else if ident == ATTR_RESPONSE {
             let _: syn::Token![=] = input.parse()?;
             self.response_inline = Some(input.parse::<syn::LitStr>()?);
-        } else if ident == "params" {
+        } else if ident == ATTR_PARAMS {
             let content;
             syn::parenthesized!(content in input);
             while !content.is_empty() {
@@ -205,7 +216,7 @@ impl ToolAttrBuilder {
             {
                 self.has_inline_params = true;
             }
-        } else if ident == "context" {
+        } else if ident == ATTR_CONTEXT {
             let _: syn::Token![=] = input.parse()?;
             #[cfg(feature = "prompt-templates")]
             {
@@ -589,14 +600,18 @@ fn resolve_template_description_impl(attr: &ToolAttr) -> syn::Result<Description
             format!("failed to read template '{}': {e}", full_path.display()),
         )
     })?;
+    let source = template_compile::normalize_and_validate_syntax(&source, &rel_path)
+        .map_err(|e| syn::Error::new(template_lit.span(), e))?;
 
-    let base_dir = full_path.parent().unwrap_or(std::path::Path::new("."));
-    let (fm, body) = prompt_templates::parse_frontmatter_with_base_dir(&source, base_dir).map_err(|e| {
-        syn::Error::new(
-            template_lit.span(),
-            format!("template '{rel_path}' error: {e}"),
-        )
-    })?;
+    let cur_dir = template_compile::REL_PREFIX_CUR.trim_end_matches(template_compile::CHAR_SLASH);
+    let base_dir = full_path.parent().unwrap_or(std::path::Path::new(cur_dir));
+    let (fm, body) =
+        prompt_templates::parse_frontmatter_with_base_dir(&source, base_dir).map_err(|e| {
+            syn::Error::new(
+                template_lit.span(),
+                format!("template '{rel_path}' error: {e}"),
+            )
+        })?;
 
     let body_str = body.trim().to_string();
     let path_str = full_path.to_string_lossy().to_string();
@@ -664,7 +679,7 @@ fn resolve_inline_description_impl(attr: &ToolAttr) -> syn::Result<DescriptionIn
         .expect("prompt_inline validated");
     let source = template_lit.value();
     let trimmed = source.trim_start();
-    if !trimmed.starts_with("---") {
+    if !trimmed.starts_with(template_compile::FRONTMATTER_DELIM) {
         return Ok(DescriptionInfo {
             static_description: source,
             helper_tokens: quote! {},
@@ -673,6 +688,9 @@ fn resolve_inline_description_impl(attr: &ToolAttr) -> syn::Result<DescriptionIn
         });
     }
 
+    let source =
+        template_compile::normalize_and_validate_syntax(&source, template_compile::LABEL_INLINE)
+            .map_err(|e| syn::Error::new(template_lit.span(), e))?;
     let (fm, body) = prompt_templates::parse_frontmatter(&source)
         .map_err(|e| syn::Error::new(template_lit.span(), format!("inline template error: {e}")))?;
 
@@ -836,8 +854,21 @@ fn resolve_template_with_params(
     span: proc_macro2::Span,
     dep_tracking: proc_macro2::TokenStream,
 ) -> syn::Result<DescriptionInfo> {
-    let declared_names: std::collections::HashSet<&str> =
-        fm.declarations.iter().map(|d| d.name.as_str()).collect();
+    let mut expected_names = std::collections::HashSet::new();
+    let mut struct_fields: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
+    for decl in &fm.declarations {
+        if let prompt_templates::VarType::Struct(fields) = &decl.var_type {
+            for f in fields {
+                expected_names.insert(f.name.as_str());
+                struct_fields.insert(f.name.clone(), decl.name.clone());
+            }
+        } else {
+            expected_names.insert(decl.name.as_str());
+        }
+    }
+
     let provided_names: std::collections::HashSet<String> = attr
         .inline_params
         .iter()
@@ -845,7 +876,7 @@ fn resolve_template_with_params(
         .collect();
 
     // Check for missing params (declared but not provided).
-    let missing: Vec<&str> = declared_names
+    let missing: Vec<&str> = expected_names
         .iter()
         .filter(|n| !provided_names.contains(**n))
         .copied()
@@ -863,13 +894,13 @@ fn resolve_template_with_params(
     // Check for extra params (provided but not declared).
     for (key, _) in &attr.inline_params {
         let key_str = key.to_string();
-        if !declared_names.contains(key_str.as_str()) {
+        if !expected_names.contains(key_str.as_str()) {
             return Err(syn::Error::new(
                 key.span(),
                 format!(
                     "param `{key_str}` is not declared in template '{rel_path}'. \
                      Declared params: {}",
-                    declared_names.into_iter().collect::<Vec<_>>().join(", ")
+                    expected_names.into_iter().collect::<Vec<_>>().join(", ")
                 ),
             ));
         }
@@ -879,9 +910,35 @@ fn resolve_template_with_params(
     let template = prompt_templates::Template::from_source(source)
         .map_err(|e| syn::Error::new(span, format!("template '{rel_path}' parse error: {e}")))?;
 
-    let mut ctx = prompt_templates::Context::new();
+    let mut root_values: std::collections::HashMap<String, prompt_templates::Value> =
+        std::collections::HashMap::new();
+    let mut struct_maps: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, prompt_templates::Value>,
+    > = std::collections::HashMap::new();
+
     for (key, value) in &attr.inline_params {
-        ctx.set(key.to_string(), value.value());
+        let key_str = key.to_string();
+        if let Some(parent_struct) = struct_fields.get(&key_str) {
+            struct_maps
+                .entry(parent_struct.clone())
+                .or_default()
+                .insert(key_str, prompt_templates::Value::Str(value.value()));
+        } else {
+            root_values.insert(key_str, prompt_templates::Value::Str(value.value()));
+        }
+    }
+
+    for (struct_name, s_map) in struct_maps {
+        root_values.insert(
+            struct_name,
+            prompt_templates::Value::Struct(std::sync::Arc::new(s_map.into_iter().collect())),
+        );
+    }
+
+    let mut ctx = prompt_templates::Context::new();
+    for (k, v) in root_values {
+        ctx.set(k, v);
     }
 
     let rendered = template
@@ -1086,18 +1143,22 @@ fn resolve_response_template_file(
             ),
         )
     })?;
+    let source = template_compile::normalize_and_validate_syntax(&source, &rel_path)
+        .map_err(|e| syn::Error::new(response_path.span(), e))?;
 
     let dep_tracking = quote! {
         const _: &str = include_str!(#path_str);
     };
 
-    let base_dir = full_path.parent().unwrap_or(std::path::Path::new("."));
-    let (fm, _) = prompt_templates::parse_frontmatter_with_base_dir(&source, base_dir).map_err(|e| {
-        syn::Error::new(
-            response_path.span(),
-            format!("response template '{rel_path}' frontmatter error: {e}"),
-        )
-    })?;
+    let cur_dir = template_compile::REL_PREFIX_CUR.trim_end_matches(template_compile::CHAR_SLASH);
+    let base_dir = full_path.parent().unwrap_or(std::path::Path::new(cur_dir));
+    let (fm, _) =
+        prompt_templates::parse_frontmatter_with_base_dir(&source, base_dir).map_err(|e| {
+            syn::Error::new(
+                response_path.span(),
+                format!("response template '{rel_path}' frontmatter error: {e}"),
+            )
+        })?;
 
     let response_struct_name_str = format!("{struct_name}Response");
     let generated_idents = response_struct_gen::collect_generated_type_names(
@@ -1109,8 +1170,8 @@ fn resolve_response_template_file(
     let response_mod_name = format_ident!("__{}_response_mod", fn_name);
 
     let helper_tokens = quote! {
-        ::llm_tool::__prompt_templates_macros::include_template!(
-            #path_str as #response_struct_name => #response_mod_name,
+        ::llm_tool::__prompt_templates_macros::template!(
+            #source as #response_struct_name => #response_mod_name,
             crate = ::llm_tool::__prompt_templates
         );
         pub use #response_mod_name::{ #( #generated_idents ),* };
@@ -1145,6 +1206,11 @@ fn resolve_response_template_inline(
     fn_name: &syn::Ident,
 ) -> syn::Result<ResponseTemplateInfo> {
     let source = response_inline.value();
+    let source = template_compile::normalize_and_validate_syntax(
+        &source,
+        template_compile::LABEL_INLINE_RESP,
+    )
+    .map_err(|e| syn::Error::new(response_inline.span(), e))?;
 
     // Validate the inline template parses at compile time.
     let fm = match prompt_templates::parse_frontmatter(&source) {
@@ -1168,7 +1234,7 @@ fn resolve_response_template_inline(
 
     let helper_tokens = quote! {
         ::llm_tool::__prompt_templates_macros::template!(
-            #response_inline as #response_struct_name => #response_mod_name,
+            #source as #response_struct_name => #response_mod_name,
             crate = ::llm_tool::__prompt_templates
         );
         pub use #response_mod_name::{ #( #generated_idents ),* };
@@ -1203,7 +1269,7 @@ fn is_option_type(ty: &syn::Type) -> bool {
     let Some(last_seg) = type_path.path.segments.last() else {
         return false;
     };
-    if last_seg.ident != "Option" {
+    if last_seg.ident != TYPE_OPTION {
         return false;
     }
     matches!(&last_seg.arguments, PathArguments::AngleBracketed(args)
@@ -1225,7 +1291,7 @@ fn is_tool_context_type(ty: &syn::Type) -> bool {
         .path
         .segments
         .last()
-        .is_some_and(|seg| seg.ident == "ToolContext")
+        .is_some_and(|seg| seg.ident == TYPE_TOOL_CONTEXT)
 }
 
 /// Check whether `ty` is `&str`.
@@ -1243,16 +1309,16 @@ fn is_str_ref(ty: &syn::Type) -> bool {
         .path
         .segments
         .last()
-        .is_some_and(|seg| seg.ident == "str" && seg.arguments.is_none())
+        .is_some_and(|seg| seg.ident == TYPE_STR && seg.arguments.is_none())
 }
 
 fn is_explicit_context_attr(attr: &syn::Attribute) -> syn::Result<bool> {
-    if !attr.path().is_ident("llm_tool") {
+    if !attr.path().is_ident(ATTR_LLM_TOOL) {
         return Ok(false);
     }
     let mut is_context = false;
     attr.parse_nested_meta(|meta| {
-        if meta.path.is_ident("context") {
+        if meta.path.is_ident(ATTR_CONTEXT) {
             is_context = true;
             Ok(())
         } else {

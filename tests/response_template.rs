@@ -150,3 +150,49 @@ async fn test_inline_response_template() {
     assert_eq!(meta["temp_f"], 82);
     assert_eq!(meta["condition"], "Cloudy");
 }
+
+#[derive(Serialize)]
+struct SearchResultItem {
+    title: String,
+    score: i64,
+}
+
+#[derive(Serialize)]
+struct SearchResponse {
+    query: String,
+    results: Vec<SearchResultItem>,
+    total: i64,
+}
+
+#[llm_tool(
+    prompt = "Search for things.",
+    response_file = "tools/search_response.tmpl.md"
+)]
+fn search_tool(
+    /// The search query.
+    query: String,
+) -> Result<SearchResponse, ToolError> {
+    Ok(SearchResponse {
+        query: query.clone(),
+        results: vec![SearchResultItem {
+            title: "Rust".into(),
+            score: 100,
+        }],
+        total: 1,
+    })
+}
+
+#[tokio::test]
+async fn test_search_response_template() {
+    let registry = ToolRegistry::new().with_tool(SearchTool);
+    let ctx = ToolContext::new(None);
+    let output = registry
+        .dispatch(
+            "search_tool",
+            serde_json::json!({"query": "language"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(output.content().contains("Search results for \"language\""));
+}

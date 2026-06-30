@@ -72,10 +72,13 @@ fn template_description_no_doc_comment_required() {
 // ── Dynamic Template Description Tests ──
 
 fn get_weather_context(_tool: &GetWeatherDynamic) -> prompt_templates::Context {
-    let mut ctx = prompt_templates::Context::new();
-    ctx.set("api_version", "v3.1");
-    ctx.set("env_name", "staging");
-    ctx
+    prompt_templates::Context::from_serialize(&serde_json::json!({
+        "context": {
+            "api_version": "v3.1",
+            "env_name": "staging"
+        }
+    }))
+    .unwrap()
 }
 
 #[llm_tool(

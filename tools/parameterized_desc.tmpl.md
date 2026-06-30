@@ -1,9 +1,12 @@
 ---
 name: parameterized_desc
 description: Template with compile-time params
+types:
+  - ApiContext = struct(api_version = str, env_name = str)
+
+allow_unused: true
 params:
-  - api_version = str
-  - env_name = str
+  - context = ApiContext
 ---
 
-Fetch weather data using API {{ api_version }} in {{ env_name }} environment.
+Fetch weather data using API {{ context.api_version }} in {{ context.env_name }} environment.

@@ -24,6 +24,70 @@ pub(crate) fn hash_source(source: &str) -> u64 {
     prompt_templates::__private::fnv1a_hash(source.as_bytes())
 }
 
+pub(crate) const KW_LIST: &str = "list";
+pub(crate) const KW_STRUCT: &str = "struct";
+pub(crate) const KW_OPTION: &str = "option";
+pub(crate) const KW_ENUM: &str = "enum";
+pub(crate) const KW_TMPL: &str = "tmpl";
+
+pub(crate) const ANGLE_OPEN: char = '<';
+pub(crate) const BRACKET_OPEN: char = '[';
+#[cfg(feature = "prompt-templates")]
+pub(crate) const CHAR_SLASH: char = '/';
+
+pub(crate) const PAREN_SYNTAX: &str = "(...)";
+pub(crate) const ANGLE_SYNTAX: &str = "<...>";
+pub(crate) const BRACKET_SYNTAX: &str = "[...]";
+pub(crate) const FRONTMATTER_DELIM: &str = "---";
+pub(crate) const NEWLINE_DELIM_LF: &str = "\n---";
+pub(crate) const NEWLINE_DELIM_CRLF: &str = "\r\n---";
+pub(crate) const REL_PREFIX_CUR: &str = "./";
+#[cfg(feature = "prompt-templates")]
+pub(crate) const LABEL_INLINE: &str = "inline";
+#[cfg(feature = "prompt-templates")]
+pub(crate) const LABEL_INLINE_RESP: &str = "inline response";
+
+pub(crate) fn normalize_and_validate_syntax(
+    source: &str,
+    rel_path: &str,
+) -> Result<String, String> {
+    let trimmed_start = source.trim_start();
+    if !trimmed_start.starts_with(FRONTMATTER_DELIM) {
+        return Ok(source.to_string());
+    }
+
+    let after_first_delim = &trimmed_start[FRONTMATTER_DELIM.len()..];
+    let end_idx = if let Some(idx) = after_first_delim.find(NEWLINE_DELIM_LF) {
+        idx
+    } else if let Some(idx) = after_first_delim.find(NEWLINE_DELIM_CRLF) {
+        idx
+    } else {
+        return Ok(source.to_string());
+    };
+
+    let prefix_len = source.len() - after_first_delim.len();
+    let fm_str = &source[prefix_len..prefix_len + end_idx];
+
+    // Reject legacy angle-bracket and square-bracket syntax for compound types.
+    // prompt-templates now requires parentheses exclusively.
+    let illegal_keywords = [KW_LIST, KW_STRUCT, KW_OPTION, KW_ENUM, KW_TMPL];
+    for kw in &illegal_keywords {
+        if fm_str.contains(&format!("{kw}{ANGLE_OPEN}"))
+            || fm_str.contains(&format!("{kw} {ANGLE_OPEN}"))
+            || fm_str.contains(&format!("{kw}{BRACKET_OPEN}"))
+            || fm_str.contains(&format!("{kw} {BRACKET_OPEN}"))
+        {
+            return Err(format!(
+                "template '{rel_path}' uses illegal {ANGLE_SYNTAX} or {BRACKET_SYNTAX} fallback syntax; only full {PAREN_SYNTAX} parentheses are permitted"
+            ));
+        }
+    }
+
+    // Source already uses () syntax which prompt-templates handles natively.
+    // No normalization needed.
+    Ok(source.to_string())
+}
+
 /// Compile a template source string into a pre-compiled AST.
 ///
 /// Performs all the same validation as `prompt-templates-macros`: undeclared
@@ -221,9 +285,14 @@ fn load_include_declarations(
     }
     let included_source = std::fs::read_to_string(include_path)
         .map_err(|e| format!("cannot read include {}: {e}", include_path.display()))?;
-    let included_base_dir = include_path.parent().unwrap_or(std::path::Path::new("."));
+    let cur_dir = REL_PREFIX_CUR.trim_end_matches(CHAR_SLASH);
+    let included_base_dir = include_path
+        .parent()
+        .unwrap_or(std::path::Path::new(cur_dir));
+    let norm_inc_src =
+        normalize_and_validate_syntax(&included_source, &include_path.display().to_string())?;
     let (included_fm, included_body) =
-        prompt_templates::parse_frontmatter_with_base_dir(&included_source, included_base_dir)
+        prompt_templates::parse_frontmatter_with_base_dir(&norm_inc_src, included_base_dir)
             .map_err(|e| format!("syntax error in include {}: {e}", include_path.display()))?;
     let (included_segments, _) =
         prompt_templates::compiled::compile(included_body, &included_fm.type_aliases).map_err(
@@ -254,8 +323,10 @@ fn resolve_single_include(
         .map_err(|e| format!("cannot read include {}: {e}", include_path.display()))?;
 
     let included_base_dir = include_path.parent().unwrap_or(base_dir);
+    let norm_inc_src =
+        normalize_and_validate_syntax(&included_source, &include_path.display().to_string())?;
     let (included_fm, included_body) =
-        prompt_templates::parse_frontmatter_with_base_dir(&included_source, included_base_dir)
+        prompt_templates::parse_frontmatter_with_base_dir(&norm_inc_src, included_base_dir)
             .map_err(|e| format!("syntax error in include {}: {e}", include_path.display()))?;
 
     let (mut included_segments, included_inline_templates) =
@@ -293,4 +364,48 @@ fn resolve_single_include(
         imported_consts: std::sync::Arc::new(HashMap::default()),
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rejects_angle_bracket_syntax() {
+        let fm = "---\ntypes:\n  - Foo = struct<a = str>\n---\nbody";
+        let res = normalize_and_validate_syntax(fm, "test.tmpl.md");
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("uses illegal <...> or [...] fallback syntax"),
+            "got: {err}"
+        );
+
+        let fm_list = "---\nparams:\n  - items = list<str>\n---\nbody";
+        let res_list = normalize_and_validate_syntax(fm_list, "test.tmpl.md");
+        assert!(res_list.is_err());
+    }
+
+    #[test]
+    fn test_rejects_bracket_syntax() {
+        let fm = "---\ntypes:\n  - Foo = struct[a = str]\n---\nbody";
+        let res = normalize_and_validate_syntax(fm, "test.tmpl.md");
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("uses illegal <...> or [...] fallback syntax"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_accepts_paren_syntax() {
+        let fm =
+            "---\ntypes:\n  - Foo = struct(a = str)\n\nparams:\n  - items = list(Foo)\n---\nbody";
+        let res = normalize_and_validate_syntax(fm, "test.tmpl.md");
+        assert!(res.is_ok(), "failed: {:?}", res.err());
+        let norm = res.unwrap();
+        assert!(norm.contains("struct(a = str)"), "got: {norm}");
+        assert!(norm.contains("list(Foo)"), "got: {norm}");
+    }
 }

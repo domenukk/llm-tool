@@ -286,7 +286,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "llm-tool"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "futures",
  "hashbrown",
@@ -305,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "llm-tool-macros"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "convert_case",
  "hashbrown",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "llm-tool-mcp"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "llm-tool",
  "schemars",
@@ -387,9 +387,9 @@ dependencies = [
 
 [[package]]
 name = "prompt-templates"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9bbc026fd142bb023983f0d1530f1a179355d0201f78d7b267c61e973beda4e2"
+checksum = "14ddc8375e02ad33a9c739a033a6aba0d078d29be3d45d46008eda2831d3aad3"
 dependencies = [
  "ciborium",
  "const-str",
@@ -404,9 +404,9 @@ dependencies = [
 
 [[package]]
 name = "prompt-templates-macros"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d89a51913725006df3ac66efc05b3fbc818a810a428a84daa671d5b6f04ec042"
+checksum = "39f3e7a4cafb2b84724d54a7bb630cece95ac4b9902b1c28ec8cb703195105bb"
 dependencies = [
  "hashbrown",
  "proc-macro2",

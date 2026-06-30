@@ -1,6 +1,6 @@
 [package]
 name = "llm-tool"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Framework-agnostic Rust tool definitions for LLM agents"
@@ -41,11 +41,11 @@ prompt-templates = [
 ]
 
 [dependencies]
-llm-tool-macros = { path = "crates/llm-tool-macros", version = "0.2.1" }
-prompt-templates = { version = "0.2.1", optional = true, default-features = false, features = [
+llm-tool-macros = { path = "crates/llm-tool-macros", version = "0.3.0" }
+prompt-templates = { version = "0.3.0", optional = true, default-features = false, features = [
   "serde",
 ] }
-prompt-templates-macros = { version = "0.2.1", optional = true, default-features = false, features = [
+prompt-templates-macros = { version = "0.3.0", optional = true, default-features = false, features = [
   "serde",
 ] }
 hashbrown = { version = "0.17", default-features = false, features = [

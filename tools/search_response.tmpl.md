@@ -1,8 +1,12 @@
 ---
 name: search_response
+types:
+  - SearchResultItem = struct(title = str, score = int)
+
+allow_unused: true
 params:
   - query = str
-  - results = list<title = str, score = int>
+  - results = list(SearchResultItem)
   - total = int
 ---
 

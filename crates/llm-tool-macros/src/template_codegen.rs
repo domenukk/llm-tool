@@ -398,14 +398,16 @@ pub(crate) fn codegen_template(
     );
     quote! {
         ::llm_tool::__prompt_templates::Template::from_precompiled(
-            &[#(#segments_tokens),*],
-            &[#(#decls_tokens),*],
-            &[],
-            #hash,
-            &[],
-            &[],
-            #name_tokens,
-            #desc_tokens,
+            &::llm_tool::__prompt_templates::PrecompiledTemplateData {
+                segments: &[#(#segments_tokens),*],
+                declared_variables: &[#(#decls_tokens),*],
+                inline_templates: &[],
+                source_hash: #hash,
+                consts: &[],
+                imported_consts: &[],
+                name: #name_tokens,
+                description: #desc_tokens,
+            }
         )
     }
 }

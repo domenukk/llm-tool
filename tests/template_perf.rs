@@ -21,10 +21,13 @@ fn static_tool(
 // ── Dynamic template description ──
 
 fn bench_context(_tool: &DynamicTool) -> prompt_templates::Context {
-    let mut ctx = prompt_templates::Context::new();
-    ctx.set("api_version", "v3.1");
-    ctx.set("env_name", "production");
-    ctx
+    prompt_templates::Context::from_serialize(&serde_json::json!({
+        "context": {
+            "api_version": "v3.1",
+            "env_name": "production"
+        }
+    }))
+    .unwrap()
 }
 
 #[llm_tool(prompt_file = "tools/dynamic_desc.tmpl.md", context = bench_context)]

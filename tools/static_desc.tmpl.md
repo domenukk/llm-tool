@@ -1,7 +1,6 @@
 ---
 name: get_weather
 description: Weather lookup tool for LLM agents
-params: []
 ---
 
 Fetch the current weather for any city worldwide.
