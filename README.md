@@ -500,6 +500,20 @@ assert_eq!(result.content(), "hi");
 # });
 ```
 
+## Model Context Protocol (MCP) Server
+
+If you need to expose your tools over the standard [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), use our companion crate [`llm-tool-mcp`](https://crates.io/crates/llm-tool-mcp):
+
+```toml
+[dependencies]
+llm-tool = "0.4"
+llm-tool-mcp = "0.4"
+```
+
+Pass any `ToolRegistry` to `McpServer` to get a spec-compliant MCP server supporting stdio, TCP, and Unix domain sockets out of the box.
+
+See the [`llm-tool-mcp` documentation](crates/llm-tool-mcp/README.md) for full quickstart examples, async transports, custom routing, and error handling.
+
 ## Plugging into any agent framework
 
 `llm-tool` is deliberately framework-agnostic. To integrate with a new

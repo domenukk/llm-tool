@@ -1,6 +1,6 @@
 [package]
 name = "llm-tool-mcp"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 rust-version = "1.85"
 description = "Model Context Protocol (MCP) server integration for llm-tool registries"
@@ -15,7 +15,7 @@ default = []
 md-tmpl = ["llm-tool/md-tmpl"]
 
 [dependencies]
-llm-tool = { path = "../llm-tool", version = "0.4.1" }
+llm-tool = { path = "../llm-tool", version = "0.4.2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "io-util", "net"] }
@@ -25,6 +25,11 @@ tracing = "0.1"
 schemars = "1"
 tokio = { version = "1", features = ["rt", "macros", "time", "net", "io-util"] }
 tempfile = "3"
+rmcp = { version = "2.0.0", features = [
+  "client",
+  "transport-async-rw",
+  "transport-child-process",
+] }
 
 [lints]
 workspace = true

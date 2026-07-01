@@ -18,6 +18,10 @@ struct RegisteredTool {
     erased: Box<dyn ErasedTool>,
 }
 
+/// A registry of named tools available for dynamic dispatch.
+///
+/// Holds type-erased tool implementations and cached [`ToolDefinition`](super::types::ToolDefinition)
+/// schemas for fast lookup and execution.
 pub struct ToolRegistry {
     tools: HashMap<&'static str, RegisteredTool>,
 }

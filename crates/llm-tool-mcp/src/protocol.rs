@@ -5,6 +5,11 @@
 
 use serde::{Deserialize, Serialize};
 
+// ── JSON-RPC 2.0 constants ──────────────────────────────────────────
+
+/// The only valid JSON-RPC protocol version.
+pub const JSONRPC_VERSION: &str = "2.0";
+
 // ── Standard JSON-RPC 2.0 error codes ───────────────────────────────
 
 /// Malformed JSON.
@@ -69,6 +74,9 @@ pub struct JsonRpcError {
     pub code: i64,
     /// Human-readable description.
     pub message: String,
+    /// Optional additional data about the error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
 }
 
 impl JsonRpcResponse {
@@ -100,6 +108,27 @@ impl JsonRpcResponse {
             error: Some(JsonRpcError {
                 code,
                 message: message.into(),
+                data: None,
+            }),
+        }
+    }
+
+    /// Build an error response with additional structured data.
+    #[must_use]
+    pub fn error_with_data(
+        id: Option<serde_json::Value>,
+        code: i64,
+        message: impl Into<String>,
+        data: serde_json::Value,
+    ) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: None,
+            error: Some(JsonRpcError {
+                code,
+                message: message.into(),
+                data: Some(data),
             }),
         }
     }
@@ -255,5 +284,29 @@ mod tests {
         let resp = JsonRpcResponse::success(None, serde_json::json!(null));
         // &'static str avoids allocation for every response.
         assert_eq!(resp.jsonrpc, "2.0");
+    }
+
+    #[test]
+    fn error_without_data_omits_data_field() {
+        let resp = JsonRpcResponse::error(Some(serde_json::json!(1)), PARSE_ERROR, "bad");
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("data"));
+    }
+
+    #[test]
+    fn error_with_data_includes_data_field() {
+        let resp = JsonRpcResponse::error_with_data(
+            Some(serde_json::json!(1)),
+            INTERNAL_ERROR,
+            "boom",
+            serde_json::json!({"detail": "stack trace"}),
+        );
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""data":{"detail":"stack trace"}"#));
+    }
+
+    #[test]
+    fn jsonrpc_version_constant() {
+        assert_eq!(JSONRPC_VERSION, "2.0");
     }
 }

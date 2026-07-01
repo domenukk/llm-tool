@@ -29,8 +29,9 @@ use llm_tool::{ToolContext, ToolDefinition, ToolRegistry};
 use tracing::{debug, error, info};
 
 use crate::protocol::{
-    self, Capabilities, ContentItem, InitializeResult, JsonRpcRequest, JsonRpcResponse,
-    McpToolSchema, ServerInfo, ToolCallParams, ToolCallResult, ToolCapabilities, ToolsListResult,
+    self, Capabilities, ContentItem, InitializeResult, JSONRPC_VERSION, JsonRpcRequest,
+    JsonRpcResponse, McpToolSchema, ServerInfo, ToolCallParams, ToolCallResult, ToolCapabilities,
+    ToolsListResult,
 };
 
 /// An MCP server that serves tools from a [`ToolRegistry`] over JSON-RPC.
@@ -191,6 +192,15 @@ impl McpServer {
             debug!(request = %line, "mcp request");
 
             let response = rt.block_on(self.handle_request(&line));
+
+            // Per JSON-RPC 2.0 §4.1: "The Server MUST NOT reply to a
+            // Notification."  Notifications have no `id`, which serde
+            // serializes as `"id": null`.  Drop these silently.
+            if response.id.is_none() {
+                debug!("dropping notification response (id: null)");
+                continue;
+            }
+
             let json = serde_json::to_string(&response).map_err(|e| {
                 error!(error = %e, "failed to serialize JSON-RPC response");
                 io::Error::other(e)
@@ -234,6 +244,14 @@ impl McpServer {
             debug!(request = %line, "mcp request");
 
             let response = self.handle_request(&line).await;
+
+            // Per JSON-RPC 2.0 §4.1: "The Server MUST NOT reply to a
+            // Notification."  Notifications have no `id`.  Drop these.
+            if response.id.is_none() {
+                debug!("dropping notification response (id: null)");
+                continue;
+            }
+
             let json = serde_json::to_string(&response).map_err(|e| {
                 error!(error = %e, "failed to serialize JSON-RPC response");
                 io::Error::other(e)
@@ -338,6 +356,18 @@ impl McpServer {
     ///
     /// Safe to call from within an existing tokio runtime.
     pub async fn handle_request(&self, line: &str) -> JsonRpcResponse {
+        // Detect batch requests (JSON arrays) — we don't support them,
+        // but must return a proper INVALID_REQUEST rather than a parse error.
+        if let Some(first_non_ws) = line.trim_start().as_bytes().first() {
+            if *first_non_ws == b'[' {
+                return JsonRpcResponse::error(
+                    None,
+                    protocol::INVALID_REQUEST,
+                    "batch requests are not supported",
+                );
+            }
+        }
+
         let request: JsonRpcRequest = match serde_json::from_str(line) {
             Ok(r) => r,
             Err(e) => {
@@ -349,12 +379,35 @@ impl McpServer {
             }
         };
 
+        // JSON-RPC 2.0 §4: the "jsonrpc" field MUST be exactly "2.0".
+        if request.version != JSONRPC_VERSION {
+            return JsonRpcResponse::error(
+                request.id,
+                protocol::INVALID_REQUEST,
+                format!(
+                    "invalid jsonrpc version: expected \"2.0\", got \"{}\"",
+                    request.version
+                ),
+            );
+        }
+
+        self.dispatch_method(request).await
+    }
+
+    /// Dispatch a validated JSON-RPC request to the appropriate method handler.
+    async fn dispatch_method(&self, request: JsonRpcRequest) -> JsonRpcResponse {
         let id = request.id.clone();
 
         match request.method.as_str() {
-            "initialize" => self.handle_initialize(id),
+            "initialize" => self.handle_initialize(id, request.params.as_ref()),
+            "ping" => JsonRpcResponse::success(id, serde_json::json!({})),
             // MCP clients may send `initialized` as a notification — acknowledge it.
             "notifications/initialized" | "initialized" => {
+                JsonRpcResponse::success(id, serde_json::Map::new())
+            }
+            // Cancellation notifications — acknowledge silently.
+            "notifications/cancelled" => {
+                debug!("received cancellation notification");
                 JsonRpcResponse::success(id, serde_json::Map::new())
             }
             "tools/list" => self.handle_tools_list(id),
@@ -369,12 +422,29 @@ impl McpServer {
 
     // ── Method handlers ─────────────────────────────────────────────
 
-    fn handle_initialize(&self, id: Option<serde_json::Value>) -> JsonRpcResponse {
+    /// MCP protocol version supported by this server.
+    const PROTOCOL_VERSION: &str = "2024-11-05";
+
+    fn handle_initialize(
+        &self,
+        id: Option<serde_json::Value>,
+        params: Option<&serde_json::Value>,
+    ) -> JsonRpcResponse {
         info!(server = %self.name, version = %self.version, "MCP initialize");
+
+        // Protocol version negotiation: if the client sends a
+        // `protocolVersion` in params, we report our supported version.
+        // The server always responds with the version it actually supports.
+        if let Some(p) = params {
+            if let Some(client_ver) = p.get("protocolVersion").and_then(|v| v.as_str()) {
+                debug!(client_version = %client_ver, server_version = Self::PROTOCOL_VERSION, "protocol version negotiation");
+            }
+        }
+
         JsonRpcResponse::success(
             id,
             InitializeResult {
-                protocol_version: "2024-11-05",
+                protocol_version: Self::PROTOCOL_VERSION,
                 server_info: ServerInfo {
                     name: self.name.clone(),
                     version: self.version.clone(),
@@ -914,5 +984,532 @@ mod tests {
         assert_eq!(schema.name, "my_tool");
         assert_eq!(schema.description, "Does stuff.");
         assert_eq!(schema.input_schema["type"], "object");
+    }
+
+    // ── Notification filtering tests ────────────────────────────────
+
+    #[test]
+    fn run_drops_notification_responses() {
+        let server = test_server();
+
+        // Mix a notification (no id) among regular requests.
+        let input = [
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ];
+        let input_str = input.join("\n") + "\n";
+        let reader = Cursor::new(input_str.as_bytes());
+
+        let mut output = Vec::new();
+        server.run(reader, &mut output).unwrap();
+
+        let responses: Vec<serde_json::Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        // Only 2 responses — the notification produced no output.
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[1]["id"], 2);
+    }
+
+    #[tokio::test]
+    async fn run_async_drops_notification_responses() {
+        let server = test_server();
+
+        let input = [
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ];
+        let input_str = input.join("\n") + "\n";
+        let mut output = Vec::new();
+
+        server
+            .run_async(input_str.as_bytes(), &mut output)
+            .await
+            .unwrap();
+
+        let responses: Vec<serde_json::Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[1]["id"], 2);
+    }
+
+    // ── JSON-RPC version validation ─────────────────────────────────
+
+    #[tokio::test]
+    async fn invalid_jsonrpc_version_returns_invalid_request() {
+        let server = test_server();
+        let resp = server
+            .handle_request(r#"{"jsonrpc":"1.0","id":1,"method":"initialize"}"#)
+            .await;
+
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, protocol::INVALID_REQUEST);
+        assert!(err.message.contains("1.0"));
+    }
+
+    #[tokio::test]
+    async fn missing_jsonrpc_version_returns_parse_error() {
+        let server = test_server();
+        // Missing "jsonrpc" field entirely — serde will fail to deserialize.
+        let resp = server
+            .handle_request(r#"{"id":1,"method":"initialize"}"#)
+            .await;
+
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, protocol::PARSE_ERROR);
+    }
+
+    // ── Batch request handling ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn batch_request_returns_invalid_request() {
+        let server = test_server();
+        let resp = server
+            .handle_request(r#"[{"jsonrpc":"2.0","id":1,"method":"initialize"}]"#)
+            .await;
+
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, protocol::INVALID_REQUEST);
+        assert!(err.message.contains("batch"));
+    }
+
+    #[tokio::test]
+    async fn empty_array_returns_invalid_request() {
+        let server = test_server();
+        let resp = server.handle_request("[]").await;
+
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, protocol::INVALID_REQUEST);
+    }
+
+    // ── Empty / whitespace input ────────────────────────────────────
+
+    #[test]
+    fn run_skips_empty_and_whitespace_lines() {
+        let server = test_server();
+
+        let input = "\n  \n\t\n";
+        let reader = Cursor::new(input.as_bytes());
+
+        let mut output = Vec::new();
+        server.run(reader, &mut output).unwrap();
+
+        // No output for blank lines.
+        assert!(output.is_empty());
+    }
+
+    // ── String IDs ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn string_id_is_echoed_back() {
+        let server = test_server();
+        let resp = server
+            .handle_request(r#"{"jsonrpc":"2.0","id":"abc-123","method":"initialize"}"#)
+            .await;
+
+        assert!(resp.error.is_none());
+        assert_eq!(resp.id, Some(serde_json::json!("abc-123")));
+    }
+
+    #[tokio::test]
+    async fn null_id_is_treated_as_present() {
+        let server = test_server();
+        // JSON-RPC spec: null is a valid id value (though unusual).
+        let resp = server
+            .handle_request(r#"{"jsonrpc":"2.0","id":null,"method":"initialize"}"#)
+            .await;
+
+        // null id means this will be serialized with "id":null.
+        // The response should still be produced (not dropped as a notification)
+        // because the JSON had an explicit "id" key.
+        // Note: serde deserializes `"id": null` as `Some(Value::Null)`.
+        assert!(resp.error.is_none());
+    }
+
+    // ── Ping ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn ping_returns_empty_object() {
+        let server = test_server();
+        let resp = server
+            .handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#)
+            .await;
+
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        assert_eq!(result, serde_json::json!({}));
+    }
+
+    // ── notifications/cancelled ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn notifications_cancelled_is_accepted() {
+        let server = test_server();
+        let resp = server
+            .handle_request(
+                r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"req-1","reason":"timeout"}}"#,
+            )
+            .await;
+
+        // It's a notification (no id), so handle_request returns id=None.
+        assert!(resp.error.is_none());
+        assert!(resp.id.is_none());
+    }
+
+    // ── Large tool arguments ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn large_nested_tool_arguments() {
+        let server = test_server();
+
+        // Build deeply nested JSON: {"a": 1, "b": 2} but with a large wrapper.
+        let args = serde_json::json!({
+            "a": 1,
+            "b": 2,
+            "metadata": {
+                "level1": {
+                    "level2": {
+                        "level3": {
+                            "level4": {
+                                "level5": "deep"
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "tools/call",
+            "params": {
+                "name": "add",
+                "arguments": args
+            }
+        });
+
+        let resp = server
+            .handle_request(&serde_json::to_string(&req).unwrap())
+            .await;
+
+        // add tool only looks at a + b, extra fields are ignored by serde.
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        assert_eq!(result["content"][0]["text"], "3");
+    }
+
+    // ── Tool returning empty string ─────────────────────────────────
+
+    struct EmptyResultTool;
+    impl RustTool for EmptyResultTool {
+        type Params = EmptyParams;
+        const NAME: &'static str = "empty_result";
+        const DESCRIPTION: &'static str = "Returns empty string.";
+        async fn call(
+            &self,
+            _params: Self::Params,
+            _ctx: &ToolContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::new(String::new()))
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_returning_empty_string() {
+        let registry = ToolRegistry::new().with_tool(EmptyResultTool);
+        let server = McpServer::new("test", "0.0.1", registry);
+
+        let resp = server
+            .handle_request(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"empty_result","arguments":{}}}"#,
+            )
+            .await;
+
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        assert_eq!(result["content"][0]["text"], "");
+        assert!(result.get("isError").is_none());
+    }
+
+    // ── Concurrent TCP clients ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn tcp_multiple_concurrent_clients() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let server = test_server();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let _ = server.run_tcp_listener(listener).await;
+        });
+
+        // Spawn 3 concurrent clients.
+        let mut handles = Vec::new();
+        for i in 0..3 {
+            let addr = addr;
+            handles.push(tokio::spawn(async move {
+                let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+                let req = format!(
+                    r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{"name":"add","arguments":{{"a":{},"b":{}}}}}}}"#,
+                    i, i, 100
+                );
+                stream
+                    .write_all(format!("{req}\n").as_bytes())
+                    .await
+                    .unwrap();
+                stream.flush().await.unwrap();
+
+                let mut reader = tokio::io::BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+
+                let resp: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                let text = resp["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                let expected: i64 = i + 100;
+                assert_eq!(text, expected.to_string());
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_multiple_concurrent_clients() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let server = test_server();
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("concurrent.sock");
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+
+        tokio::spawn(async move {
+            let _ = server.run_unix_listener(listener).await;
+        });
+
+        let mut handles = Vec::new();
+        for i in 0..3 {
+            let path = sock_path.clone();
+            handles.push(tokio::spawn(async move {
+                let mut stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+                let req = format!(
+                    r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{"name":"add","arguments":{{"a":{},"b":{}}}}}}}"#,
+                    i, i, 200
+                );
+                stream
+                    .write_all(format!("{req}\n").as_bytes())
+                    .await
+                    .unwrap();
+                stream.flush().await.unwrap();
+
+                let mut reader = tokio::io::BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+
+                let resp: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                let text = resp["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                let expected: i64 = i + 200;
+                assert_eq!(text, expected.to_string());
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+    }
+
+    // ── Protocol version negotiation ────────────────────────────────
+
+    #[tokio::test]
+    async fn initialize_with_client_protocol_version() {
+        let server = test_server();
+        let resp = server
+            .handle_request(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+            )
+            .await;
+
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+    }
+
+    #[tokio::test]
+    async fn initialize_with_unknown_client_version_returns_server_version() {
+        let server = test_server();
+        let resp = server
+            .handle_request(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"9999-01-01"}}"#,
+            )
+            .await;
+
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        // Server always returns its own supported version.
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+    }
+
+    // ── Notification in run() produces no output ────────────────────
+
+    #[test]
+    fn notification_initialized_no_output_in_run() {
+        let server = test_server();
+        let input = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        let input_str = format!("{input}\n");
+        let reader = Cursor::new(input_str.as_bytes());
+
+        let mut output = Vec::new();
+        server.run(reader, &mut output).unwrap();
+
+        // Notification should produce zero bytes of output.
+        assert!(output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rmcp_client_integration_test() {
+        let server = test_server();
+        let (client_io, server_io) = tokio::io::duplex(8192);
+        let (server_r, server_w) = tokio::io::split(server_io);
+
+        tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(server_r);
+            let _ = server.run_async(&mut reader, server_w).await;
+        });
+
+        let mut client = rmcp::service::serve_client((), client_io)
+            .await
+            .expect("rmcp client handshake failed");
+
+        // 1. Verify list_all_tools
+        let tools = client.list_all_tools().await.expect("list tools failed");
+        assert_eq!(tools.len(), 3);
+
+        // 2. Verify calling a successful tool ("add")
+        let call_res = client
+            .call_tool(
+                rmcp::model::CallToolRequestParams::new("add").with_arguments(
+                    serde_json::json!({"a": 15, "b": 25})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("call tool failed");
+
+        assert!(!call_res.is_error.unwrap_or(false));
+        assert_eq!(call_res.content.len(), 1);
+        let text = match &call_res.content[0] {
+            rmcp::model::ContentBlock::Text(t) => &t.text,
+            other => panic!("expected text content, got {other:?}"),
+        };
+        assert_eq!(text, "40");
+
+        // 3. Verify calling a failing tool ("fail") returns is_error=true per MCP spec
+        let fail_res = client
+            .call_tool(rmcp::model::CallToolRequestParams::new("fail"))
+            .await
+            .expect("call tool response expected");
+        assert!(fail_res.is_error.unwrap_or(false));
+        let fail_text = match &fail_res.content[0] {
+            rmcp::model::ContentBlock::Text(t) => &t.text,
+            other => panic!("expected text content, got {other:?}"),
+        };
+        assert!(fail_text.contains("intentional failure"));
+
+        // 4. Verify calling an unknown tool returns is_error=true
+        let unknown_res = client
+            .call_tool(rmcp::model::CallToolRequestParams::new("non_existent"))
+            .await
+            .expect("call tool response expected");
+        assert!(unknown_res.is_error.unwrap_or(false));
+        let unknown_text = match &unknown_res.content[0] {
+            rmcp::model::ContentBlock::Text(t) => &t.text,
+            other => panic!("expected text content, got {other:?}"),
+        };
+        assert!(unknown_text.contains("Unknown tool: non_existent"));
+
+        // 5. Verify calling an unsupported method (like list_prompts) returns -32601 METHOD_NOT_FOUND
+        let prompt_err = client.list_all_prompts().await.unwrap_err();
+        match prompt_err {
+            rmcp::ServiceError::McpError(err) => {
+                assert_eq!(err.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
+            }
+            other => panic!("expected McpError with METHOD_NOT_FOUND, got {other:?}"),
+        }
+
+        let _ = client.close().await;
+    }
+
+    #[tokio::test]
+    async fn rmcp_client_tcp_test() {
+        let server = test_server();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let _ = server.run_tcp_listener(listener).await;
+        });
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut client = rmcp::service::serve_client((), stream)
+            .await
+            .expect("rmcp client handshake failed over TCP");
+
+        let tools = client
+            .list_all_tools()
+            .await
+            .expect("list tools failed over TCP");
+        assert_eq!(tools.len(), 3);
+
+        let _ = client.close().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rmcp_client_unix_test() {
+        let server = test_server();
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("rmcp.sock");
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+
+        tokio::spawn(async move {
+            let _ = server.run_unix_listener(listener).await;
+        });
+
+        let stream = tokio::net::UnixStream::connect(&sock_path).await.unwrap();
+        let mut client = rmcp::service::serve_client((), stream)
+            .await
+            .expect("rmcp client handshake failed over Unix socket");
+
+        let tools = client
+            .list_all_tools()
+            .await
+            .expect("list tools failed over Unix socket");
+        assert_eq!(tools.len(), 3);
+
+        let _ = client.close().await;
     }
 }
