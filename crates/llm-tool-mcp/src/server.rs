@@ -1260,9 +1260,9 @@ mod tests {
         // Spawn 3 concurrent clients.
         let mut handles = Vec::new();
         for i in 0..3 {
-            let addr = addr;
+            let client_addr = addr;
             handles.push(tokio::spawn(async move {
-                let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+                let mut stream = tokio::net::TcpStream::connect(client_addr).await.unwrap();
                 let req = format!(
                     r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{"name":"add","arguments":{{"a":{},"b":{}}}}}}}"#,
                     i, i, 100

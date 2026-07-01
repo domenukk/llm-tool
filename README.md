@@ -13,7 +13,7 @@ Add `llm-tool` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-llm-tool = "0.1"
+llm-tool = "0.4"
 ```
 
 ### Defining a tool with `#[llm_tool]`
@@ -294,8 +294,8 @@ Instead of writing tool descriptions as doc comments, you can write them in
 
 ```toml
 [dependencies]
-llm-tool = { version = "0.1", features = ["md-tmpl"] }
-md-tmpl = "0.1"
+llm-tool = { version = "0.4", features = ["md-tmpl"] }
+md-tmpl = "0.4"
 ```
 
 #### Static descriptions
@@ -502,7 +502,9 @@ assert_eq!(result.content(), "hi");
 
 ## Model Context Protocol (MCP) Server
 
-If you need to expose your tools over the standard [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), use our companion crate [`llm-tool-mcp`](https://crates.io/crates/llm-tool-mcp):
+If you need to expose your tools over the standard [Model Context Protocol
+(MCP)](https://modelcontextprotocol.io/), use our companion crate
+[`llm-tool-mcp`](https://crates.io/crates/llm-tool-mcp):
 
 ```toml
 [dependencies]
@@ -510,9 +512,11 @@ llm-tool = "0.4"
 llm-tool-mcp = "0.4"
 ```
 
-Pass any `ToolRegistry` to `McpServer` to get a spec-compliant MCP server supporting stdio, TCP, and Unix domain sockets out of the box.
+Pass any `ToolRegistry` to `McpServer` to get a spec-compliant MCP server
+supporting stdio, TCP, and Unix domain sockets out of the box.
 
-See the [`llm-tool-mcp` documentation](crates/llm-tool-mcp/README.md) for full quickstart examples, async transports, custom routing, and error handling.
+See the [`llm-tool-mcp` documentation](crates/llm-tool-mcp/README.md) for full
+quickstart examples, async transports, custom routing, and error handling.
 
 ## Plugging into any agent framework
 
