@@ -161,13 +161,25 @@ pub struct ServerInfo {
 #[derive(Debug, Serialize)]
 pub struct Capabilities {
     /// Tool support — presence signals that `tools/list` and `tools/call`
-    /// are available. The inner struct is currently empty (no pagination).
+    /// are available.
     pub tools: ToolCapabilities,
+    /// Resource support — presence signals that `resources/list` is available.
+    pub resources: ResourceCapabilities,
+    /// Prompt support — presence signals that `prompts/list` is available.
+    pub prompts: PromptCapabilities,
 }
 
 /// Tool-specific capabilities (currently empty per MCP spec).
 #[derive(Debug, Default, Serialize)]
 pub struct ToolCapabilities {}
+
+/// Resource-specific capabilities (currently empty per MCP spec).
+#[derive(Debug, Default, Serialize)]
+pub struct ResourceCapabilities {}
+
+/// Prompt-specific capabilities (currently empty per MCP spec).
+#[derive(Debug, Default, Serialize)]
+pub struct PromptCapabilities {}
 
 /// Result body for `tools/list`.
 #[derive(Clone, Debug, Serialize)]
@@ -223,6 +235,140 @@ pub struct ContentItem {
     pub content_type: &'static str,
     /// The text content.
     pub text: String,
+}
+
+// ── Prompts ─────────────────────────────────────────────────────────
+
+/// Result body for `prompts/list`.
+#[derive(Clone, Debug, Serialize)]
+pub struct PromptsListResult {
+    /// Available prompts.
+    pub prompts: Vec<PromptDefinition>,
+}
+
+pub use llm_tool::{PromptArgumentDefinition, PromptDefinition};
+
+/// Parameters for `prompts/get`.
+#[derive(Debug, Deserialize)]
+pub struct GetPromptParams {
+    /// Name of the prompt to retrieve.
+    pub name: String,
+    /// Arguments to substitute into the template.
+    #[serde(default = "empty_object")]
+    pub arguments: serde_json::Value,
+}
+
+/// Result body for `prompts/get`.
+#[derive(Debug, Serialize)]
+pub struct GetPromptResult {
+    /// Optional description of the rendered prompt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Rendered messages.
+    pub messages: Vec<PromptMessage>,
+}
+
+/// A rendered message inside `GetPromptResult`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromptMessage {
+    /// Role (`"user"` or `"assistant"`).
+    pub role: String,
+    /// Content block.
+    pub content: PromptMessageContent,
+}
+
+/// Content inside a `PromptMessage`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum PromptMessageContent {
+    /// Text content.
+    #[serde(rename = "text")]
+    Text {
+        /// Text string.
+        text: String,
+    },
+    /// Embedded resource content.
+    #[serde(rename = "resource")]
+    Resource {
+        /// Resource payload.
+        resource: ResourceContent,
+    },
+}
+
+// ── Resources ───────────────────────────────────────────────────────
+
+/// Wire format for a concrete resource in `resources/list`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpResource {
+    /// Resource URI.
+    pub uri: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Optional description.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Optional MIME type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+pub use McpResource as Resource;
+
+/// Result body for `resources/list`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResourcesListResult {
+    /// Available resources.
+    pub resources: Vec<McpResource>,
+}
+
+pub use llm_tool::ResourceDefinition;
+
+/// Parameters for `resources/read`.
+#[derive(Debug, Deserialize)]
+pub struct ReadResourceParams {
+    /// URI of the resource to read.
+    pub uri: String,
+}
+
+/// Result body for `resources/read`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReadResourceResult {
+    /// Resource content blocks.
+    pub contents: Vec<ResourceContent>,
+}
+
+pub use llm_tool::ResourceOutputContent as ResourceContent;
+
+/// An empty JSON object used for responses like ping or logging/setLevel.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmptyResult {}
+
+/// Result body for `resources/templates/list`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceTemplatesListResult {
+    /// Available resource templates.
+    pub resource_templates: Vec<ResourceDefinition>,
+}
+
+/// Result body for `completion/complete`.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct CompletionCompleteResult {
+    /// Completion values and pagination.
+    pub completion: CompletionResultData,
+}
+
+/// Data inside `CompletionCompleteResult`.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionResultData {
+    /// Recommended completion values.
+    pub values: Vec<String>,
+    /// Total number of available completions.
+    pub total: usize,
+    /// Whether more completions are available.
+    pub has_more: bool,
 }
 
 #[cfg(test)]

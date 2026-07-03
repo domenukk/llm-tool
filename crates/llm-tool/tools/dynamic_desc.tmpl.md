@@ -3,6 +3,7 @@ name: dynamic_tool
 description: A tool with a dynamic description
 types:
   - ApiContext = struct(api_version = str, env_name = str)
+
 params:
   - context = ApiContext
 ---

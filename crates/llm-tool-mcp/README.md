@@ -9,7 +9,7 @@ fully compliant MCP server — no boilerplate.
 ## Quick start
 
 ```rust
-use llm_tool::{llm_tool, ToolError, ToolContext, ToolRegistry};
+use llm_tool::{llm_prompt, llm_resource, llm_tool, ToolContext, ToolError, ToolRegistry};
 use llm_tool_mcp::McpServer;
 
 /// Adds two numbers.
@@ -23,9 +23,26 @@ fn add(
     Ok(format!("{}", a + b))
 }
 
+/// Code review instruction template.
+#[llm_prompt]
+fn review_prompt(
+    /// Programming language.
+    lang: String,
+) -> String {
+    format!("Please review this {lang} code for security bugs.")
+}
+
+/// Dynamic application config resource.
+#[llm_resource(uri = "file:///config/{app}.json")]
+fn get_config(app: String) -> String {
+    format!(r#"{{"app":"{app}","enabled":true}}"#)
+}
+
 let registry = ToolRegistry::new().with_tool(Add);
 
 let server = McpServer::new("my-server", "0.1.0", registry)
+    .with_prompt(ReviewPrompt)
+    .with_resource(GetConfig)
     .with_context(ToolContext::new(Some("caller-id".into())));
 
 // In production: server.run_stdio().expect("server failed");
@@ -65,12 +82,17 @@ let server = McpServer::new("my-server", "0.1.0", ToolRegistry::new());
 
 ## What it handles
 
-| MCP method                  | Behavior                                                   |
-| --------------------------- | ---------------------------------------------------------- |
-| `initialize`                | Returns server info and `{"tools": {}}` capabilities       |
-| `notifications/initialized` | Acknowledged silently                                      |
-| `tools/list`                | Derives schemas from `ToolRegistry::definitions()`         |
-| `tools/call`                | Dispatches via `ToolRegistry::dispatch()`, returns content |
+| MCP method                  | Behavior                                                       |
+| --------------------------- | -------------------------------------------------------------- |
+| `initialize`                | Returns server info and capabilities for registered primitives |
+| `notifications/initialized` | Acknowledged silently                                          |
+| `tools/list`                | Derives schemas from `ToolRegistry::definitions()`             |
+| `tools/call`                | Dispatches via `ToolRegistry::dispatch()`, returns content     |
+| `prompts/list`              | Lists all registered prompts and their argument schemas        |
+| `prompts/get`               | Renders prompt messages with argument substitution             |
+| `resources/list`            | Lists all static resources registered on the server            |
+| `resources/templates/list`  | Lists all URI templates (e.g. `"file:///config/{app}.json"`)   |
+| `resources/read`            | Matches URIs against resources/templates and returns content   |
 
 Tool errors are returned as MCP content with `isError: true` (spec-compliant),
 not as JSON-RPC errors.

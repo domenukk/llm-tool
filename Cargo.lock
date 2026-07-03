@@ -445,7 +445,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "llm-tool"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "futures",
  "hashbrown",
@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "llm-tool-macros"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "convert_case",
  "hashbrown",
@@ -476,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "llm-tool-mcp"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "llm-tool",
  "rmcp",
@@ -496,9 +496,9 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "md-tmpl"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56bce332e998bbc29a697b642199f7548e2a05fad6974b98cbf900f1ff292d2e"
+checksum = "aa149bfa4fd0f7dfb842cda89061813f84a1211c8b6260c5404c25db70648e3b"
 dependencies = [
  "ciborium",
  "const-str",
@@ -513,9 +513,9 @@ dependencies = [
 
 [[package]]
 name = "md-tmpl-macros"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d710eab5993834bffe594836194d8427beacc33fcc67f1f8f732acb38e66ecda"
+checksum = "3ce7df91238126d42f7b1e41c3fb8feee8afe0db694b98d9103984aa10fe1f89"
 dependencies = [
  "hashbrown",
  "md-tmpl",
@@ -671,9 +671,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "2.0.0"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d52d21e5b342699bc4de690e6104fc4e43255e4e8420ff0f2cbb963aac09da6f"
+checksum = "f00a32c3b81b7b254076a65abd5ab2551209146713ba38f73818657e865e9433"
 dependencies = [
  "async-trait",
  "base64",
@@ -695,9 +695,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "2.0.0"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c68cec74c5b3ac73ff46375ae49e161637bda80bba70f0d5db641583bb308ee"
+checksum = "2ee70afb7956da9f30d5348a2539b5eb90d9038f834463657ab717076ac3b1ad"
 dependencies = [
  "darling",
  "proc-macro2",

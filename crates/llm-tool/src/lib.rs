@@ -9,6 +9,8 @@ extern crate self as llm_tool;
 
 mod compat;
 mod registry;
+mod rust_prompt;
+mod rust_resource;
 mod rust_tool;
 mod types;
 
@@ -31,5 +33,7 @@ pub use md_tmpl;
 #[doc(hidden)]
 pub use md_tmpl_macros as __md_tmpl_macros;
 pub use registry::*;
+pub use rust_prompt::*;
+pub use rust_resource::*;
 pub use rust_tool::*;
 pub use types::*;

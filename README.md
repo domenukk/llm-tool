@@ -13,7 +13,7 @@ Add `llm-tool` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-llm-tool = "0.4"
+llm-tool = "0.5"
 ```
 
 ### Defining a tool with `#[llm_tool]`
@@ -294,8 +294,8 @@ Instead of writing tool descriptions as doc comments, you can write them in
 
 ```toml
 [dependencies]
-llm-tool = { version = "0.4", features = ["md-tmpl"] }
-md-tmpl = "0.4"
+llm-tool = { version = "0.5", features = ["md-tmpl"] }
+md-tmpl = "0.5"
 ```
 
 #### Static descriptions
@@ -500,23 +500,47 @@ assert_eq!(result.content(), "hi");
 # });
 ```
 
-## Model Context Protocol (MCP) Server
+## Model Context Protocol (MCP) Server & 3-Pillar Primitives
 
-If you need to expose your tools over the standard [Model Context Protocol
-(MCP)](https://modelcontextprotocol.io/), use our companion crate
-[`llm-tool-mcp`](https://crates.io/crates/llm-tool-mcp):
+If you need to expose your tools, prompts, or resources over the standard [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), use our companion crate [`llm-tool-mcp`](https://crates.io/crates/llm-tool-mcp):
 
 ```toml
 [dependencies]
-llm-tool = "0.4"
-llm-tool-mcp = "0.4"
+llm-tool = "0.5"
+llm-tool-mcp = "0.5"
 ```
 
-Pass any `ToolRegistry` to `McpServer` to get a spec-compliant MCP server
-supporting stdio, TCP, and Unix domain sockets out of the box.
+In addition to `#[llm_tool]`, `llm-tool` provides native attribute macros for the remaining two MCP pillars:
 
-See the [`llm-tool-mcp` documentation](crates/llm-tool-mcp/README.md) for full
-quickstart examples, async transports, custom routing, and error handling.
+- **`#[llm_prompt]`**: Defines reusable prompt templates with argument substitution (`prompts/list` and `prompts/get`).
+- **`#[llm_resource(uri = "...")]`**: Defines static or dynamic resources (`resources/list`, `resources/templates/list`, and `resources/read`) with URI pattern matching.
+
+```rust, ignore
+use llm_tool::{llm_prompt, llm_resource, ToolRegistry};
+use llm_tool_mcp::McpServer;
+
+/// Code review instruction template.
+#[llm_prompt]
+fn review_prompt(
+    /// Programming language.
+    lang: String,
+) -> String {
+    format!("Please review this {lang} code for security bugs.")
+}
+
+/// Dynamic application config resource.
+#[llm_resource(uri = "file:///config/{app}.json")]
+fn get_config(app: String) -> String {
+    format!(r#"{{"app":"{app}","enabled":true}}"#)
+}
+
+let registry = ToolRegistry::new();
+let server = McpServer::new("my-server", "0.1.0", registry)
+    .with_prompt(ReviewPrompt)
+    .with_resource(GetConfig);
+```
+
+See the [`llm-tool-mcp` documentation](crates/llm-tool-mcp/README.md) for full quickstart examples, async transports, custom routing, and error handling.
 
 ## Plugging into any agent framework
 
@@ -574,17 +598,21 @@ async fn handle_tool_call(
 
 ## Key types
 
-| Type             | Description                                                           |
-| ---------------- | --------------------------------------------------------------------- |
-| `RustTool`       | Trait for implementing a tool with typed parameters.                  |
-| `ToolRegistry`   | Registry for storing and dispatching tools by name.                   |
-| `ToolDefinition` | Serializable metadata (name, description, JSON Schema).               |
-| `ToolContext`    | Execution context with conversation state and shared key-value store. |
-| `ToolOutput`     | Structured return value (content + metadata) from tool execution.     |
-| `ToolError`      | Error type with `From` impls for `io::Error`, `serde_json::Error`.    |
-| `Json<T>`        | Wrapper for infallible serialization of `T: Serialize` into output.   |
-| `EmptyParams`    | Convenience struct for tools that take no parameters.                 |
-| `#[llm_tool]`    | Proc-macro attribute for defining tools from plain functions.         |
+| Type              | Description                                                           |
+| ----------------- | --------------------------------------------------------------------- |
+| `RustTool`        | Trait for implementing a tool with typed parameters.                  |
+| `RustPrompt`      | Trait for implementing an MCP prompt template with typed arguments.   |
+| `RustResource`    | Trait for implementing an MCP resource with URI pattern matching.     |
+| `ToolRegistry`    | Registry for storing and dispatching tools by name.                   |
+| `ToolDefinition`  | Serializable metadata (name, description, JSON Schema).               |
+| `ToolContext`     | Execution context with conversation state and shared key-value store. |
+| `ToolOutput`      | Structured return value (content + metadata) from tool execution.     |
+| `ToolError`       | Error type with `From` impls for `io::Error`, `serde_json::Error`.    |
+| `Json<T>`         | Wrapper for infallible serialization of `T: Serialize` into output.   |
+| `EmptyParams`     | Convenience struct for tools that take no parameters.                 |
+| `#[llm_tool]`     | Proc-macro attribute for defining tools from plain functions.         |
+| `#[llm_prompt]`   | Proc-macro attribute for defining MCP prompts from plain functions.   |
+| `#[llm_resource]` | Proc-macro attribute for defining MCP resources from plain functions. |
 
 | Feature   | Description                                                       |
 | --------- | ----------------------------------------------------------------- |
