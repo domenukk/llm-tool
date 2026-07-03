@@ -8,11 +8,11 @@ Write standard Rust functions. Get perfectly typed LLM tools, Prompts, and Resou
 
 ## Why `llm-tool`?
 
-*   **Zero Boilerplate:** Use `#[llm_tool]`, `#[llm_prompt]`, and `#[llm_resource]` on plain functions.
-*   **Strongly Typed:** Parameters are automatically typed and validated. Missing or extra arguments are caught instantly.
-*   **Framework Agnostic:** Use the raw `ToolRegistry` to get JSON Schemas for *any* LLM SDK (OpenAI, Anthropic, Gemini, etc).
-*   **Batteries Included:** Spin up a fully compliant MCP Server in 3 lines of code using `llm-tool-mcp`.
-*   **Markdown Prompts:** (Optional) Keep your codebase clean by defining tool descriptions in `.tmpl.md` files with the `md-tmpl` feature.
+- **Zero Boilerplate:** Use `#[llm_tool]`, `#[llm_prompt]`, and `#[llm_resource]` on plain functions.
+- **Strongly Typed:** Parameters are automatically typed and validated. Missing or extra arguments are caught instantly.
+- **Framework Agnostic:** Use the raw `ToolRegistry` to get JSON Schemas for _any_ LLM SDK (`OpenAI`, `Anthropic`, `Gemini`, etc).
+- **Batteries Included:** Spin up a fully compliant MCP Server in 3 lines of code using `llm-tool-mcp`.
+- **Markdown Prompts:** (Optional) Keep your codebase clean by defining tool descriptions in `.tmpl.md` files with the `md-tmpl` feature.
 
 ---
 
@@ -107,22 +107,27 @@ let server = McpServer::new("my-mcp-server", "1.0.0", registry)
 ## 🧠 Advanced Features made Simple
 
 ### Return Types & Error Handling
+
 Tools can return `Result<T, E>` or just `T` (for infallible tools).
-*   **Zero-boilerplate Errors**: The `?` operator works flawlessly. `ToolError` implements `From<std::io::Error>`, `serde_json::Error`, etc.
-*   **Auto-Serialization**: Return any `T: Serialize` and it will automatically be converted to a JSON response.
-*   **Structured Metadata**: Return `ToolOutput` or `ToolError` to attach hidden metadata (like execution times or hidden error traces) that is logged but *not* sent to the LLM.
+
+- **Zero-boilerplate Errors**: The `?` operator works flawlessly. `ToolError` implements `From<std::io::Error>`, `serde_json::Error`, etc.
+- **Auto-Serialization**: Return any `T: Serialize` and it will automatically be converted to a JSON response.
+- **Structured Metadata**: Return `ToolOutput` or `ToolError` to attach hidden metadata (like execution times or hidden error traces) that is logged but _not_ sent to the LLM.
 
 ### Context
+
 Need access to shared state or the current conversation ID? Just add `ctx: &ToolContext` to your function parameters. The macro automatically wires it up without exposing it in the JSON Schema!
 
 ### Markdown Template Descriptions (`md-tmpl` feature)
+
 Don't want massive doc comments cluttering your Rust code? Use the `md-tmpl` feature to store descriptions in Markdown files.
 
 ```rust, ignore
 #[llm_tool(prompt_file = "prompts/tools/database_query.tmpl.md")]
 async fn query_db(query: String) -> Result<String, ToolError> { /* ... */ }
 ```
-*Templates are parsed and validated at compile time!*
+
+_Templates are parsed and validated at compile time!_
 
 ---
 
@@ -130,8 +135,8 @@ async fn query_db(query: String) -> Result<String, ToolError> { /* ... */ }
 
 For a deep dive into all available features, check out the documentation:
 
-*   [`llm-tool` Documentation](https://docs.rs/llm-tool) - Advanced return types, tool context, metadata, and `md-tmpl` integration.
-*   [`llm-tool-mcp` Documentation](crates/llm-tool-mcp/README.md) - Async transports, stdio vs tcp, custom routing, and the MCP protocol.
+- [`llm-tool` Documentation](https://docs.rs/llm-tool) - Advanced return types, tool context, metadata, and `md-tmpl` integration.
+- [`llm-tool-mcp` Documentation](crates/llm-tool-mcp/README.md) - Async transports, stdio vs tcp, custom routing, and the MCP protocol.
 
 ## License
 

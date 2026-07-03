@@ -1,0 +1,5 @@
+error: template '/tmp/dynamic_desc_test.tmpl.md' declares parameters (api_version) but neither `params(...)` nor `context = ...` was provided
+ --> tests/ui/template_missing_context.rs:4:26
+  |
+4 | #[llm_tool(prompt_file = "/tmp/dynamic_desc_test.tmpl.md")]
+  |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

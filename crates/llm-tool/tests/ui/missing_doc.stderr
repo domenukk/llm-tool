@@ -1,0 +1,5 @@
+error: #[llm_tool] functions must have a doc comment (used as the tool description), or use #[llm_tool(prompt = "...")]
+ --> tests/ui/missing_doc.rs:4:4
+  |
+4 | fn no_docs(
+  |    ^^^^^^^

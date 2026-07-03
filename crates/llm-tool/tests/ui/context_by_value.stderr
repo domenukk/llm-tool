@@ -1,0 +1,5 @@
+error: ToolContext parameter must be a reference type (e.g., `&ToolContext` or `&'a ToolContext`)
+ --> tests/ui/context_by_value.rs:8:10
+  |
+8 |     ctx: llm_tool::ToolContext,
+  |          ^^^^^^^^^^^^^^^^^^^^^

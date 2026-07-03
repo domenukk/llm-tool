@@ -1,0 +1,5 @@
+error: #[llm_tool] parameter `b` must have a doc comment (used as the parameter description in the JSON schema)
+ --> tests/ui/missing_param_doc.rs:8:5
+  |
+8 |     b: i64,
+  |     ^

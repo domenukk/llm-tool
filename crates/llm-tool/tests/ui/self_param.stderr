@@ -1,0 +1,5 @@
+error: #[llm_tool] functions must be free functions (no `self`)
+ --> tests/ui/self_param.rs:8:18
+  |
+8 |     fn with_self(&self) -> Result<String, String> {
+  |                  ^^^^^
