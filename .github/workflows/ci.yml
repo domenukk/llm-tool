@@ -19,60 +19,35 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      # Check out llm-tool into a subdirectory so ../prompt-templates resolves.
       - uses: actions/checkout@v4
-        with:
-          path: llm-tool
-
-      - name: Clone prompt-templates (sibling dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: domenukk/prompt-templates
-          path: prompt-templates
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: llm-tool
 
       - name: Test (default features)
         run: cargo test
-        working-directory: llm-tool
 
-      - name: Test (prompt-templates)
-        run: cargo test --features prompt-templates
-        working-directory: llm-tool
+      - name: Test (md-tmpl)
+        run: cargo test --features md-tmpl
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: llm-tool
-
-      - name: Clone prompt-templates
-        uses: actions/checkout@v4
-        with:
-          repository: domenukk/prompt-templates
-          path: prompt-templates
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: llm-tool
 
       - name: Clippy (default features)
         run: cargo clippy --all-targets -- -D warnings
-        working-directory: llm-tool
 
-      - name: Clippy (prompt-templates)
-        run: cargo clippy --all-targets --features prompt-templates -- -D warnings
-        working-directory: llm-tool
+      - name: Clippy (md-tmpl)
+        run: cargo clippy --all-targets --features md-tmpl -- -D warnings
 
   fmt:
     name: Formatting
@@ -92,25 +67,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: llm-tool
-
-      - name: Clone prompt-templates
-        uses: actions/checkout@v4
-        with:
-          repository: domenukk/prompt-templates
-          path: prompt-templates
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: llm-tool
 
       - name: Build docs (default)
         run: cargo doc --no-deps
-        working-directory: llm-tool
 
-      - name: Build docs (prompt-templates)
-        run: cargo doc --no-deps --features prompt-templates
-        working-directory: llm-tool
+      - name: Build docs (md-tmpl)
+        run: cargo doc --no-deps --features md-tmpl
+
