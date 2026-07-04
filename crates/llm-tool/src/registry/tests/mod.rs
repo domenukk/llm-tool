@@ -25,12 +25,12 @@ impl RustTool for SampleTool {
     type Params = PathParams;
     const NAME: &'static str = "sample";
     const DESCRIPTION: &'static str = "A sample tool";
+    #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(
         &self,
         params: Self::Params,
         _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        ::core::future::ready(()).await;
         Ok(params.path.into())
     }
 }
@@ -53,12 +53,12 @@ impl RustTool for RunCommandTool {
     type Params = RunCommandParams;
     const NAME: &'static str = "run_command";
     const DESCRIPTION: &'static str = "Runs a command.";
+    #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(
         &self,
         params: Self::Params,
         _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        ::core::future::ready(()).await;
         assert!(params.timeout.is_none());
         assert!(params.env.is_none());
         Ok(format!("Ran: {}", params.command).into())

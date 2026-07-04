@@ -278,12 +278,12 @@ async fn dispatch_passes_context_to_tool() {
         const NAME: &'static str = "ctx_tool";
         const DESCRIPTION: &'static str = "Reads conversation_id from context.";
 
+        #[allow(unknown_lints, clippy::unused_async_trait_impl)]
         async fn call(
             &self,
             _params: Self::Params,
             ctx: &ToolContext,
         ) -> Result<ToolOutput, ToolError> {
-            ::core::future::ready(()).await;
             let conv = ctx.conversation_id().unwrap_or("none");
             let count = ctx.get_state("call_count", serde_json::json!(0));
             let n = count.as_i64().unwrap_or(0);
@@ -323,12 +323,12 @@ impl RustTool for MetadataTool {
     const NAME: &'static str = "metadata_tool";
     const DESCRIPTION: &'static str = "Returns output with metadata.";
 
+    #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(
         &self,
         params: Self::Params,
         _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        ::core::future::ready(()).await;
         ToolOutput::new(format!("processed: {}", params.path)).with_metadata(&ProcessMeta {
             bytes_read: 1024,
             source: params.path,
@@ -426,12 +426,12 @@ impl RustTool for MetadataErrorTool {
     const NAME: &'static str = "metadata_error_tool";
     const DESCRIPTION: &'static str = "Always fails with metadata.";
 
+    #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(
         &self,
         _params: Self::Params,
         _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        ::core::future::ready(()).await;
         Err(ToolError::new("service unavailable")
             .with_meta("retry_after_secs", serde_json::json!(30)))
     }

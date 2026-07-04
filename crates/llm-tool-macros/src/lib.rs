@@ -491,9 +491,10 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
 
             #description_method
 
-            
+
+            #[allow(unknown_lints, clippy::unused_async_trait_impl)]
             async fn call(&self, params: Self::Params, _ctx: &#crate_path::ToolContext) -> ::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError> {
-                ::core::future::ready(()).await;
+
                 // Import the fallback trait so `Wrap<T>::__convert()` resolves
                 // for `T: Serialize` types that lack an inherent `__convert`.
                 use #crate_path::__private::SerializeFallback as _;
