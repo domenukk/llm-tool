@@ -2,7 +2,7 @@
 name = "llm-tool"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.86"
 description = "Framework-agnostic Rust tool definitions for LLM agents"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/domenukk/llm-tool"

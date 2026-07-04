@@ -15,6 +15,7 @@ impl RustTool for EmptyParamTool {
     type Params = EmptyParams;
     const NAME: &'static str = "empty";
     const DESCRIPTION: &'static str = "No params";
+    #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(
         &self,
         _params: Self::Params,
@@ -157,6 +158,7 @@ async fn registry_replaces_on_duplicate_name() {
         type Params = PathParams;
         const NAME: &'static str = "sample";
         const DESCRIPTION: &'static str = "Alternate sample";
+        #[allow(unknown_lints, clippy::unused_async_trait_impl)]
         async fn call(
             &self,
             params: Self::Params,
@@ -184,6 +186,7 @@ async fn registry_tool_returning_error() {
         type Params = EmptyParams;
         const NAME: &'static str = "fail";
         const DESCRIPTION: &'static str = "Always fails";
+        #[allow(unknown_lints, clippy::unused_async_trait_impl)]
         async fn call(
             &self,
             _params: Self::Params,
@@ -416,6 +419,7 @@ impl RustTool for DocumentedTool {
     type Params = DocumentedParams;
     const NAME: &'static str = "connect";
     const DESCRIPTION: &'static str = "Connects to a remote host.";
+    #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(&self, p: Self::Params, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
         Ok(format!("{}:{}:{:?}", p.hostname, p.port, p.timeout).into())
     }

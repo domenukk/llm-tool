@@ -278,6 +278,7 @@ async fn dispatch_passes_context_to_tool() {
         const NAME: &'static str = "ctx_tool";
         const DESCRIPTION: &'static str = "Reads conversation_id from context.";
 
+        #[allow(unknown_lints, clippy::unused_async_trait_impl)]
         async fn call(
             &self,
             _params: Self::Params,
@@ -322,6 +323,7 @@ impl RustTool for MetadataTool {
     const NAME: &'static str = "metadata_tool";
     const DESCRIPTION: &'static str = "Returns output with metadata.";
 
+    #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(
         &self,
         params: Self::Params,
@@ -424,6 +426,7 @@ impl RustTool for MetadataErrorTool {
     const NAME: &'static str = "metadata_error_tool";
     const DESCRIPTION: &'static str = "Always fails with metadata.";
 
+    #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(
         &self,
         _params: Self::Params,
