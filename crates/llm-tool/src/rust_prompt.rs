@@ -32,7 +32,21 @@ pub trait RustPrompt: Send + Sync {
 #[must_use]
 pub fn definition_of_prompt<T: RustPrompt>(prompt: &T) -> PromptDefinition {
     let schema = schemars::schema_for!(T::Params);
-    let val = serde_json::to_value(&schema).unwrap_or(serde_json::Value::Null);
+    let val = match serde_json::to_value(&schema) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                prompt = T::NAME,
+                error = %e,
+                "failed to serialize prompt schema, producing empty definition"
+            );
+            return PromptDefinition {
+                name: T::NAME.to_string(),
+                description: prompt.description().into_owned(),
+                arguments: Vec::new(),
+            };
+        }
+    };
     let mut arguments = Vec::new();
 
     if let Some(obj) = val.as_object() {

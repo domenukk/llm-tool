@@ -2,23 +2,19 @@
 
 > **Framework-agnostic Rust tool definitions for LLM agents.**
 
-Write standard Rust functions. Get perfectly typed LLM tools, Prompts, and Resources, complete with JSON Schemas and instant [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server support.
-
-`llm-tool` eliminates the boilerplate of writing JSON schemas and deserialization logic for your AI agents. You just write documented Rust functions, and we handle the rest.
+Write plain Rust functions. Get typed LLM tools with JSON Schemas, automatic deserialization, and instant [MCP](https://modelcontextprotocol.io/) server support.
 
 ## Why `llm-tool`?
 
-- **Zero Boilerplate:** Use `#[llm_tool]`, `#[llm_prompt]`, and `#[llm_resource]` on plain functions.
-- **Strongly Typed:** Parameters are automatically typed and validated. Missing or extra arguments are caught instantly.
-- **Framework Agnostic:** Use the raw `ToolRegistry` to get JSON Schemas for _any_ LLM SDK (`OpenAI`, `Anthropic`, `Gemini`, etc).
-- **Batteries Included:** Spin up a fully compliant MCP Server in 3 lines of code using `llm-tool-mcp`.
-- **Markdown Prompts:** (Optional) Keep your codebase clean by defining tool descriptions in `.tmpl.md` files with the `md-tmpl` feature.
+- **Zero Boilerplate:** `#[llm_tool]` on a function → typed tool with JSON Schema.
+- **Strongly Typed:** Parameters are validated. Missing or extra arguments are caught instantly.
+- **Framework Agnostic:** Use the `ToolRegistry` to get JSON Schemas for _any_ LLM SDK (`OpenAI`, Anthropic, Gemini, …).
+- **MCP Ready:** Spin up a fully compliant MCP server in 3 lines with `llm-tool-mcp`.
+- **`no_std` Compatible:** Core types work in embedded and WASM targets.
 
 ---
 
 ## ⚡ Quick Start
-
-Add the crates to your `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -26,9 +22,9 @@ llm-tool = "0.5"
 llm-tool-mcp = "0.5" # Optional: for MCP server support
 ```
 
-### 1. Define a Tool
+### Define a Tool
 
-Just write a function. The doc comments automatically become the tool and parameter descriptions!
+Doc comments become tool and parameter descriptions automatically.
 
 ```rust
 use llm_tool::{llm_tool, ToolError, ToolRegistry};
@@ -65,78 +61,88 @@ let result = registry.dispatch(
 
 ---
 
-## 🚀 The 3 Pillars of MCP
+## 🚀 MCP: Tools, Prompts, and Resources
 
-If you want to expose your tools, prompts, or resources over the standard **Model Context Protocol**, `llm-tool` has you covered. Use the `llm-tool-mcp` companion crate to spin up a server in seconds.
+Use `llm-tool-mcp` to expose everything over the **Model Context Protocol**.
 
-### Tools, Prompts, and Resources
-
-```rust, ignore
-use llm_tool::{llm_tool, llm_prompt, llm_resource, ToolRegistry};
-use llm_tool_mcp::McpServer;
-
-/// 1. A Tool for the LLM to execute
+```rust
+# use llm_tool::{llm_tool, llm_prompt, llm_resource, ToolError, ToolRegistry};
+/// A Tool for the LLM to execute.
 #[llm_tool]
-fn restart_server(force: bool) -> String {
-    "Server restarted.".into()
+fn restart_server(
+    /// Whether to force-restart even if requests are in-flight.
+    force: bool,
+) -> String {
+    format!("Server restarted (force={force}).")
 }
 
-/// 2. A Prompt template for the LLM to use
+/// A Prompt template for the LLM to use.
 #[llm_prompt]
-fn code_review(lang: String) -> String {
+fn code_review(
+    /// Programming language of the code to review.
+    lang: String,
+) -> String {
     format!("Please review this {lang} code for security bugs.")
 }
 
-/// 3. A Resource for the LLM to read
+/// A Resource for the LLM to read.
 #[llm_resource(uri = "file:///config/{app}.json")]
-fn get_config(app: String) -> String {
+fn get_config(
+    /// Application name whose config to retrieve.
+    app: String,
+) -> String {
     format!(r#"{{"app":"{app}","enabled":true}}"#)
 }
 
-// Spin up the MCP Server!
+// Register tools in the ToolRegistry.
 let registry = ToolRegistry::new().with_tool(RestartServer);
-let server = McpServer::new("my-mcp-server", "1.0.0", registry)
-    .with_prompt(CodeReview)
-    .with_resource(GetConfig);
+assert_eq!(registry.definitions()[0].name, "restart_server");
 
-// Start serving over stdio or TCP (see llm-tool-mcp docs)
+// Prompts and Resources are registered via llm-tool-mcp:
+//   McpServer::new("my-server", "1.0", registry)
+//       .with_prompt(CodeReview)
+//       .with_resource(GetConfig);
 ```
 
 ---
 
-## 🧠 Advanced Features made Simple
+## 🧠 Features
 
 ### Return Types & Error Handling
 
-Tools can return `Result<T, E>` or just `T` (for infallible tools).
+Return `Result<T, E>` or just `T`. The `?` operator works out of the box.
 
-- **Zero-boilerplate Errors**: The `?` operator works flawlessly. `ToolError` implements `From<std::io::Error>`, `serde_json::Error`, etc.
-- **Auto-Serialization**: Return any `T: Serialize` and it will automatically be converted to a JSON response.
-- **Structured Metadata**: Return `ToolOutput` or `ToolError` to attach hidden metadata (like execution times or hidden error traces) that is logged but _not_ sent to the LLM.
+- **Auto-Serialization**: Return any `T: Serialize` → automatic JSON response.
+- **Structured Metadata**: Attach hidden metadata to `ToolOutput` or `ToolError` (logged but _not_ sent to the LLM).
 
 ### Context
 
-Need access to shared state or the current conversation ID? Just add `ctx: &ToolContext` to your function parameters. The macro automatically wires it up without exposing it in the JSON Schema!
+Add `ctx: &ToolContext` to any tool function to access shared state, conversation IDs, or typed extensions — automatically hidden from the JSON Schema.
 
-### Markdown Template Descriptions (`md-tmpl` feature)
+### Custom Descriptions
 
-Don't want massive doc comments cluttering your Rust code? Use the `md-tmpl` feature to store descriptions in Markdown files.
+Override doc comments with an inline string — no extra features needed:
 
-```rust, ignore
-#[llm_tool(prompt_file = "prompts/tools/database_query.tmpl.md")]
-async fn query_db(query: String) -> Result<String, ToolError> { /* ... */ }
+```rust
+# use llm_tool::{llm_tool, ToolError};
+#[llm_tool(prompt = "Query the database and return structured results.")]
+async fn query_db(
+    /// The SQL query to execute.
+    query: String,
+) -> Result<String, ToolError> {
+    Ok(format!("Results for: {query}"))
+}
 ```
 
-_Templates are parsed and validated at compile time!_
+With the `md-tmpl` feature, you can also load descriptions from `.tmpl.md` template files (`prompt_file = "..."`), with compile-time variable substitution and validation. See the [`md-tmpl` docs](https://docs.rs/md-tmpl) for details.
 
 ---
 
 ## Documentation
 
-For a deep dive into all available features, check out the documentation:
-
-- [`llm-tool` Documentation](https://docs.rs/llm-tool) - Advanced return types, tool context, metadata, and `md-tmpl` integration.
-- [`llm-tool-mcp` Documentation](crates/llm-tool-mcp/README.md) - Async transports, stdio vs tcp, custom routing, and the MCP protocol.
+- [`llm-tool`](https://docs.rs/llm-tool) — Return types, tool context, metadata, template descriptions.
+- [`llm-tool-mcp`](https://docs.rs/llm-tool-mcp) — MCP transports, stdio/TCP, routing.
+- [`md-tmpl`](https://docs.rs/md-tmpl) — Template syntax, env variables, response templates.
 
 ## License
 

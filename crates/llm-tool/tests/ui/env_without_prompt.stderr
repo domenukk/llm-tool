@@ -1,0 +1,7 @@
+error: `env(...)` requires `prompt_file = "..."` or `prompt = "..."`
+ --> tests/ui/env_without_prompt.rs:4:1
+  |
+4 | #[llm_tool(env(API_KEY = "secret"))]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `llm_tool` (in Nightly builds, run with -Z macro-backtrace for more info)

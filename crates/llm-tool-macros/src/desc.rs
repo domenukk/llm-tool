@@ -4,6 +4,82 @@ use syn::{ItemFn, LitStr};
 #[allow(clippy::wildcard_imports)]
 use crate::*;
 
+/// Convert the `env_vars` from a `ToolAttr` into a `Vec<(String, String)>`
+/// for passing to md-tmpl compilation functions.
+///
+/// All literal types are stringified — md-tmpl's `validate_env_value` then
+/// auto-parses strings into the declared type (int, bool, float).
+#[cfg(feature = "md-tmpl")]
+pub(crate) fn env_pairs(attr: &ToolAttr) -> Vec<(String, String)> {
+    attr.env_vars
+        .iter()
+        .map(|(k, v)| (k.to_string(), lit_to_string(v)))
+        .collect()
+}
+
+/// Convert a `syn::Lit` to its string representation.
+#[cfg(feature = "md-tmpl")]
+fn lit_to_string(lit: &syn::Lit) -> String {
+    match lit {
+        syn::Lit::Str(s) => s.value(),
+        syn::Lit::Int(i) => i.base10_digits().to_string(),
+        syn::Lit::Float(f) => f.base10_digits().to_string(),
+        syn::Lit::Bool(b) => b.value.to_string(),
+        // Validated at parse time — only str/int/float/bool reach here.
+        _ => unreachable!("unsupported literal type should be rejected at parse time"),
+    }
+}
+
+/// Generate the `env = { KEY: "value", ... }` token fragment for
+/// `include_template!` / `template!` macro invocations.
+///
+/// Emits string literals regardless of the original literal type —
+/// md-tmpl's proc-macro layer handles the type coercion.
+#[cfg(feature = "md-tmpl")]
+pub(crate) fn env_tokens(attr: &ToolAttr) -> proc_macro2::TokenStream {
+    if attr.env_vars.is_empty() {
+        return quote! {};
+    }
+    let entries = attr.env_vars.iter().map(|(k, v)| {
+        // Always emit string form — md-tmpl's template!/include_template!
+        // macro expects string literals for env values.
+        let s = lit_to_string(v);
+        quote! { #k: #s }
+    });
+    quote! { , env = { #(#entries),* } }
+}
+
+/// Compile and render a template that has only `env:` declarations (no params).
+///
+/// Env values are baked in as constants during compilation, so rendering
+/// with an empty context produces the fully resolved static description.
+#[cfg(feature = "md-tmpl")]
+fn compile_env_only_template(
+    attr: &ToolAttr,
+    source: &str,
+    base_dir: Option<&std::path::Path>,
+    span: proc_macro2::Span,
+    label: &str,
+) -> syn::Result<String> {
+    let mut opts = md_tmpl::CompileOptions::default().allow_unused(true);
+    if let Some(dir) = base_dir {
+        opts = opts.base_dir(dir);
+    }
+    let env_values = env_pairs(attr);
+    let env_refs: Vec<(&str, md_tmpl::Value)> = env_values
+        .iter()
+        .map(|(k, v)| (k.as_str(), md_tmpl::Value::Str(v.clone())))
+        .collect();
+    if !env_refs.is_empty() {
+        opts = opts.env(&env_refs);
+    }
+    let (template, _) = md_tmpl::Template::compile(source, opts)
+        .map_err(|e| syn::Error::new(span, format!("{label} compile error: {e}")))?;
+    template
+        .render_ctx(&md_tmpl::Context::new())
+        .map_err(|e| syn::Error::new(span, format!("{label} render error: {e}")))
+}
+
 pub(crate) fn resolve_description(
     func: &ItemFn,
     attr: Option<&ToolAttr>,
@@ -126,12 +202,18 @@ pub(crate) fn resolve_template_description_impl(
     })?;
 
     let base_dir = full_path.parent().unwrap_or(std::path::Path::new("."));
-    let (fm, body) = md_tmpl::parse_frontmatter_with_base_dir(&source, base_dir).map_err(|e| {
-        syn::Error::new(
-            template_lit.span(),
-            format!("template '{rel_path}' error: {e}"),
-        )
-    })?;
+    let env_values = env_pairs(attr);
+    let env_refs: Vec<(&str, md_tmpl::Value)> = env_values
+        .iter()
+        .map(|(k, v)| (k.as_str(), md_tmpl::Value::Str(v.clone())))
+        .collect();
+    let (fm, body) = md_tmpl::parse_frontmatter_with_base_dir(&source, base_dir, &env_refs)
+        .map_err(|e| {
+            syn::Error::new(
+                template_lit.span(),
+                format!("template '{rel_path}' error: {e}"),
+            )
+        })?;
 
     let body_str = body.trim().to_string();
     let path_str = full_path.to_string_lossy().to_string();
@@ -145,11 +227,27 @@ pub(crate) fn resolve_template_description_impl(
     let has_params = !attr.inline_params.is_empty();
     let has_context = attr.context_fn.is_some();
     let has_declarations = !fm.declarations.is_empty();
+    let has_env = !fm.env.is_empty();
 
-    if !has_declarations && !has_params && !has_context {
-        // Case 1: Static template — no variables, no params, no context.
+    if !has_declarations && !has_params && !has_context && !has_env {
+        // Case 1: Static template — no variables, no params, no context, no env.
         Ok(DescriptionInfo {
             static_description: body_str,
+            helper_tokens: quote! {},
+            description_method: None,
+            dep_tracking,
+        })
+    } else if has_env && !has_declarations && !has_params && !has_context {
+        // Case 1b: Template with only env: — compile and render at build time.
+        let rendered = compile_env_only_template(
+            attr,
+            &source,
+            Some(base_dir),
+            template_lit.span(),
+            &format!("template '{rel_path}'"),
+        )?;
+        Ok(DescriptionInfo {
+            static_description: rendered,
             helper_tokens: quote! {},
             description_method: None,
             dep_tracking,
@@ -212,7 +310,12 @@ pub(crate) fn resolve_inline_description_impl(
         });
     }
 
-    let (fm, body) = md_tmpl::parse_frontmatter(&source)
+    let env_values = env_pairs(attr);
+    let env_refs: Vec<(&str, md_tmpl::Value)> = env_values
+        .iter()
+        .map(|(k, v)| (k.as_str(), md_tmpl::Value::Str(v.clone())))
+        .collect();
+    let (fm, body) = md_tmpl::parse_frontmatter_with_env(&source, &env_refs)
         .map_err(|e| syn::Error::new(template_lit.span(), format!("inline template error: {e}")))?;
 
     let body_str = body.trim().to_string();
@@ -220,11 +323,22 @@ pub(crate) fn resolve_inline_description_impl(
     let has_params = attr.has_inline_params;
     let has_context = attr.has_context_fn;
     let has_declarations = !fm.declarations.is_empty();
+    let has_env = !fm.env.is_empty();
 
-    if !has_declarations && !has_params && !has_context {
-        // Case 1: Static template — no variables, no params, no context.
+    if !has_declarations && !has_params && !has_context && !has_env {
+        // Case 1: Static template — no variables, no params, no context, no env.
         Ok(DescriptionInfo {
             static_description: body_str,
+            helper_tokens: quote! {},
+            description_method: None,
+            dep_tracking: quote! {},
+        })
+    } else if has_env && !has_declarations && !has_params && !has_context {
+        // Case 1b: Template with only env: — compile and render at build time.
+        let rendered =
+            compile_env_only_template(attr, &source, None, template_lit.span(), "inline template")?;
+        Ok(DescriptionInfo {
+            static_description: rendered,
             helper_tokens: quote! {},
             description_method: None,
             dep_tracking: quote! {},
@@ -242,10 +356,12 @@ pub(crate) fn resolve_inline_description_impl(
     } else if has_context {
         // Case 3: Runtime context function.
         let desc_mod_name = format_ident!("__{}_desc_mod", fn_name);
+        let env_toks = env_tokens(attr);
         let helper_tokens = quote! {
             ::llm_tool::__md_tmpl_macros::template!(
                 #template_lit => #desc_mod_name,
                 crate = ::llm_tool::__md_tmpl
+                #env_toks
             );
         };
         let context_fn = attr.context_fn.as_ref().unwrap();
@@ -331,10 +447,12 @@ pub(crate) fn resolve_context_description(
 
     let desc_mod_name = format_ident!("__{}_desc_mod", fn_name);
     let rel_path_lit = syn::LitStr::new(rel_path, template_lit.span());
+    let env_toks = env_tokens(attr);
     let helper_tokens = quote! {
         ::llm_tool::__md_tmpl_macros::include_template!(
             #rel_path_lit => #desc_mod_name,
             crate = ::llm_tool::__md_tmpl
+            #env_toks
         );
     };
 
@@ -355,21 +473,17 @@ pub(crate) fn resolve_context_description(
     })
 }
 
-/// Render a template with compile-time `params(...)` values.
+/// Validate that `params(...)` keys match the template's declared variables.
 ///
-/// Validates:
-/// - Every declared template variable has a matching `params(...)` key
-/// - Every `params(...)` key matches a declared template variable
-/// - The template renders without errors
+/// Returns a mapping of struct field names to their parent struct name,
+/// needed for building the context later.
 #[cfg(feature = "md-tmpl")]
-pub(crate) fn resolve_template_with_params(
+fn validate_params_match(
     attr: &ToolAttr,
     fm: &md_tmpl::Frontmatter,
-    source: &str,
     rel_path: &str,
     span: proc_macro2::Span,
-    dep_tracking: proc_macro2::TokenStream,
-) -> syn::Result<DescriptionInfo> {
+) -> syn::Result<std::collections::HashMap<String, String>> {
     let mut expected_names = std::collections::HashSet::new();
     let mut struct_fields: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
@@ -422,8 +536,48 @@ pub(crate) fn resolve_template_with_params(
         }
     }
 
+    Ok(struct_fields)
+}
+
+/// Render a template with compile-time `params(...)` values.
+///
+/// Validates:
+/// - Every declared template variable has a matching `params(...)` key
+/// - Every `params(...)` key matches a declared template variable
+/// - The template renders without errors
+#[cfg(feature = "md-tmpl")]
+pub(crate) fn resolve_template_with_params(
+    attr: &ToolAttr,
+    fm: &md_tmpl::Frontmatter,
+    source: &str,
+    rel_path: &str,
+    span: proc_macro2::Span,
+    dep_tracking: proc_macro2::TokenStream,
+) -> syn::Result<DescriptionInfo> {
+    let struct_fields = validate_params_match(attr, fm, rel_path, span)?;
+
     // Build context and render at compile time.
-    let template = md_tmpl::Template::from_source(source)
+    // Use Template::compile with base_dir so {% include %} and env: resolve correctly.
+    let base_dir = attr.prompt_file_path.as_ref().map(|lit| {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        let full = std::path::PathBuf::from(&manifest_dir).join(lit.value());
+        full.parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf()
+    });
+    let mut opts = md_tmpl::CompileOptions::default().allow_unused(true);
+    if let Some(ref dir) = base_dir {
+        opts = opts.base_dir(dir);
+    }
+    let env_values = env_pairs(attr);
+    let env_refs: Vec<(&str, md_tmpl::Value)> = env_values
+        .iter()
+        .map(|(k, v)| (k.as_str(), md_tmpl::Value::Str(v.clone())))
+        .collect();
+    if !env_refs.is_empty() {
+        opts = opts.env(&env_refs);
+    }
+    let (template, _) = md_tmpl::Template::compile(source, opts)
         .map_err(|e| syn::Error::new(span, format!("template '{rel_path}' parse error: {e}")))?;
 
     let mut root_values: std::collections::HashMap<String, md_tmpl::Value> =

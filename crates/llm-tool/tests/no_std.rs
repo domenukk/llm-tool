@@ -58,7 +58,11 @@ async fn test_no_std_paths() {
         registry.register(StaticTmplTool);
         assert_eq!(
             StaticTmplTool::DESCRIPTION,
-            "Fetch the current weather for any city worldwide.\n\nReturns a JSON object containing temperature, humidity,\nwind speed, and a human-readable conditions summary.\nSupports both metric and imperial unit systems."
+            "Fetch the current weather for any city worldwide.
+
+Returns a JSON object containing temperature, humidity,
+wind speed, and a human-readable conditions summary.
+Supports both metric and imperial unit systems."
         );
     }
 

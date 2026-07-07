@@ -142,7 +142,8 @@ async fn test_inline_response_template() {
 
     assert_eq!(
         output.content(),
-        "Current weather in Seattle is Cloudy and 82F.\n"
+        "Current weather in Seattle is Cloudy and 82F.
+"
     );
 
     let meta = output.metadata();
@@ -195,4 +196,394 @@ async fn test_search_response_template() {
         .await
         .unwrap();
     assert!(output.content().contains("Search results for \"language\""));
+}
+
+// ── Response file + env combination ──
+
+#[llm_tool(
+    prompt = "Search a service.",
+    response_file = "tools/env_response.tmpl.md",
+    env(SERVICE_NAME = "my-api")
+)]
+fn env_response_tool(
+    /// The search query.
+    query: String,
+) -> Result<EnvResponseToolResponse, ToolError> {
+    Ok(EnvResponseToolResponse {
+        result: query,
+        count: 5,
+    })
+}
+
+#[tokio::test]
+async fn response_file_with_env_renders_env_var() {
+    let registry = ToolRegistry::new().with_tool(EnvResponseTool);
+    let ctx = ToolContext::new(None);
+
+    let output = registry
+        .dispatch(
+            "env_response_tool",
+            serde_json::json!({"query": "test-query"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    let content = output.content();
+    assert!(
+        content.contains("my-api"),
+        "should render env SERVICE_NAME in response, got: {content}"
+    );
+    assert!(
+        content.contains('5'),
+        "should render count param, got: {content}"
+    );
+    assert!(
+        content.contains("test-query"),
+        "should render result param, got: {content}"
+    );
+}
+
+#[test]
+fn env_response_tool_description_comes_from_prompt() {
+    let registry = ToolRegistry::new().with_tool(EnvResponseTool);
+    let defs = registry.definitions();
+    assert_eq!(defs.len(), 1);
+    assert_eq!(
+        defs[0].description, "Search a service.",
+        "description should come from prompt, not response template"
+    );
+}
+
+#[tokio::test]
+async fn response_file_with_env_attaches_metadata() {
+    let registry = ToolRegistry::new().with_tool(EnvResponseTool);
+    let ctx = ToolContext::new(None);
+
+    let output = registry
+        .dispatch(
+            "env_response_tool",
+            serde_json::json!({"query": "metadata-test"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    let meta = output.metadata();
+    assert_eq!(
+        meta["result"], "metadata-test",
+        "metadata should contain result field"
+    );
+    assert_eq!(meta["count"], 5, "metadata should contain count field");
+}
+
+// ── Inline response + env combination ──
+
+#[llm_tool(
+    prompt = "Query a service with inline response.",
+    response = r#"
+---
+env:
+  - HOST = str
+
+params:
+  - status = str
+  - code = int
+---
+[{{ HOST }}] Status: {{ status }} (code={{ code }})
+"#,
+    env(HOST = "prod.example.com")
+)]
+fn inline_env_response_tool(
+    /// The query.
+    query: String,
+) -> Result<InlineEnvResponseToolResponse, ToolError> {
+    let _ = query;
+    Ok(InlineEnvResponseToolResponse {
+        status: "healthy".to_string(),
+        code: 200,
+    })
+}
+
+#[tokio::test]
+async fn inline_response_with_env_renders_env_var() {
+    let registry = ToolRegistry::new().with_tool(InlineEnvResponseTool);
+    let ctx = ToolContext::new(None);
+
+    let output = registry
+        .dispatch(
+            "inline_env_response_tool",
+            serde_json::json!({"query": "health"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    let content = output.content();
+    assert!(
+        content.contains("prod.example.com"),
+        "should render env HOST in inline response, got: {content}"
+    );
+    assert!(
+        content.contains("healthy"),
+        "should render status param, got: {content}"
+    );
+    assert!(
+        content.contains("200"),
+        "should render code param, got: {content}"
+    );
+}
+
+#[test]
+fn inline_env_response_description_comes_from_prompt() {
+    assert_eq!(
+        <InlineEnvResponseTool as llm_tool::RustTool>::DESCRIPTION,
+        "Query a service with inline response."
+    );
+}
+
+// ── Prompt + response_file both present ──
+
+#[derive(Serialize)]
+struct PromptPlusResponseResult {
+    city: String,
+    temp_f: i64,
+    condition: String,
+    humidity: i64,
+}
+
+#[llm_tool(
+    prompt = "Get weather details for a city.",
+    response_file = "tools/weather_response.tmpl.md"
+)]
+fn prompt_plus_response_tool(
+    /// The city.
+    city: String,
+) -> Result<PromptPlusResponseResult, ToolError> {
+    Ok(PromptPlusResponseResult {
+        city,
+        temp_f: 85,
+        condition: "Hot".into(),
+        humidity: 30,
+    })
+}
+
+#[test]
+fn prompt_plus_response_description_from_prompt() {
+    let desc = <PromptPlusResponseTool as llm_tool::RustTool>::DESCRIPTION;
+    assert_eq!(
+        desc, "Get weather details for a city.",
+        "description should come from prompt= attribute"
+    );
+}
+
+#[tokio::test]
+async fn prompt_plus_response_output_from_template() {
+    let registry = ToolRegistry::new().with_tool(PromptPlusResponseTool);
+    let ctx = ToolContext::new(None);
+
+    let output = registry
+        .dispatch(
+            "prompt_plus_response_tool",
+            serde_json::json!({"city": "Phoenix"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    let content = output.content();
+    assert!(
+        content.contains("Weather for Phoenix"),
+        "response should use response_file template, got: {content}"
+    );
+    assert!(
+        content.contains("85°F"),
+        "should render temperature, got: {content}"
+    );
+    assert!(
+        content.contains("Hot"),
+        "should render condition, got: {content}"
+    );
+    assert!(
+        content.contains("30%"),
+        "should render humidity, got: {content}"
+    );
+}
+
+// ── Prompt_file + response_file both present ──
+
+#[derive(Serialize)]
+struct PromptFileResponseResult {
+    city: String,
+    temp_f: i64,
+    condition: String,
+    humidity: i64,
+}
+
+#[llm_tool(
+    prompt_file = "tools/prompt_for_combined.tmpl.md",
+    response_file = "tools/weather_response.tmpl.md"
+)]
+fn prompt_file_plus_response_tool(
+    /// The city name.
+    city: String,
+) -> Result<PromptFileResponseResult, ToolError> {
+    Ok(PromptFileResponseResult {
+        city,
+        temp_f: 55,
+        condition: "Rainy".into(),
+        humidity: 90,
+    })
+}
+
+#[test]
+fn prompt_file_plus_response_description_from_prompt_file() {
+    let desc = <PromptFilePlusResponseTool as llm_tool::RustTool>::DESCRIPTION;
+    assert!(
+        desc.contains("Look up detailed weather information"),
+        "description should come from prompt_file, got: {desc}"
+    );
+}
+
+#[tokio::test]
+async fn prompt_file_plus_response_output_from_response_file() {
+    let registry = ToolRegistry::new().with_tool(PromptFilePlusResponseTool);
+    let ctx = ToolContext::new(None);
+
+    let output = registry
+        .dispatch(
+            "prompt_file_plus_response_tool",
+            serde_json::json!({"city": "London"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    let content = output.content();
+    assert!(
+        content.contains("Weather for London"),
+        "response should use response_file template, got: {content}"
+    );
+    assert!(
+        content.contains("55°F"),
+        "should render temperature, got: {content}"
+    );
+    assert!(
+        content.contains("Rainy"),
+        "should render condition, got: {content}"
+    );
+    assert!(
+        content.contains("90%"),
+        "should render humidity, got: {content}"
+    );
+}
+
+#[tokio::test]
+async fn prompt_file_plus_response_attaches_metadata() {
+    let registry = ToolRegistry::new().with_tool(PromptFilePlusResponseTool);
+    let ctx = ToolContext::new(None);
+
+    let output = registry
+        .dispatch(
+            "prompt_file_plus_response_tool",
+            serde_json::json!({"city": "Berlin"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    let meta = output.metadata();
+    assert_eq!(meta["city"], "Berlin");
+    assert_eq!(meta["temp_f"], 55);
+    assert_eq!(meta["condition"], "Rainy");
+    assert_eq!(meta["humidity"], 90);
+}
+
+// ── Dispatch and execution tests for env tools ──
+
+#[llm_tool(prompt_file = "tools/env_desc.tmpl.md", env(API_VERSION = "v7.0"))]
+fn dispatch_env_tool(
+    /// A query value.
+    query: String,
+) -> Result<String, ToolError> {
+    Ok(format!("executed: {query}"))
+}
+
+#[tokio::test]
+async fn env_tool_dispatch_returns_correct_output() {
+    let registry = ToolRegistry::new().with_tool(DispatchEnvTool);
+    let ctx = ToolContext::new(None);
+
+    let output = registry
+        .dispatch(
+            "dispatch_env_tool",
+            serde_json::json!({"query": "hello"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        output.content(),
+        "executed: hello",
+        "dispatch should execute the function body"
+    );
+}
+
+#[test]
+fn env_tool_dispatch_description_is_rendered() {
+    let registry = ToolRegistry::new().with_tool(DispatchEnvTool);
+    let defs = registry.definitions();
+    assert_eq!(defs.len(), 1);
+    assert!(
+        defs[0].description.contains("v7.0"),
+        "description should contain rendered env, got: {}",
+        defs[0].description
+    );
+}
+
+#[llm_tool(
+    prompt_file = "tools/multi_env.tmpl.md",
+    env(
+        SERVICE_NAME = "dispatch-svc",
+        REGION = "ap-south-1",
+        MAX_CONNECTIONS = 50
+    )
+)]
+fn dispatch_multi_env_tool(
+    /// A query.
+    query: String,
+) -> Result<String, ToolError> {
+    Ok(format!("multi-env executed: {query}"))
+}
+
+#[tokio::test]
+async fn multi_env_tool_dispatch_executes_correctly() {
+    let registry = ToolRegistry::new().with_tool(DispatchMultiEnvTool);
+    let ctx = ToolContext::new(None);
+
+    let output = registry
+        .dispatch(
+            "dispatch_multi_env_tool",
+            serde_json::json!({"query": "world"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.content(), "multi-env executed: world");
+}
+
+#[test]
+fn multi_env_tool_dispatch_description_has_all_vars() {
+    let registry = ToolRegistry::new().with_tool(DispatchMultiEnvTool);
+    let defs = registry.definitions();
+    let desc = &defs[0].description;
+    assert!(desc.contains("dispatch-svc"), "got: {desc}");
+    assert!(desc.contains("ap-south-1"), "got: {desc}");
+    assert!(desc.contains("50"), "got: {desc}");
+    assert!(
+        desc.contains("false"),
+        "default DEBUG_MODE should be false, got: {desc}"
+    );
 }

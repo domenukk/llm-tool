@@ -42,6 +42,8 @@ fn main() {
     );
     assert_eq!(
         x_desc,
-        "First line of parameter doc.\n\nSecond line of parameter doc."
+        "First line of parameter doc.
+
+Second line of parameter doc."
     );
 }

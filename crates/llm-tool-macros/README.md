@@ -51,6 +51,10 @@ The macro produces:
 | **`&str` params**                  | Accepted — the struct stores `String`, macro auto-borrows.                                                                            |
 | **`Option<T>` params**             | Auto-annotated with `#[serde(default)]` → not in `required`.                                                                          |
 | **`&ToolContext` param**           | Recognized as execution context, forwarded from registry, excluded from params struct.                                                |
+| **`prompt_file = "..."`**          | Load description from a `.tmpl.md` template file (requires `md-tmpl` feature). Zero runtime cost.                                     |
+| **`params(k = "v", ...)`**         | Compile-time key-value pairs for template variables. Requires `prompt_file`.                                                          |
+| **`env(K = "v", ...)`**            | Compile-time values for `env:` frontmatter declarations. Requires `prompt_file` or `prompt`. Combinable with `params` or `context`.   |
+| **`context = fn`**                 | Runtime template context function. Signature: `fn(&Tool) -> Context`. Requires `prompt_file`.                                         |
 | **`self` receiver**                | Not allowed — must be a free function.                                                                                                |
 
 ## License

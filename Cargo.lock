@@ -445,7 +445,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "llm-tool"
-version = "0.5.0"
+version = "0.5.2"
 dependencies = [
  "futures",
  "hashbrown",
@@ -460,11 +460,12 @@ dependencies = [
  "tokio",
  "tracing",
  "trybuild",
+ "typed-builder",
 ]
 
 [[package]]
 name = "llm-tool-macros"
-version = "0.5.0"
+version = "0.5.2"
 dependencies = [
  "convert_case",
  "hashbrown",
@@ -476,7 +477,7 @@ dependencies = [
 
 [[package]]
 name = "llm-tool-mcp"
-version = "0.5.0"
+version = "0.5.2"
 dependencies = [
  "llm-tool",
  "rmcp",
@@ -496,9 +497,19 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "md-tmpl"
-version = "0.5.0"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa149bfa4fd0f7dfb842cda89061813f84a1211c8b6260c5404c25db70648e3b"
+checksum = "34f6402f516c86be5c2f3c61c9b876a72834239e5c0981b9eeba5c7d2c70069a"
+dependencies = [
+ "md-tmpl-core",
+ "md-tmpl-macros",
+]
+
+[[package]]
+name = "md-tmpl-core"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae8fdd6cd6e1839eb4f56dd108adcca73ef4131842f8c88783ba35e6799407de"
 dependencies = [
  "ciborium",
  "const-str",
@@ -513,12 +524,12 @@ dependencies = [
 
 [[package]]
 name = "md-tmpl-macros"
-version = "0.5.0"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ce7df91238126d42f7b1e41c3fb8feee8afe0db694b98d9103984aa10fe1f89"
+checksum = "94ee160ad4f276751d11b1a53a3bead6f6aa924143ad8c4fa70d63e5de205fb6"
 dependencies = [
  "hashbrown",
- "md-tmpl",
+ "md-tmpl-core",
  "proc-macro2",
  "quote",
  "syn 2.0.118",

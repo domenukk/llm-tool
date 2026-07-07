@@ -153,7 +153,7 @@ pub(crate) fn resolve_response_template(
         }
         #[cfg(feature = "md-tmpl")]
         {
-            return resolve_response_template_file(response_path, struct_name, fn_name);
+            return resolve_response_template_file(attr, response_path, struct_name, fn_name);
         }
     }
     if let Some(response_inline) = &attr.response_inline {
@@ -166,7 +166,7 @@ pub(crate) fn resolve_response_template(
         }
         #[cfg(feature = "md-tmpl")]
         {
-            return resolve_response_template_inline(response_inline, struct_name, fn_name);
+            return resolve_response_template_inline(attr, response_inline, struct_name, fn_name);
         }
     }
     Ok(ResponseTemplateInfo::default())
@@ -175,6 +175,7 @@ pub(crate) fn resolve_response_template(
 /// Feature-gated implementation of response template resolution from file.
 #[cfg(feature = "md-tmpl")]
 pub(crate) fn resolve_response_template_file(
+    attr: &ToolAttr,
     response_path: &LitStr,
     struct_name: &syn::Ident,
     fn_name: &syn::Ident,
@@ -200,12 +201,18 @@ pub(crate) fn resolve_response_template_file(
     };
 
     let base_dir = full_path.parent().unwrap_or(std::path::Path::new("."));
-    let (fm, _) = md_tmpl::parse_frontmatter_with_base_dir(&source, base_dir).map_err(|e| {
-        syn::Error::new(
-            response_path.span(),
-            format!("response template '{rel_path}' frontmatter error: {e}"),
-        )
-    })?;
+    let env_values = desc::env_pairs(attr);
+    let env_refs: Vec<(&str, md_tmpl::Value)> = env_values
+        .iter()
+        .map(|(k, v)| (k.as_str(), md_tmpl::Value::Str(v.clone())))
+        .collect();
+    let (fm, _) =
+        md_tmpl::parse_frontmatter_with_base_dir(&source, base_dir, &env_refs).map_err(|e| {
+            syn::Error::new(
+                response_path.span(),
+                format!("response template '{rel_path}' frontmatter error: {e}"),
+            )
+        })?;
 
     let response_struct_name_str = format!("{struct_name}Response");
     let generated_idents = response_struct_gen::collect_generated_type_names(
@@ -216,10 +223,12 @@ pub(crate) fn resolve_response_template_file(
     let response_struct_name = format_ident!("{}", response_struct_name_str);
     let response_mod_name = format_ident!("__{}_response_mod", fn_name);
 
+    let env_toks = desc::env_tokens(attr);
     let helper_tokens = quote! {
         ::llm_tool::__md_tmpl_macros::template!(
             #source as #response_struct_name => #response_mod_name,
             crate = ::llm_tool::__md_tmpl
+            #env_toks
         );
         pub use #response_mod_name::{ #( #generated_idents ),* };
     };
@@ -248,6 +257,7 @@ pub(crate) fn resolve_response_template_file(
 /// Feature-gated implementation of response template resolution from inline string.
 #[cfg(feature = "md-tmpl")]
 pub(crate) fn resolve_response_template_inline(
+    attr: &ToolAttr,
     response_inline: &LitStr,
     struct_name: &syn::Ident,
     fn_name: &syn::Ident,
@@ -255,7 +265,12 @@ pub(crate) fn resolve_response_template_inline(
     let source = response_inline.value();
 
     // Validate the inline template parses at compile time.
-    let fm = match md_tmpl::parse_frontmatter(&source) {
+    let env_values = desc::env_pairs(attr);
+    let env_refs: Vec<(&str, md_tmpl::Value)> = env_values
+        .iter()
+        .map(|(k, v)| (k.as_str(), md_tmpl::Value::Str(v.clone())))
+        .collect();
+    let fm = match md_tmpl::parse_frontmatter_with_env(&source, &env_refs) {
         Ok((fm, _)) => fm,
         Err(e) => {
             return Err(syn::Error::new(
@@ -274,10 +289,12 @@ pub(crate) fn resolve_response_template_inline(
     let response_struct_name = format_ident!("{}", response_struct_name_str);
     let response_mod_name = format_ident!("__{}_response_mod", fn_name);
 
+    let env_toks = desc::env_tokens(attr);
     let helper_tokens = quote! {
         ::llm_tool::__md_tmpl_macros::template!(
             #source as #response_struct_name => #response_mod_name,
             crate = ::llm_tool::__md_tmpl
+            #env_toks
         );
         pub use #response_mod_name::{ #( #generated_idents ),* };
     };

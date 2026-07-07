@@ -4,7 +4,13 @@
 fn template_compile_fail_tests() {
     std::fs::write(
         "/tmp/dynamic_desc_test.tmpl.md",
-        "---\nname: dynamic\nparams:\n  - api_version = str\n---\nRunning on {{ api_version }}\n",
+        r"---
+name: dynamic
+params:
+  - api_version = str
+---
+Running on {{ api_version }}
+",
     )
     .unwrap();
 

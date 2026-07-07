@@ -40,6 +40,7 @@ use syn::{ItemFn, LitStr, parse_macro_input};
 /// | `#[llm_tool(response_file = "...")]` | Runtime render | `md-tmpl` |
 /// | `#[llm_tool(prompt_file = "tools/x.tmpl.md")]` | Zero (compiled) | `md-tmpl` |
 /// | `#[llm_tool(prompt_file = "...", params(k = "v"))]` | Zero (compiled) | `md-tmpl` |
+/// | `#[llm_tool(prompt_file = "...", env(K = "v"))]` | Zero (compiled) | `md-tmpl` |
 /// | `#[llm_tool(prompt_file = "...", context = fn)]` | Runtime `Cow::Owned` | `md-tmpl` |
 ///
 /// ## Inline description
@@ -80,6 +81,31 @@ use syn::{ItemFn, LitStr, parse_macro_input};
 ///
 /// The context function signature is `fn(&ToolStruct) -> Context`.
 /// Templates are parsed once at startup via `LazyLock`.
+///
+/// ## Environment variables (feature: `md-tmpl`)
+///
+/// Templates can declare `env:` variables in their frontmatter. These are
+/// separate from `params:` — they represent build-time configuration
+/// (deployment environment, API version, etc.) rather than template parameters.
+///
+/// In the template:
+/// ```text
+/// ---
+/// env:
+///   - API_VERSION = str
+///   - MAX_RETRIES = int := 3
+/// ---
+/// Uses API {{ API_VERSION }} with {{ MAX_RETRIES }} retries.
+/// ```
+///
+/// Supply values via the `env(...)` attribute:
+/// ```text
+/// #[llm_tool(prompt_file = "tools/api.tmpl.md", env(API_VERSION = "v5"))]
+/// fn query_api(/* … */) -> Result<String, ToolError> { /* … */ }
+/// ```
+///
+/// Env values are resolved at compile time, producing a zero-cost static
+/// description. They can be combined with `params(...)` or `context = fn`.
 ///
 /// # Typed parameters
 ///
@@ -158,6 +184,7 @@ pub fn llm_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `prompt = "inline text"` — static inline description
 /// - `prompt_file = "path.tmpl.md"` — template file (requires `md-tmpl`)
 /// - `params(key = "value", ...)` — compile-time template variables
+/// - `env(KEY = "value", ...)` — compile-time environment variables for `env:` frontmatter
 /// - `context = path::to::fn` — runtime template context function
 /// - `response_file = "path.tmpl.md"` — response rendering template
 struct ToolAttr {
@@ -173,6 +200,9 @@ struct ToolAttr {
     /// Mutually exclusive with `context_fn`.
     #[cfg(feature = "md-tmpl")]
     inline_params: Vec<(Ident, LitStr)>,
+    /// Compile-time environment variables for `env:` frontmatter declarations.
+    #[cfg(feature = "md-tmpl")]
+    env_vars: Vec<(Ident, syn::Lit)>,
     /// Runtime context function (mutually exclusive with `inline_params`).
     #[cfg(feature = "md-tmpl")]
     context_fn: Option<syn::Path>,
@@ -186,6 +216,7 @@ const ATTR_RESPONSE_FILE: &str = "response_file";
 const ATTR_RESPONSE: &str = "response";
 const ATTR_PARAMS: &str = "params";
 const ATTR_CONTEXT: &str = "context";
+const ATTR_ENV: &str = "env";
 const TYPE_OPTION: &str = "Option";
 const TYPE_TOOL_CONTEXT: &str = "ToolContext";
 const TYPE_STR: &str = "str";
@@ -200,11 +231,15 @@ struct ToolAttrBuilder {
     #[cfg(feature = "md-tmpl")]
     inline_params: Vec<(syn::Ident, syn::LitStr)>,
     #[cfg(feature = "md-tmpl")]
+    env_vars: Vec<(syn::Ident, syn::Lit)>,
+    #[cfg(feature = "md-tmpl")]
     context_fn: Option<syn::Path>,
     #[cfg(not(feature = "md-tmpl"))]
     has_inline_params: bool,
     #[cfg(not(feature = "md-tmpl"))]
     has_context_fn: bool,
+    #[cfg(not(feature = "md-tmpl"))]
+    has_env: bool,
 }
 
 impl ToolAttrBuilder {
@@ -244,6 +279,40 @@ impl ToolAttrBuilder {
             {
                 self.has_inline_params = true;
             }
+        } else if ident == ATTR_ENV {
+            let content;
+            syn::parenthesized!(content in input);
+            while !content.is_empty() {
+                let key: syn::Ident = content.parse()?;
+                let _: syn::Token![=] = content.parse()?;
+                let value: syn::Lit = content.parse()?;
+                match &value {
+                    syn::Lit::Str(_)
+                    | syn::Lit::Int(_)
+                    | syn::Lit::Float(_)
+                    | syn::Lit::Bool(_) => {}
+                    other => {
+                        return Err(syn::Error::new(
+                            other.span(),
+                            "env values must be string, integer, float, or bool literals",
+                        ));
+                    }
+                }
+                #[cfg(feature = "md-tmpl")]
+                self.env_vars.push((key, value));
+                #[cfg(not(feature = "md-tmpl"))]
+                {
+                    drop(key);
+                    drop(value);
+                }
+                if !content.is_empty() {
+                    let _: syn::Token![,] = content.parse()?;
+                }
+            }
+            #[cfg(not(feature = "md-tmpl"))]
+            {
+                self.has_env = true;
+            }
         } else if ident == ATTR_CONTEXT {
             let _: syn::Token![=] = input.parse()?;
             #[cfg(feature = "md-tmpl")]
@@ -258,7 +327,7 @@ impl ToolAttrBuilder {
         } else {
             return Err(syn::Error::new(
                 ident.span(),
-                "expected `prompt`, `prompt_file`, `response`, `response_file`, `params`, or `context`",
+                "expected `prompt`, `prompt_file`, `response`, `response_file`, `params`, `env`, or `context`",
             ));
         }
         Ok(())
@@ -277,19 +346,24 @@ impl syn::parse::Parse for ToolAttr {
         }
 
         #[cfg(feature = "md-tmpl")]
-        let (has_inline_params, has_context_fn) = (
+        let (has_inline_params, has_context_fn, has_env) = (
             !builder.inline_params.is_empty(),
             builder.context_fn.is_some(),
+            !builder.env_vars.is_empty(),
         );
         #[cfg(not(feature = "md-tmpl"))]
-        let (has_inline_params, has_context_fn) =
-            (builder.has_inline_params, builder.has_context_fn);
+        let (has_inline_params, has_context_fn, has_env) = (
+            builder.has_inline_params,
+            builder.has_context_fn,
+            builder.has_env,
+        );
 
         validate_tool_attr(
             builder.prompt_inline.as_ref(),
             builder.prompt_file_path.as_ref(),
             has_inline_params,
             has_context_fn,
+            has_env,
         )?;
 
         if builder.response_inline.is_some() && builder.response_file_path.is_some() {
@@ -316,6 +390,8 @@ impl syn::parse::Parse for ToolAttr {
             #[cfg(feature = "md-tmpl")]
             inline_params: builder.inline_params,
             #[cfg(feature = "md-tmpl")]
+            env_vars: builder.env_vars,
+            #[cfg(feature = "md-tmpl")]
             context_fn: builder.context_fn,
             has_inline_params,
             has_context_fn,
@@ -330,6 +406,7 @@ fn validate_tool_attr(
     prompt_file_path: Option<&LitStr>,
     has_inline_params: bool,
     has_context_fn: bool,
+    has_env: bool,
 ) -> syn::Result<()> {
     // Mutual exclusion: prompt vs prompt_file.
     if prompt_inline.is_some() && prompt_file_path.is_some() {
@@ -339,17 +416,35 @@ fn validate_tool_attr(
         ));
     }
 
-    // params/context only make sense with prompt_file.
-    if prompt_file_path.is_none() && has_inline_params {
+    // params/context require a template source (prompt_file or prompt).
+    if prompt_file_path.is_none() && prompt_inline.is_none() && has_inline_params {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            "`params(...)` requires `prompt_file = \"...\"`",
+            "`params(...)` requires `prompt_file = \"...\"` or `prompt = \"...\"`",
         ));
     }
-    if prompt_file_path.is_none() && has_context_fn {
+    if prompt_file_path.is_none() && prompt_inline.is_none() && has_context_fn {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            "`context = ...` requires `prompt_file = \"...\"`",
+            "`context = ...` requires `prompt_file = \"...\"` or `prompt = \"...\"`",
+        ));
+    }
+
+    // env() requires a template source (prompt_file or prompt with frontmatter).
+    if has_env && prompt_file_path.is_none() && prompt_inline.is_none() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`env(...)` requires `prompt_file = \"...\"` or `prompt = \"...\"`",
+        ));
+    }
+
+    // env() requires the md-tmpl feature.
+    #[cfg(not(feature = "md-tmpl"))]
+    if has_env {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "the `md-tmpl` feature must be enabled to use `env(...)`. \
+             Add `features = [\"md-tmpl\"]` to your llm-tool dependency.",
         ));
     }
 

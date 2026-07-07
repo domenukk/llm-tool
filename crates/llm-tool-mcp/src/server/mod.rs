@@ -344,7 +344,9 @@ impl McpServer {
     pub async fn listen_unix(&self, path: impl AsRef<std::path::Path>) -> io::Result<()> {
         let path = path.as_ref();
         if path.exists() {
-            let _ = std::fs::remove_file(path);
+            if let Err(e) = std::fs::remove_file(path) {
+                tracing::warn!(path = ?path, error = %e, "failed to remove stale socket file");
+            }
         }
         let listener = tokio::net::UnixListener::bind(path)?;
         info!(path = ?path, "listening on Unix domain socket for MCP connections");

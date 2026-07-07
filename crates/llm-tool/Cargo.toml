@@ -1,6 +1,6 @@
 [package]
 name = "llm-tool"
-version = "0.5.0"
+version = "0.5.2"
 edition = "2024"
 rust-version = "1.86"
 description = "Framework-agnostic Rust tool definitions for LLM agents"
@@ -23,19 +23,25 @@ std = [
 # `#[llm_tool(response_file = "path.tmpl.md")]` for template-based
 # tool descriptions and response rendering. Requires `md-tmpl`
 # as a direct dependency for runtime context types (`Context`, `Template`).
-md-tmpl = ["dep:md-tmpl", "dep:md-tmpl-macros", "llm-tool-macros/md-tmpl"]
+md-tmpl = [
+  "dep:md-tmpl",
+  "dep:md-tmpl-macros",
+  "dep:typed-builder",
+  "llm-tool-macros/md-tmpl",
+]
 
 [dependencies]
-llm-tool-macros = { path = "../llm-tool-macros", version = "0.5.0" }
-md-tmpl = { version = "0.5.0", optional = true, default-features = false, features = [
+llm-tool-macros = { path = "../llm-tool-macros", version = "0.5.2" }
+md-tmpl = { version = "0.5.2", optional = true, default-features = false, features = [
   "serde",
 ] }
-md-tmpl-macros = { version = "0.5.0", optional = true, default-features = false, features = [
+md-tmpl-macros = { version = "0.5.2", optional = true, default-features = false, features = [
   "serde",
 ] }
 hashbrown = { version = "0.17", default-features = false, features = [
   "allocator-api2",
   "default-hasher",
+  "serde",
 ] }
 schemars = { version = "1", default-features = false, features = ["derive"] }
 serde = { version = "1", default-features = false, features = [
@@ -48,6 +54,7 @@ spin = { version = "0.12", default-features = false, features = [
   "lazy",
 ] }
 tracing = { version = "0.1", default-features = false }
+typed-builder = { version = "0.23", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "sync", "fs"] }
