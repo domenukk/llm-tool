@@ -587,6 +587,7 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
             #description_method
 
 
+            // NOLINT: macro-generated code — the impl may not be async depending on user's function
             #[allow(unknown_lints, clippy::unused_async_trait_impl)]
             async fn call(&self, params: Self::Params, _ctx: &#crate_path::ToolContext) -> ::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError> {
 
@@ -621,7 +622,9 @@ struct DescriptionInfo {
 
 pub(crate) mod desc;
 pub(crate) mod helpers;
+// NOLINT: proc-macro internal — wildcard re-export of desc module types
 #[allow(clippy::wildcard_imports)]
 pub(crate) use desc::*;
+// NOLINT: proc-macro internal — wildcard re-export of helpers module types
 #[allow(clippy::wildcard_imports)]
 pub(crate) use helpers::*;

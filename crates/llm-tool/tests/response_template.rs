@@ -298,6 +298,7 @@ fn inline_env_response_tool(
     /// The query.
     query: String,
 ) -> Result<InlineEnvResponseToolResponse, ToolError> {
+    // NOLINT: test tool intentionally ignores query parameter
     let _ = query;
     Ok(InlineEnvResponseToolResponse {
         status: "healthy".to_string(),

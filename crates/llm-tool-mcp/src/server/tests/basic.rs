@@ -294,6 +294,7 @@ async fn tcp_listener_serves_requests() {
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
+        // NOLINT: test background task — server result unused; test controls lifecycle
         let _ = server.run_tcp_listener(listener).await;
     });
 
@@ -324,6 +325,7 @@ async fn unix_listener_serves_requests() {
     let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
 
     tokio::spawn(async move {
+        // NOLINT: test background task — server result unused; test controls lifecycle
         let _ = server.run_unix_listener(listener).await;
     });
 
@@ -717,6 +719,7 @@ async fn tcp_multiple_concurrent_clients() {
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
+        // NOLINT: test background task — server result unused; test controls lifecycle
         let _ = server.run_tcp_listener(listener).await;
     });
 
@@ -766,6 +769,7 @@ async fn unix_multiple_concurrent_clients() {
     let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
 
     tokio::spawn(async move {
+        // NOLINT: test background task — server result unused; test controls lifecycle
         let _ = server.run_unix_listener(listener).await;
     });
 

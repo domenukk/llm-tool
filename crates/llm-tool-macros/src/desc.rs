@@ -1,6 +1,7 @@
 use quote::quote;
 use syn::{ItemFn, LitStr};
 
+// NOLINT: proc-macro internal — wildcard import of crate types is the standard pattern
 #[allow(clippy::wildcard_imports)]
 use crate::*;
 
@@ -127,6 +128,7 @@ pub(crate) fn resolve_inline_description(
 ) -> syn::Result<DescriptionInfo> {
     #[cfg(not(feature = "md-tmpl"))]
     {
+        // NOLINT: suppress unused-variable warning in non-md-tmpl cfg branch
         let _ = fn_name;
         let span = attr
             .prompt_inline
@@ -158,6 +160,7 @@ pub(crate) fn resolve_template_description(
 ) -> syn::Result<DescriptionInfo> {
     #[cfg(not(feature = "md-tmpl"))]
     {
+        // NOLINT: suppress unused-variable warning in non-md-tmpl cfg branch
         let _ = fn_name;
         let span = attr
             .prompt_file_path

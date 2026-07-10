@@ -10,6 +10,7 @@ async fn rmcp_client_integration_test() {
 
     tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(server_r);
+        // NOLINT: test background task — server result unused; test controls lifecycle
         let _ = server.run_async(&mut reader, server_w).await;
     });
 
@@ -34,6 +35,7 @@ async fn rmcp_client_integration_test() {
         .await
         .expect("call tool failed");
 
+    // NOLINT: test assertion — false default is correct for missing is_error flag
     assert!(!call_res.is_error.unwrap_or(false));
     assert_eq!(call_res.content.len(), 1);
     let text = match &call_res.content[0] {
@@ -47,6 +49,7 @@ async fn rmcp_client_integration_test() {
         .call_tool(rmcp::model::CallToolRequestParams::new("fail"))
         .await
         .expect("call tool response expected");
+    // NOLINT: test assertion — false default is correct for missing is_error flag
     assert!(fail_res.is_error.unwrap_or(false));
     let fail_text = match &fail_res.content[0] {
         rmcp::model::ContentBlock::Text(t) => &t.text,
@@ -59,6 +62,7 @@ async fn rmcp_client_integration_test() {
         .call_tool(rmcp::model::CallToolRequestParams::new("non_existent"))
         .await
         .expect("call tool response expected");
+    // NOLINT: test assertion — false default is correct for missing is_error flag
     assert!(unknown_res.is_error.unwrap_or(false));
     let unknown_text = match &unknown_res.content[0] {
         rmcp::model::ContentBlock::Text(t) => &t.text,
@@ -94,6 +98,7 @@ async fn rmcp_client_integration_test() {
         other => panic!("expected McpError with INVALID_PARAMS, got {other:?}"),
     }
 
+    // NOLINT: test cleanup — close errors are non-fatal
     let _ = client.close().await;
 }
 
@@ -104,6 +109,7 @@ async fn rmcp_client_tcp_test() {
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
+        // NOLINT: test background task — server result unused; test controls lifecycle
         let _ = server.run_tcp_listener(listener).await;
     });
 
@@ -118,6 +124,7 @@ async fn rmcp_client_tcp_test() {
         .expect("list tools failed over TCP");
     assert_eq!(tools.len(), 3);
 
+    // NOLINT: test cleanup — close errors are non-fatal
     let _ = client.close().await;
 }
 
@@ -130,6 +137,7 @@ async fn rmcp_client_unix_test() {
     let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
 
     tokio::spawn(async move {
+        // NOLINT: test background task — server result unused; test controls lifecycle
         let _ = server.run_unix_listener(listener).await;
     });
 
@@ -144,5 +152,6 @@ async fn rmcp_client_unix_test() {
         .expect("list tools failed over Unix socket");
     assert_eq!(tools.len(), 3);
 
+    // NOLINT: test cleanup — close errors are non-fatal
     let _ = client.close().await;
 }

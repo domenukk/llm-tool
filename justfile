@@ -25,7 +25,7 @@ fmt-just:
 # ── Lint ──────────────────────────────────────────────────────────────
 
 # Lint all code (Rust clippy, TOML, Markdown, Justfile)
-lint: lint-rust lint-toml lint-markdown lint-just
+lint: lint-rust lint-toml lint-markdown lint-just lint-hygiene
 
 # Lint Rust with clippy (pedantic + all, deny warnings)
 lint-rust:
@@ -43,6 +43,10 @@ lint-markdown:
 # Lint the justfile (check formatting)
 lint-just:
     just --fmt --unstable --check
+
+# Run hygiene linter (flags suppression patterns, discarded errors, etc.)
+lint-hygiene:
+    python3 scripts/lint_hygiene.py
 
 # ── Test ──────────────────────────────────────────────────────────────
 

@@ -2,13 +2,18 @@
 
 > **Framework-agnostic Rust tool definitions for LLM agents.**
 
-Write plain Rust functions. Get typed LLM tools with JSON Schemas, automatic deserialization, and instant [MCP](https://modelcontextprotocol.io/) server support.
+Write plain Rust functions. Get typed LLM tools with
+JSON Schemas, automatic deserialization, and instant
+[MCP](https://modelcontextprotocol.io/) server support.
 
 ## Why `llm-tool`?
 
 - **Zero Boilerplate:** `#[llm_tool]` on a function → typed tool with JSON Schema.
-- **Strongly Typed:** Parameters are validated. Missing or extra arguments are caught instantly.
-- **Framework Agnostic:** Use the `ToolRegistry` to get JSON Schemas for _any_ LLM SDK (`OpenAI`, Anthropic, Gemini, …).
+- **Strongly Typed:** Parameters are validated.
+  Missing or extra arguments are caught instantly.
+- **Framework Agnostic:** Use the `ToolRegistry` to get
+  JSON Schemas for _any_ LLM SDK
+  (`OpenAI`, Anthropic, Gemini, …).
 - **MCP Ready:** Spin up a fully compliant MCP server in 3 lines with `llm-tool-mcp`.
 - **`no_std` Compatible:** Core types work in embedded and WASM targets.
 
@@ -18,8 +23,8 @@ Write plain Rust functions. Get typed LLM tools with JSON Schemas, automatic des
 
 ```toml
 [dependencies]
-llm-tool = "0.5"
-llm-tool-mcp = "0.5" # Optional: for MCP server support
+llm-tool = "0.6"
+llm-tool-mcp = "0.6" # Optional: for MCP server support
 ```
 
 ### Define a Tool
@@ -113,11 +118,15 @@ assert_eq!(registry.definitions()[0].name, "restart_server");
 Return `Result<T, E>` or just `T`. The `?` operator works out of the box.
 
 - **Auto-Serialization**: Return any `T: Serialize` → automatic JSON response.
-- **Structured Metadata**: Attach hidden metadata to `ToolOutput` or `ToolError` (logged but _not_ sent to the LLM).
+- **Structured Metadata**: Attach hidden metadata to
+  `ToolOutput` or `ToolError`
+  (logged but _not_ sent to the LLM).
 
 ### Context
 
-Add `ctx: &ToolContext` to any tool function to access shared state, conversation IDs, or typed extensions — automatically hidden from the JSON Schema.
+Add `ctx: &ToolContext` to any tool function to access
+shared state, conversation IDs, or typed extensions —
+automatically hidden from the JSON Schema.
 
 ### Custom Descriptions
 
@@ -134,15 +143,23 @@ async fn query_db(
 }
 ```
 
-With the `md-tmpl` feature, you can also load descriptions from `.tmpl.md` template files (`prompt_file = "..."`), with compile-time variable substitution and validation. See the [`md-tmpl` docs](https://docs.rs/md-tmpl) for details.
+With the `md-tmpl` feature, you can also load
+descriptions from `.tmpl.md` template files
+(`prompt_file = "..."`), with compile-time variable
+substitution and validation.
+See the [`md-tmpl` docs](https://docs.rs/md-tmpl)
+for details.
 
 ---
 
 ## Documentation
 
-- [`llm-tool`](https://docs.rs/llm-tool) — Return types, tool context, metadata, template descriptions.
-- [`llm-tool-mcp`](https://docs.rs/llm-tool-mcp) — MCP transports, stdio/TCP, routing.
-- [`md-tmpl`](https://docs.rs/md-tmpl) — Template syntax, env variables, response templates.
+- [`llm-tool`](https://docs.rs/llm-tool) — Return types,
+  tool context, metadata, template descriptions.
+- [`llm-tool-mcp`](https://docs.rs/llm-tool-mcp) — MCP
+  transports, stdio/TCP, routing.
+- [`md-tmpl`](https://docs.rs/md-tmpl) — Template syntax,
+  env variables, response templates.
 
 ## License
 

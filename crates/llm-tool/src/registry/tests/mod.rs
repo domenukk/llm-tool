@@ -25,6 +25,7 @@ impl RustTool for SampleTool {
     type Params = PathParams;
     const NAME: &'static str = "sample";
     const DESCRIPTION: &'static str = "A sample tool";
+    // NOLINT: required for backward-compatible async trait impl in tests
     #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(
         &self,
@@ -53,6 +54,7 @@ impl RustTool for RunCommandTool {
     type Params = RunCommandParams;
     const NAME: &'static str = "run_command";
     const DESCRIPTION: &'static str = "Runs a command.";
+    // NOLINT: required for backward-compatible async trait impl in tests
     #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(
         &self,

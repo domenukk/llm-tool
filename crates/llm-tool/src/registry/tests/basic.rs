@@ -15,6 +15,7 @@ impl RustTool for EmptyParamTool {
     type Params = EmptyParams;
     const NAME: &'static str = "empty";
     const DESCRIPTION: &'static str = "No params";
+    // NOLINT: required for backward-compatible async trait impl in tests
     #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(
         &self,
@@ -158,6 +159,7 @@ async fn registry_replaces_on_duplicate_name() {
         type Params = PathParams;
         const NAME: &'static str = "sample";
         const DESCRIPTION: &'static str = "Alternate sample";
+        // NOLINT: required for backward-compatible async trait impl in tests
         #[allow(unknown_lints, clippy::unused_async_trait_impl)]
         async fn call(
             &self,
@@ -186,6 +188,7 @@ async fn registry_tool_returning_error() {
         type Params = EmptyParams;
         const NAME: &'static str = "fail";
         const DESCRIPTION: &'static str = "Always fails";
+        // NOLINT: required for backward-compatible async trait impl in tests
         #[allow(unknown_lints, clippy::unused_async_trait_impl)]
         async fn call(
             &self,
@@ -222,6 +225,7 @@ impl RustTool for AsyncSleepTool {
     const NAME: &'static str = "async_sleep";
     const DESCRIPTION: &'static str = "Sleeps briefly then returns.";
 
+    // NOLINT: required for backward-compatible async trait impl in tests
     #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(
         &self,
@@ -257,6 +261,7 @@ impl RustTool for AsyncReadFileTool {
     const NAME: &'static str = "read_file";
     const DESCRIPTION: &'static str = "Reads a file asynchronously.";
 
+    // NOLINT: required for backward-compatible async trait impl in tests
     #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(
         &self,
@@ -329,6 +334,7 @@ impl RustTool for ChannelTool {
     const NAME: &'static str = "channel_tool";
     const DESCRIPTION: &'static str = "Awaits a value from a channel.";
 
+    // NOLINT: required for backward-compatible async trait impl in tests
     #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(
         &self,
@@ -422,6 +428,7 @@ impl RustTool for DocumentedTool {
     type Params = DocumentedParams;
     const NAME: &'static str = "connect";
     const DESCRIPTION: &'static str = "Connects to a remote host.";
+    // NOLINT: required for backward-compatible async trait impl in tests
     #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(&self, p: Self::Params, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
         Ok(format!("{}:{}:{:?}", p.hostname, p.port, p.timeout).into())

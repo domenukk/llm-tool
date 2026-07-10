@@ -80,6 +80,7 @@ async fn rmcp_client_prompts_resources_integration_test() {
 
     tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(server_r);
+        // NOLINT: test background task — server result unused; test controls lifecycle
         let _ = server.run_async(&mut reader, server_w).await;
     });
 
@@ -126,5 +127,6 @@ async fn rmcp_client_prompts_resources_integration_test() {
         .expect("read resource failed");
     assert_eq!(read_res.contents.len(), 1);
 
+    // NOLINT: test cleanup — close errors are non-fatal
     let _ = client.close().await;
 }

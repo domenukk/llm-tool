@@ -9,52 +9,19 @@ use crate::{
     resolve_description,
 };
 
-#[allow(clippy::too_many_lines)]
-pub fn prompt_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<TokenStream> {
-    let crate_path = quote! { ::llm_tool };
-    let fn_name = &func.sig.ident;
-    let tool_name_str = fn_name.to_string();
-    let struct_name = format_ident!("{}", tool_name_str.to_case(Case::Pascal));
-    let params_name = format_ident!("{}Params", struct_name);
-
-    let DescriptionInfo {
-        static_description,
-        helper_tokens,
-        description_method,
-        dep_tracking,
-    } = resolve_description(func, attr)?;
-
-    let all_params = extract_params(func)?;
-    let params: Vec<&ParamInfo> = all_params.iter().filter(|p| !p.is_context).collect();
-
-    for param in &params {
-        if param.doc_attrs.is_empty() {
-            return Err(syn::Error::new_spanned(
-                &param.name,
-                format!(
-                    "#[llm_prompt] parameter `{}` must have a doc comment \
-                      (used as the parameter description in the JSON schema)",
-                    param.name
-                ),
-            ));
-        }
-    }
-
-    let return_info = parse_return_type(func)?;
-
-    let param_names: Vec<_> = params.iter().map(|p| &p.name).collect();
-    let param_descriptions: Vec<String> = params
-        .iter()
-        .map(|p| extract_doc_string(&p.doc_attrs))
-        .collect();
-
-    let (param_struct_types, borrow_bindings) = build_param_types_and_borrows(&params);
-    let serde_defaults = build_serde_defaults(&params);
-
+/// Build the body tokens for a prompt's `render` method.
+///
+/// Wraps the user's function body in the appropriate async/sync wrapper and
+/// converts the return value via `Wrap(__v).__convert_prompt()`.
+fn build_prompt_body_tokens(
+    func: &ItemFn,
+    return_info: &ReturnInfo,
+    crate_path: &TokenStream,
+) -> TokenStream {
     let is_async = func.sig.asyncness.is_some();
     let body_stmts = &func.block.stmts;
 
-    let body_tokens = match return_info {
+    match return_info {
         ReturnInfo::ResultType { ok_type, err_type } => {
             let inner = if is_async {
                 quote! {
@@ -96,7 +63,50 @@ pub fn prompt_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<TokenS
                 }
             }
         }
-    };
+    }
+}
+
+pub fn prompt_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<TokenStream> {
+    let crate_path = quote! { ::llm_tool };
+    let fn_name = &func.sig.ident;
+    let tool_name_str = fn_name.to_string();
+    let struct_name = format_ident!("{}", tool_name_str.to_case(Case::Pascal));
+    let params_name = format_ident!("{}Params", struct_name);
+
+    let DescriptionInfo {
+        static_description,
+        helper_tokens,
+        description_method,
+        dep_tracking,
+    } = resolve_description(func, attr)?;
+
+    let all_params = extract_params(func)?;
+    let params: Vec<&ParamInfo> = all_params.iter().filter(|p| !p.is_context).collect();
+
+    for param in &params {
+        if param.doc_attrs.is_empty() {
+            return Err(syn::Error::new_spanned(
+                &param.name,
+                format!(
+                    "#[llm_prompt] parameter `{}` must have a doc comment \
+                      (used as the parameter description in the JSON schema)",
+                    param.name
+                ),
+            ));
+        }
+    }
+
+    let return_info = parse_return_type(func)?;
+
+    let param_names: Vec<_> = params.iter().map(|p| &p.name).collect();
+    let param_descriptions: Vec<String> = params
+        .iter()
+        .map(|p| extract_doc_string(&p.doc_attrs))
+        .collect();
+
+    let (param_struct_types, borrow_bindings) = build_param_types_and_borrows(&params);
+    let serde_defaults = build_serde_defaults(&params);
+    let body_tokens = build_prompt_body_tokens(func, &return_info, &crate_path);
 
     let vis = &func.vis;
     let params_doc = format!("Auto-generated parameters for the [`{struct_name}`] prompt.");

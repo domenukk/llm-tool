@@ -133,6 +133,7 @@ async fn async_optional_tool(
     suffix: Option<String>,
 ) -> Result<String, ToolError> {
     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    // NOLINT: test helper — empty string default for optional param is intentional
     let s = suffix.unwrap_or_default();
     Ok(format!("{input}{s}"))
 }
@@ -278,6 +279,7 @@ async fn dispatch_passes_context_to_tool() {
         const NAME: &'static str = "ctx_tool";
         const DESCRIPTION: &'static str = "Reads conversation_id from context.";
 
+        // NOLINT: required for backward-compatible async trait impl in tests
         #[allow(unknown_lints, clippy::unused_async_trait_impl)]
         async fn call(
             &self,
@@ -286,6 +288,7 @@ async fn dispatch_passes_context_to_tool() {
         ) -> Result<ToolOutput, ToolError> {
             let conv = ctx.conversation_id().unwrap_or("none");
             let count = ctx.get_state("call_count", serde_json::json!(0));
+            // NOLINT: test assertion — 0 default is intentional for missing count
             let n = count.as_i64().unwrap_or(0);
             ctx.set_state("call_count", serde_json::json!(n + 1))
                 .map_err(|e| ToolError::new(format!("set_state failed: {e}")))?;
@@ -323,6 +326,7 @@ impl RustTool for MetadataTool {
     const NAME: &'static str = "metadata_tool";
     const DESCRIPTION: &'static str = "Returns output with metadata.";
 
+    // NOLINT: required for backward-compatible async trait impl in tests
     #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(
         &self,
@@ -426,6 +430,7 @@ impl RustTool for MetadataErrorTool {
     const NAME: &'static str = "metadata_error_tool";
     const DESCRIPTION: &'static str = "Always fails with metadata.";
 
+    // NOLINT: required for backward-compatible async trait impl in tests
     #[allow(unknown_lints, clippy::unused_async_trait_impl)]
     async fn call(
         &self,

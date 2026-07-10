@@ -54,6 +54,7 @@ pub fn definition_of_prompt<T: RustPrompt>(prompt: &T) -> PromptDefinition {
             .get("required")
             .and_then(|r| r.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            // NOLINT: empty vec is correct when schema has no 'required' field
             .unwrap_or_default();
         if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
             for (name, prop) in props {

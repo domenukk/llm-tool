@@ -1,6 +1,7 @@
 use quote::quote;
 use syn::{FnArg, GenericArgument, ItemFn, Pat, PatType, PathArguments, Type};
 
+// NOLINT: proc-macro internal — wildcard import of crate types is the standard pattern
 #[allow(clippy::wildcard_imports)]
 use crate::*;
 
@@ -138,6 +139,7 @@ pub(crate) fn resolve_response_template(
     struct_name: &syn::Ident,
     fn_name: &syn::Ident,
 ) -> syn::Result<ResponseTemplateInfo> {
+    // NOLINT: suppress unused-variable warning in non-md-tmpl cfg branch
     let _ = (struct_name, fn_name);
     let Some(attr) = attr else {
         return Ok(ResponseTemplateInfo::default());
