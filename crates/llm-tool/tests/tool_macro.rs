@@ -18,6 +18,9 @@ fn tool_macro_compile_tests() {
     t.compile_fail("tests/ui/missing_param_doc.rs");
     t.compile_fail("tests/ui/self_param.rs");
     t.compile_fail("tests/ui/context_by_value.rs");
-    t.compile_fail("tests/ui/conflict_prompt_prompt_file.rs");
-    t.compile_fail("tests/ui/env_without_prompt.rs");
+    t.compile_fail("tests/ui/conflict_description_and_description_file.rs");
+    t.compile_fail("tests/ui/env_without_description.rs");
+    t.compile_fail("tests/ui/generic_fn.rs");
+    t.compile_fail("tests/ui/unknown_attr_key.rs");
+    t.compile_fail("tests/ui/resource_missing_uri.rs");
 }

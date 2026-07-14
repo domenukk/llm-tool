@@ -7,9 +7,15 @@
 
 #[cfg(feature = "std")]
 pub(crate) use std::collections::HashMap;
+/// Borrowing iterator over a [`HashMap`]'s entries — `std` variant.
+#[cfg(feature = "std")]
+pub(crate) use std::collections::hash_map::Iter as HashMapIter;
 
 #[cfg(not(feature = "std"))]
 pub(crate) use hashbrown::HashMap;
+/// Borrowing iterator over a [`HashMap`]'s entries — `hashbrown` variant.
+#[cfg(not(feature = "std"))]
+pub(crate) use hashbrown::hash_map::Iter as HashMapIter;
 
 // -- RwLock -------------------------------------------------------------------
 //

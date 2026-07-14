@@ -1,0 +1,7 @@
+error: `uri` is required in #[llm_resource(uri = "...")]
+ --> tests/ui/resource_missing_uri.rs:4:1
+  |
+4 | #[llm_resource(description = "no uri here")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `llm_resource` (in Nightly builds, run with -Z macro-backtrace for more info)

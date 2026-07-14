@@ -23,8 +23,8 @@ JSON Schemas, automatic deserialization, and instant
 
 ```toml
 [dependencies]
-llm-tool = "0.6"
-llm-tool-mcp = "0.6" # Optional: for MCP server support
+llm-tool = "0.7"
+llm-tool-mcp = "0.7" # Optional: for MCP server support
 ```
 
 ### Define a Tool
@@ -55,12 +55,13 @@ assert_eq!(definitions[0].name, "get_weather");
 
 // ...or execute calls directly from JSON arguments!
 # futures::executor::block_on(async {
-let ctx = llm_tool::ToolContext::new(None);
-let result = registry.dispatch(
-    "get_weather",
-    serde_json::json!({"location": "London"}),
-    &ctx
-).await.unwrap();
+let ctx = llm_tool::ToolContext::new();
+let output = registry
+    .dispatch("get_weather", serde_json::json!({"location": "London"}), &ctx)
+    .await
+    .expect("tool is registered") // `dispatch` returns `None` for unknown tools
+    .expect("dispatch succeeds");
+# let _ = output;
 # });
 ```
 
@@ -103,10 +104,11 @@ fn get_config(
 let registry = ToolRegistry::new().with_tool(RestartServer);
 assert_eq!(registry.definitions()[0].name, "restart_server");
 
-// Prompts and Resources are registered via llm-tool-mcp:
-//   McpServer::new("my-server", "1.0", registry)
+// Prompts and Resources are registered via llm-tool-mcp's builder:
+//   McpServer::builder("my-server", "1.0", registry)
 //       .with_prompt(CodeReview)
-//       .with_resource(GetConfig);
+//       .with_resource(GetConfig)
+//       .build();
 ```
 
 ---
@@ -134,7 +136,7 @@ Override doc comments with an inline string — no extra features needed:
 
 ```rust
 # use llm_tool::{llm_tool, ToolError};
-#[llm_tool(prompt = "Query the database and return structured results.")]
+#[llm_tool(description = "Query the database and return structured results.")]
 async fn query_db(
     /// The SQL query to execute.
     query: String,
@@ -145,7 +147,7 @@ async fn query_db(
 
 With the `md-tmpl` feature, you can also load
 descriptions from `.tmpl.md` template files
-(`prompt_file = "..."`), with compile-time variable
+(`description_file = "..."`), with compile-time variable
 substitution and validation.
 See the [`md-tmpl` docs](https://docs.rs/md-tmpl)
 for details.

@@ -68,9 +68,10 @@ pub trait RustTool: Send + Sync {
     ///
     /// The default returns [`Self::DESCRIPTION`] (the static string from a
     /// doc comment or template body). When using
-    /// `#[llm_tool(template = "...", context = ...)]`, the generated
+    /// `#[llm_tool(description_file = "...", context = ...)]`, the generated
     /// implementation overrides this to render the template with runtime
-    /// variables on each call. Templates are parsed once via `LazyLock`.
+    /// variables on each call (parsed once via `LazyLock`), falling back to
+    /// [`Self::DESCRIPTION`] if a render ever fails.
     fn description(&self) -> Cow<'static, str> {
         Cow::Borrowed(Self::DESCRIPTION)
     }

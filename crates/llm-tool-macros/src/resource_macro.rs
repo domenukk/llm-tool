@@ -8,7 +8,7 @@ use syn::{
 
 use crate::{
     ParamInfo, ReturnInfo, build_param_types_and_borrows, build_serde_defaults, extract_doc_string,
-    extract_params, parse_return_type,
+    extract_params, parse_return_type, reject_generic_signature,
 };
 
 pub struct ResourceAttr {
@@ -66,6 +66,7 @@ impl Parse for ResourceAttr {
 pub fn resource_impl(func: &ItemFn, attr: &ResourceAttr) -> syn::Result<TokenStream> {
     let crate_path = quote! { ::llm_tool };
     let fn_name = &func.sig.ident;
+    reject_generic_signature(func, "llm_resource")?;
     let tool_name_str = attr
         .name
         .as_ref()
@@ -113,10 +114,7 @@ pub fn resource_impl(func: &ItemFn, attr: &ResourceAttr) -> syn::Result<TokenStr
             quote! {
                 #inner
                 match __r {
-                    ::core::result::Result::Ok(__v) => match #crate_path::__private::Wrap(__v).__convert_resource(uri, Self::MIME_TYPE) {
-                        ::core::result::Result::Ok(__out) => ::core::result::Result::Ok(__out),
-                        ::core::result::Result::Err(__e) => ::core::result::Result::Err(__e),
-                    },
+                    ::core::result::Result::Ok(__v) => #crate_path::__private::Wrap(__v).__convert_resource(uri, Self::MIME_TYPE),
                     ::core::result::Result::Err(__e) => ::core::result::Result::Err(::core::convert::Into::into(__e)),
                 }
             }
@@ -133,10 +131,7 @@ pub fn resource_impl(func: &ItemFn, attr: &ResourceAttr) -> syn::Result<TokenStr
             };
             quote! {
                 #inner
-                match #crate_path::__private::Wrap(__v).__convert_resource(uri, Self::MIME_TYPE) {
-                    ::core::result::Result::Ok(__out) => ::core::result::Result::Ok(__out),
-                    ::core::result::Result::Err(__e) => ::core::result::Result::Err(__e),
-                }
+                #crate_path::__private::Wrap(__v).__convert_resource(uri, Self::MIME_TYPE)
             }
         }
     };

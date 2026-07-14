@@ -1,0 +1,5 @@
+error: #[llm_prompt] does not support `response`/`response_file`; response templates apply to #[llm_tool] only
+ --> tests/ui/prompt_response_unsupported.rs:4:25
+  |
+4 | #[llm_prompt(response = "unused {{ x }}")]
+  |                         ^^^^^^^^^^^^^^^^

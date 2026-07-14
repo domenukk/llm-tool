@@ -1,4 +1,4 @@
-//! Tests for the renamed `prompt`, `prompt_file`, and `response_file` attributes.
+//! Tests for the renamed `description`, `description_file`, and `response_file` attributes.
 //!
 //! Verifies the new canonical attribute names work correctly and produce
 //! identical behavior to the pre-rename API.
@@ -7,11 +7,11 @@
 
 use llm_tool::{RustTool, ToolContext, ToolError, ToolRegistry, llm_tool};
 
-// ── prompt = "..." (inline description) ──────────────────────────────
+// ── description = "..." (inline description) ──────────────────────────────
 
-/// This doc comment should be ignored since prompt = "..." takes priority.
-#[llm_tool(prompt = "Get the current weather for a given city.")]
-fn inline_prompt_tool(
+/// This doc comment should be ignored since description = "..." takes priority.
+#[llm_tool(description = "Get the current weather for a given city.")]
+fn inline_description_tool(
     /// The city name to look up.
     city: String,
 ) -> Result<String, ToolError> {
@@ -19,21 +19,21 @@ fn inline_prompt_tool(
 }
 
 #[test]
-fn inline_prompt_sets_description() {
+fn inline_description_sets_description() {
     assert_eq!(
-        <InlinePromptTool as RustTool>::DESCRIPTION,
+        <InlineDescriptionTool as RustTool>::DESCRIPTION,
         "Get the current weather for a given city."
     );
 }
 
 #[test]
-fn inline_prompt_tool_has_correct_name() {
-    assert_eq!(InlinePromptTool::NAME, "inline_prompt_tool");
+fn inline_description_tool_has_correct_name() {
+    assert_eq!(InlineDescriptionTool::NAME, "inline_description_tool");
 }
 
 #[test]
-fn inline_prompt_in_registry() {
-    let reg = ToolRegistry::new().with_tool(InlinePromptTool);
+fn inline_description_in_registry() {
+    let reg = ToolRegistry::new().with_tool(InlineDescriptionTool);
     let defs = reg.definitions();
     assert_eq!(defs.len(), 1);
     assert_eq!(
@@ -42,10 +42,10 @@ fn inline_prompt_in_registry() {
     );
 }
 
-// ── prompt_file = "..." (static template — no variables) ─────────────
+// ── description_file = "..." (static template — no variables) ─────────────
 
-#[llm_tool(prompt_file = "tools/static_desc.tmpl.md")]
-fn prompt_file_static_tool(
+#[llm_tool(description_file = "tools/static_desc.tmpl.md")]
+fn description_file_static_tool(
     /// The item identifier.
     item_id: String,
 ) -> Result<String, ToolError> {
@@ -53,21 +53,21 @@ fn prompt_file_static_tool(
 }
 
 #[test]
-fn prompt_file_static_sets_description() {
-    let desc = <PromptFileStaticTool as RustTool>::DESCRIPTION;
+fn description_file_static_sets_description() {
+    let desc = <DescriptionFileStaticTool as RustTool>::DESCRIPTION;
     assert!(
         !desc.is_empty(),
-        "prompt_file should embed a non-empty description"
+        "description_file should embed a non-empty description"
     );
 }
 
-// ── prompt_file = "..." + params(...) (compiled template) ────────────
+// ── description_file = "..." + params(...) (compiled template) ────────────
 
 #[llm_tool(
-    prompt_file = "tools/parameterized_desc.tmpl.md",
+    description_file = "tools/parameterized_desc.tmpl.md",
     params(api_version = "v3", env_name = "prod")
 )]
-fn prompt_file_with_params(
+fn description_file_with_params(
     /// The query string.
     query: String,
 ) -> Result<String, ToolError> {
@@ -75,8 +75,8 @@ fn prompt_file_with_params(
 }
 
 #[test]
-fn prompt_file_with_params_embeds_values() {
-    let desc = <PromptFileWithParams as RustTool>::DESCRIPTION;
+fn description_file_with_params_embeds_values() {
+    let desc = <DescriptionFileWithParams as RustTool>::DESCRIPTION;
     assert!(
         desc.contains("v3"),
         "compiled template should contain the param value, got: {desc}",
@@ -111,7 +111,7 @@ fn response_file_tool(
 async fn response_file_renders_struct_fields() {
     let mut reg = ToolRegistry::new();
     reg.register(ResponseFileTool);
-    let ctx = ToolContext::new(None);
+    let ctx = ToolContext::new();
     let result = reg
         .dispatch(
             "response_file_tool",
@@ -119,6 +119,7 @@ async fn response_file_renders_struct_fields() {
             &ctx,
         )
         .await
+        .expect("tool registered")
         .expect("dispatch should succeed");
 
     assert!(
@@ -132,7 +133,7 @@ async fn response_file_renders_struct_fields() {
 async fn response_file_attaches_metadata() {
     let mut reg = ToolRegistry::new();
     reg.register(ResponseFileTool);
-    let ctx = ToolContext::new(None);
+    let ctx = ToolContext::new();
     let result = reg
         .dispatch(
             "response_file_tool",
@@ -140,6 +141,7 @@ async fn response_file_attaches_metadata() {
             &ctx,
         )
         .await
+        .expect("tool registered")
         .expect("dispatch should succeed");
 
     assert!(
@@ -148,14 +150,14 @@ async fn response_file_attaches_metadata() {
     );
 }
 
-// ── prompt + response_file combined ──────────────────────────────────
+// ── description + response_file combined ──────────────────────────────────
 
-/// This doc is overridden by prompt.
+/// This doc is overridden by description.
 #[llm_tool(
-    prompt = "Get the forecast.",
+    description = "Get the forecast.",
     response_file = "tools/weather_response.tmpl.md"
 )]
-fn combined_prompt_response(
+fn combined_description_response(
     /// The location.
     city: String,
 ) -> Result<WeatherResult, ToolError> {
@@ -168,14 +170,14 @@ fn combined_prompt_response(
 }
 
 #[test]
-fn combined_prompt_and_response_file() {
+fn combined_description_and_response_file() {
     assert_eq!(
-        <CombinedPromptResponse as RustTool>::DESCRIPTION,
+        <CombinedDescriptionResponse as RustTool>::DESCRIPTION,
         "Get the forecast."
     );
 }
 
-// ── doc comment fallback (no prompt/prompt_file) ─────────────────────
+// ── doc comment fallback (no description/description_file) ─────────────────────
 
 /// This description comes from the doc comment.
 #[llm_tool]

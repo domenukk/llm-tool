@@ -36,7 +36,7 @@ fn get_state_val(
 }
 
 #[cfg(feature = "md-tmpl")]
-#[llm_tool(prompt_file = "tools/static_desc.tmpl.md")]
+#[llm_tool(description_file = "tools/static_desc.tmpl.md")]
 fn static_tmpl_tool(
     /// Location
     loc: String,
@@ -69,7 +69,7 @@ Supports both metric and imperial unit systems."
     let expected_len = if cfg!(feature = "md-tmpl") { 3 } else { 2 };
     assert_eq!(registry.len(), expected_len);
 
-    let ctx = ToolContext::new(Some("test-conv".into()));
+    let ctx = ToolContext::new().with_conversation_id("test-conv");
     ctx.set_ext(Arc::new(CustomState { value: 42 }))
         .expect("set_ext failed");
 
@@ -77,6 +77,7 @@ Supports both metric and imperial unit systems."
     let out = registry
         .dispatch("multiply", serde_json::json!({ "a": 6, "b": 7 }), &ctx)
         .await
+        .expect("tool registered")
         .expect("dispatch multiply failed");
     assert_eq!(out.content(), "42");
 
@@ -84,6 +85,7 @@ Supports both metric and imperial unit systems."
     let out = registry
         .dispatch("get_state_val", serde_json::json!({ "_dummy": true }), &ctx)
         .await
+        .expect("tool registered")
         .expect("dispatch get_state_val failed");
     assert_eq!(out.content(), "42");
 
@@ -96,6 +98,7 @@ Supports both metric and imperial unit systems."
                 &ctx,
             )
             .await
+            .expect("tool registered")
             .expect("dispatch static_tmpl_tool failed");
         assert_eq!(out.content(), "Weather for Paris");
     }

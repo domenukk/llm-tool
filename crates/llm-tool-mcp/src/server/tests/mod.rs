@@ -91,7 +91,12 @@ fn config_resource(app: String) -> Result<String, ToolError> {
 }
 
 pub fn test_server_with_prompts_and_resources() -> McpServer {
-    test_server()
+    let registry = ToolRegistry::new()
+        .with_tool(AddTool)
+        .with_tool(FailTool)
+        .with_tool(ContextTool);
+    McpServer::builder("test-server", "0.0.1", registry)
         .with_prompt(ReviewPrompt)
         .with_resource(ConfigResource)
+        .build()
 }

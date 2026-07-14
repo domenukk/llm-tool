@@ -5,7 +5,7 @@
 //! implementation.
 //!
 //! With the `md-tmpl` feature enabled, tool descriptions can be
-//! loaded from `.tmpl.md` template files via `prompt_file = "..."`, and tool
+//! loaded from `.tmpl.md` template files via `description_file = "..."`, and tool
 //! responses can be auto-rendered through templates via
 //! `response_file = "..."`.
 mod prompt_macro;
@@ -36,19 +36,19 @@ use syn::{ItemFn, LitStr, parse_macro_input};
 /// | Syntax | Cost | Feature |
 /// |--------|------|---------|
 /// | `#[llm_tool]` + doc comment | Zero (static `&str`) | — |
-/// | `#[llm_tool(prompt = "inline text")]` | Zero (static `&str`) | — |
+/// | `#[llm_tool(description = "inline text")]` | Zero (static `&str`) | — |
 /// | `#[llm_tool(response_file = "...")]` | Runtime render | `md-tmpl` |
-/// | `#[llm_tool(prompt_file = "tools/x.tmpl.md")]` | Zero (compiled) | `md-tmpl` |
-/// | `#[llm_tool(prompt_file = "...", params(k = "v"))]` | Zero (compiled) | `md-tmpl` |
-/// | `#[llm_tool(prompt_file = "...", env(K = "v"))]` | Zero (compiled) | `md-tmpl` |
-/// | `#[llm_tool(prompt_file = "...", context = fn)]` | Runtime `Cow::Owned` | `md-tmpl` |
+/// | `#[llm_tool(description_file = "tools/x.tmpl.md")]` | Zero (compiled) | `md-tmpl` |
+/// | `#[llm_tool(description_file = "...", params(k = "v"))]` | Zero (compiled) | `md-tmpl` |
+/// | `#[llm_tool(description_file = "...", env(K = "v"))]` | Zero (compiled) | `md-tmpl` |
+/// | `#[llm_tool(description_file = "...", context = fn)]` | Runtime `Cow::Owned` | `md-tmpl` |
 ///
 /// ## Inline description
 ///
 /// Override or replace the doc comment with an inline string:
 ///
 /// ```text
-/// #[llm_tool(prompt = "Get the current weather for a city.")]
+/// #[llm_tool(description = "Get the current weather for a city.")]
 /// fn get_weather(/* … */) -> Result<String, ToolError> { /* … */ }
 /// ```
 ///
@@ -57,14 +57,14 @@ use syn::{ItemFn, LitStr, parse_macro_input};
 /// Load the description from a `.tmpl.md` file:
 ///
 /// ```text
-/// #[llm_tool(prompt_file = "tools/weather.tmpl.md")]
+/// #[llm_tool(description_file = "tools/weather.tmpl.md")]
 /// fn get_weather(/* … */) -> Result<String, ToolError> { /* … */ }
 /// ```
 ///
 /// For templates with variables, provide **compile-time** key-value pairs:
 ///
 /// ```text
-/// #[llm_tool(prompt_file = "tools/weather.tmpl.md", params(api = "v3", env = "prod"))]
+/// #[llm_tool(description_file = "tools/weather.tmpl.md", params(api = "v3", env = "prod"))]
 /// fn get_weather(/* … */) -> Result<String, ToolError> { /* … */ }
 /// ```
 ///
@@ -75,7 +75,7 @@ use syn::{ItemFn, LitStr, parse_macro_input};
 /// For **runtime** context (e.g. values from config), provide a context function:
 ///
 /// ```text
-/// #[llm_tool(prompt_file = "tools/weather.tmpl.md", context = build_ctx)]
+/// #[llm_tool(description_file = "tools/weather.tmpl.md", context = build_ctx)]
 /// fn get_weather(/* … */) -> Result<String, ToolError> { /* … */ }
 /// ```
 ///
@@ -100,7 +100,7 @@ use syn::{ItemFn, LitStr, parse_macro_input};
 ///
 /// Supply values via the `env(...)` attribute:
 /// ```text
-/// #[llm_tool(prompt_file = "tools/api.tmpl.md", env(API_VERSION = "v5"))]
+/// #[llm_tool(description_file = "tools/api.tmpl.md", env(API_VERSION = "v5"))]
 /// fn query_api(/* … */) -> Result<String, ToolError> { /* … */ }
 /// ```
 ///
@@ -181,17 +181,17 @@ pub fn llm_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Parsed `#[llm_tool(...)]` attribute.
 ///
 /// Supports:
-/// - `prompt = "inline text"` — static inline description
-/// - `prompt_file = "path.tmpl.md"` — template file (requires `md-tmpl`)
+/// - `description = "inline text"` — static inline description
+/// - `description_file = "path.tmpl.md"` — template file (requires `md-tmpl`)
 /// - `params(key = "value", ...)` — compile-time template variables
 /// - `env(KEY = "value", ...)` — compile-time environment variables for `env:` frontmatter
 /// - `context = path::to::fn` — runtime template context function
 /// - `response_file = "path.tmpl.md"` — response rendering template
 struct ToolAttr {
-    /// Inline description string (mutually exclusive with `prompt_file_path`).
-    prompt_inline: Option<LitStr>,
-    /// Path to a `.tmpl.md` file (mutually exclusive with `prompt_inline`).
-    prompt_file_path: Option<LitStr>,
+    /// Inline description string (mutually exclusive with `description_file_path`).
+    description_inline: Option<LitStr>,
+    /// Path to a `.tmpl.md` file (mutually exclusive with `description_inline`).
+    description_file_path: Option<LitStr>,
     /// Path to a response `.tmpl.md` file for auto-rendering tool output.
     response_file_path: Option<LitStr>,
     /// Inline response template string (mutually exclusive with `response_file_path`).
@@ -210,8 +210,8 @@ struct ToolAttr {
     has_context_fn: bool,
 }
 
-const ATTR_PROMPT: &str = "prompt";
-const ATTR_PROMPT_FILE: &str = "prompt_file";
+const ATTR_DESCRIPTION: &str = "description";
+const ATTR_DESCRIPTION_FILE: &str = "description_file";
 const ATTR_RESPONSE_FILE: &str = "response_file";
 const ATTR_RESPONSE: &str = "response";
 const ATTR_PARAMS: &str = "params";
@@ -224,8 +224,8 @@ const ATTR_LLM_TOOL: &str = "llm_tool";
 
 #[derive(Default)]
 struct ToolAttrBuilder {
-    prompt_inline: Option<syn::LitStr>,
-    prompt_file_path: Option<syn::LitStr>,
+    description_inline: Option<syn::LitStr>,
+    description_file_path: Option<syn::LitStr>,
     response_file_path: Option<syn::LitStr>,
     response_inline: Option<syn::LitStr>,
     #[cfg(feature = "md-tmpl")]
@@ -245,12 +245,12 @@ struct ToolAttrBuilder {
 impl ToolAttrBuilder {
     fn parse_single(&mut self, input: syn::parse::ParseStream) -> syn::Result<()> {
         let ident: syn::Ident = input.parse()?;
-        if ident == ATTR_PROMPT {
+        if ident == ATTR_DESCRIPTION {
             let _: syn::Token![=] = input.parse()?;
-            self.prompt_inline = Some(input.parse::<syn::LitStr>()?);
-        } else if ident == ATTR_PROMPT_FILE {
+            self.description_inline = Some(input.parse::<syn::LitStr>()?);
+        } else if ident == ATTR_DESCRIPTION_FILE {
             let _: syn::Token![=] = input.parse()?;
-            self.prompt_file_path = Some(input.parse::<syn::LitStr>()?);
+            self.description_file_path = Some(input.parse::<syn::LitStr>()?);
         } else if ident == ATTR_RESPONSE_FILE {
             let _: syn::Token![=] = input.parse()?;
             self.response_file_path = Some(input.parse::<syn::LitStr>()?);
@@ -327,7 +327,7 @@ impl ToolAttrBuilder {
         } else {
             return Err(syn::Error::new(
                 ident.span(),
-                "expected `prompt`, `prompt_file`, `response`, `response_file`, `params`, `env`, or `context`",
+                "expected `description`, `description_file`, `response`, `response_file`, `params`, `env`, or `context`",
             ));
         }
         Ok(())
@@ -359,8 +359,8 @@ impl syn::parse::Parse for ToolAttr {
         );
 
         validate_tool_attr(
-            builder.prompt_inline.as_ref(),
-            builder.prompt_file_path.as_ref(),
+            builder.description_inline.as_ref(),
+            builder.description_file_path.as_ref(),
             has_inline_params,
             has_context_fn,
             has_env,
@@ -383,8 +383,8 @@ impl syn::parse::Parse for ToolAttr {
         }
 
         Ok(Self {
-            prompt_inline: builder.prompt_inline,
-            prompt_file_path: builder.prompt_file_path,
+            description_inline: builder.description_inline,
+            description_file_path: builder.description_file_path,
             response_file_path: builder.response_file_path,
             response_inline: builder.response_inline,
             #[cfg(feature = "md-tmpl")]
@@ -402,39 +402,39 @@ impl syn::parse::Parse for ToolAttr {
 /// Validate mutual-exclusion and presence constraints for parsed `#[llm_tool(...)]`
 /// attribute fields.
 fn validate_tool_attr(
-    prompt_inline: Option<&LitStr>,
-    prompt_file_path: Option<&LitStr>,
+    description_inline: Option<&LitStr>,
+    description_file_path: Option<&LitStr>,
     has_inline_params: bool,
     has_context_fn: bool,
     has_env: bool,
 ) -> syn::Result<()> {
-    // Mutual exclusion: prompt vs prompt_file.
-    if prompt_inline.is_some() && prompt_file_path.is_some() {
+    // Mutual exclusion: description vs description_file.
+    if description_inline.is_some() && description_file_path.is_some() {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            "`prompt` and `prompt_file` are mutually exclusive",
+            "`description` and `description_file` are mutually exclusive",
         ));
     }
 
-    // params/context require a template source (prompt_file or prompt).
-    if prompt_file_path.is_none() && prompt_inline.is_none() && has_inline_params {
+    // params/context require a template source (description_file or description).
+    if description_file_path.is_none() && description_inline.is_none() && has_inline_params {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            "`params(...)` requires `prompt_file = \"...\"` or `prompt = \"...\"`",
+            "`params(...)` requires `description_file = \"...\"` or `description = \"...\"`",
         ));
     }
-    if prompt_file_path.is_none() && prompt_inline.is_none() && has_context_fn {
+    if description_file_path.is_none() && description_inline.is_none() && has_context_fn {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            "`context = ...` requires `prompt_file = \"...\"` or `prompt = \"...\"`",
+            "`context = ...` requires `description_file = \"...\"` or `description = \"...\"`",
         ));
     }
 
-    // env() requires a template source (prompt_file or prompt with frontmatter).
-    if has_env && prompt_file_path.is_none() && prompt_inline.is_none() {
+    // env() requires a template source (description_file or description with frontmatter).
+    if has_env && description_file_path.is_none() && description_inline.is_none() {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            "`env(...)` requires `prompt_file = \"...\"` or `prompt = \"...\"`",
+            "`env(...)` requires `description_file = \"...\"` or `description = \"...\"`",
         ));
     }
 
@@ -457,10 +457,10 @@ fn validate_tool_attr(
         ));
     }
 
-    // Must have at least prompt or prompt_file (unless only response_file
+    // Must have at least description or description_file (unless only response_file
     // is set, in which case doc comments serve as the description).
-    if prompt_inline.is_none()
-        && prompt_file_path.is_none()
+    if description_inline.is_none()
+        && description_file_path.is_none()
         && !has_inline_params
         && !has_context_fn
     {
@@ -494,6 +494,7 @@ enum ReturnInfo {
 fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2::TokenStream> {
     let crate_path = quote! { ::llm_tool };
     let fn_name = &func.sig.ident;
+    reject_generic_signature(func, ATTR_LLM_TOOL)?;
     let tool_name_str = fn_name.to_string();
     let struct_name = format_ident!("{}", tool_name_str.to_case(Case::Pascal));
     let params_name = format_ident!("{}Params", struct_name);

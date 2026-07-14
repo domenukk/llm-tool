@@ -64,7 +64,10 @@ async fn registry_dispatch_valid_tool() {
             &test_ctx(),
         )
         .await;
-    assert_eq!(result.unwrap().content(), "/tmp/foo");
+    assert_eq!(
+        result.expect("tool registered").unwrap().content(),
+        "/tmp/foo"
+    );
 }
 
 #[tokio::test]
@@ -73,9 +76,9 @@ async fn registry_dispatch_unknown_tool() {
     let result = d
         .dispatch("nonexistent", serde_json::json!({}), &test_ctx())
         .await;
-    assert_eq!(
-        result.unwrap_err(),
-        ToolError::new("Unknown tool: nonexistent")
+    assert!(
+        result.is_none(),
+        "dispatching an unknown tool should return None"
     );
 }
 
@@ -87,7 +90,7 @@ async fn registry_dispatch_invalid_args() {
     let result = d
         .dispatch("sample", serde_json::json!({"path": 42}), &test_ctx())
         .await;
-    let err = result.unwrap_err();
+    let err = result.expect("tool registered").unwrap_err();
     assert!(
         err.message.contains("deserialize"),
         "Error should mention deserialization, got: {err}"
@@ -102,6 +105,7 @@ async fn registry_dispatch_missing_required_field() {
     let err = d
         .dispatch("sample", serde_json::json!({}), &test_ctx())
         .await
+        .expect("tool registered")
         .expect_err("Expected error for missing required field");
     assert!(
         err.message.contains("missing field"),
@@ -129,6 +133,45 @@ fn registry_register_chaining() {
     d.register(SampleTool).register(RunCommandTool);
     assert_eq!(d.len(), 2);
     assert!(!d.is_empty());
+}
+
+#[test]
+fn registry_try_register_succeeds_and_chains() {
+    let mut d = ToolRegistry::new();
+    d.try_register(SampleTool)
+        .expect("sample schema builds")
+        .try_register(RunCommandTool)
+        .expect("run_command schema builds");
+    assert_eq!(d.len(), 2);
+}
+
+#[test]
+fn registry_try_register_replaces_same_name() {
+    let mut d = ToolRegistry::new();
+    d.try_register(SampleTool).expect("first registration");
+    d.try_register(SampleTool).expect("second registration");
+    // Re-registering the same NAME replaces rather than duplicating.
+    assert_eq!(d.len(), 1);
+}
+
+#[test]
+fn registry_iter_yields_named_definitions() {
+    let d = ToolRegistry::new()
+        .with_tool(SampleTool)
+        .with_tool(RunCommandTool);
+
+    // The named iterator reports an exact length without consuming itself.
+    let iter = d.iter();
+    assert_eq!(iter.len(), 2);
+
+    let mut names: Vec<&str> = iter.map(|(name, _def)| name).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["run_command", "sample"]);
+
+    // `&ToolRegistry` also implements IntoIterator with matching definitions.
+    for (name, def) in &d {
+        assert_eq!(name, def.name.as_str());
+    }
 }
 
 #[test]
@@ -178,7 +221,10 @@ async fn registry_replaces_on_duplicate_name() {
     let result = d
         .dispatch("sample", serde_json::json!({"path": "x"}), &test_ctx())
         .await;
-    assert_eq!(result.unwrap().content(), "alt: x");
+    assert_eq!(
+        result.expect("tool registered").unwrap().content(),
+        "alt: x"
+    );
 }
 
 #[tokio::test]
@@ -202,7 +248,10 @@ async fn registry_tool_returning_error() {
     let mut d = ToolRegistry::new();
     d.register(FailingTool);
     let result = d.dispatch("fail", serde_json::json!({}), &test_ctx()).await;
-    assert_eq!(result.unwrap_err(), ToolError::new("intentional failure"));
+    assert_eq!(
+        result.expect("tool registered").unwrap_err(),
+        ToolError::new("intentional failure")
+    );
 }
 
 #[test]
@@ -244,7 +293,7 @@ async fn async_tool_with_tokio_sleep() {
     let result = d
         .dispatch("async_sleep", serde_json::json!({}), &test_ctx())
         .await;
-    assert_eq!(result.unwrap().content(), "slept");
+    assert_eq!(result.expect("tool registered").unwrap().content(), "slept");
 }
 
 /// A tool that reads a file using `tokio::fs`.
@@ -291,7 +340,10 @@ async fn async_tool_with_tokio_fs() {
             &test_ctx(),
         )
         .await;
-    assert_eq!(result.unwrap().content(), "hello async");
+    assert_eq!(
+        result.expect("tool registered").unwrap().content(),
+        "hello async"
+    );
 }
 
 #[tokio::test]
@@ -305,7 +357,7 @@ async fn async_tool_tokio_fs_missing_file() {
             &test_ctx(),
         )
         .await;
-    let err = result.unwrap_err();
+    let err = result.expect("tool registered").unwrap_err();
     assert!(
         err.message.contains("IO error"),
         "Expected IO error, got: {err}"
@@ -370,7 +422,10 @@ async fn async_tool_awaits_channel() {
     };
 
     let (result, ()) = tokio::join!(dispatch_future, send_future);
-    assert_eq!(result.unwrap().content(), "from_channel");
+    assert_eq!(
+        result.expect("tool registered").unwrap().content(),
+        "from_channel"
+    );
 }
 
 // ── Concurrent dispatch tests ───────────────────────────────────
@@ -389,9 +444,9 @@ async fn concurrent_dispatches_to_different_tools() {
         d.dispatch("run_command", serde_json::json!({"command": "ls"}), &ctx),
     );
 
-    assert_eq!(r1.unwrap().content(), "a");
-    assert_eq!(r2.unwrap().content(), "slept");
-    assert_eq!(r3.unwrap().content(), "Ran: ls");
+    assert_eq!(r1.expect("tool registered").unwrap().content(), "a");
+    assert_eq!(r2.expect("tool registered").unwrap().content(), "slept");
+    assert_eq!(r3.expect("tool registered").unwrap().content(), "Ran: ls");
 }
 
 #[tokio::test]
@@ -406,7 +461,10 @@ async fn concurrent_dispatches_to_same_tool() {
 
     let results = futures::future::join_all(futs).await;
     for (i, r) in results.into_iter().enumerate() {
-        assert_eq!(r.unwrap().content(), format!("p{i}"));
+        assert_eq!(
+            r.expect("tool registered").unwrap().content(),
+            format!("p{i}")
+        );
     }
 }
 
@@ -498,7 +556,10 @@ async fn dispatch_with_optional_field_missing() {
             &test_ctx(),
         )
         .await;
-    assert_eq!(result.unwrap().content(), "example.com:443:None");
+    assert_eq!(
+        result.expect("tool registered").unwrap().content(),
+        "example.com:443:None"
+    );
 }
 
 #[tokio::test]
@@ -513,7 +574,10 @@ async fn dispatch_with_optional_field_present() {
             &test_ctx(),
         )
         .await;
-    assert_eq!(result.unwrap().content(), "localhost:8080:Some(30.0)");
+    assert_eq!(
+        result.expect("tool registered").unwrap().content(),
+        "localhost:8080:Some(30.0)"
+    );
 }
 
 #[tokio::test]
@@ -529,7 +593,10 @@ async fn dispatch_with_extra_fields_ignored() {
             &test_ctx(),
         )
         .await;
-    assert_eq!(result.unwrap().content(), "/tmp/x");
+    assert_eq!(
+        result.expect("tool registered").unwrap().content(),
+        "/tmp/x"
+    );
 }
 
 // ── BoxFuture / ErasedTool edge case tests ──────────────────────
@@ -550,8 +617,8 @@ async fn erased_dispatch_preserves_borrow_lifetime() {
         .dispatch("sample", serde_json::json!({"path": "test"}), &test_ctx())
         .await;
 
-    assert_eq!(r1.unwrap().content(), "slept");
-    assert_eq!(r2.unwrap().content(), "test");
+    assert_eq!(r1.expect("tool registered").unwrap().content(), "slept");
+    assert_eq!(r2.expect("tool registered").unwrap().content(), "test");
 }
 
 #[tokio::test]
@@ -567,7 +634,7 @@ async fn dispatch_returns_meaningful_error_for_wrong_type() {
             &test_ctx(),
         )
         .await;
-    let err = result.unwrap_err();
+    let err = result.expect("tool registered").unwrap_err();
     assert!(
         err.message
             .contains("Failed to deserialize tool parameters"),

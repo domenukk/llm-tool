@@ -1,5 +1,5 @@
-error: `env(...)` requires `prompt_file = "..."` or `prompt = "..."`
- --> tests/ui/env_without_prompt.rs:4:1
+error: `env(...)` requires `description_file = "..."` or `description = "..."`
+ --> tests/ui/env_without_description.rs:4:1
   |
 4 | #[llm_tool(env(API_KEY = "secret"))]
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -6,7 +6,7 @@ use syn::ItemFn;
 use crate::{
     DescriptionInfo, ParamInfo, ReturnInfo, ToolAttr, build_param_types_and_borrows,
     build_serde_defaults, extract_doc_string, extract_params, parse_return_type,
-    resolve_description,
+    reject_generic_signature, resolve_description,
 };
 
 /// Build the body tokens for a prompt's `render` method.
@@ -37,10 +37,7 @@ fn build_prompt_body_tokens(
             quote! {
                 #inner
                 match __r {
-                    ::core::result::Result::Ok(__v) => match #crate_path::__private::Wrap(__v).__convert_prompt() {
-                        ::core::result::Result::Ok(__out) => ::core::result::Result::Ok(__out),
-                        ::core::result::Result::Err(__e) => ::core::result::Result::Err(__e),
-                    },
+                    ::core::result::Result::Ok(__v) => #crate_path::__private::Wrap(__v).__convert_prompt(),
                     ::core::result::Result::Err(__e) => ::core::result::Result::Err(::core::convert::Into::into(__e)),
                 }
             }
@@ -57,10 +54,7 @@ fn build_prompt_body_tokens(
             };
             quote! {
                 #inner
-                match #crate_path::__private::Wrap(__v).__convert_prompt() {
-                    ::core::result::Result::Ok(__out) => ::core::result::Result::Ok(__out),
-                    ::core::result::Result::Err(__e) => ::core::result::Result::Err(__e),
-                }
+                #crate_path::__private::Wrap(__v).__convert_prompt()
             }
         }
     }
@@ -69,6 +63,16 @@ fn build_prompt_body_tokens(
 pub fn prompt_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<TokenStream> {
     let crate_path = quote! { ::llm_tool };
     let fn_name = &func.sig.ident;
+    reject_generic_signature(func, "llm_prompt")?;
+    if let Some(resp) =
+        attr.and_then(|a| a.response_file_path.as_ref().or(a.response_inline.as_ref()))
+    {
+        return Err(syn::Error::new(
+            resp.span(),
+            "#[llm_prompt] does not support `response`/`response_file`; \
+             response templates apply to #[llm_tool] only",
+        ));
+    }
     let tool_name_str = fn_name.to_string();
     let struct_name = format_ident!("{}", tool_name_str.to_case(Case::Pascal));
     let params_name = format_ident!("{}Params", struct_name);

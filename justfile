@@ -64,8 +64,12 @@ doc:
 
 # ── Other ─────────────────────────────────────────────────────────────
 
-# Run all checks (lint + test + doc)
-check: lint test doc
+# Verify no_std support (core crate only, on a bare-metal target)
+check-no-std:
+    cargo build -p llm-tool --no-default-features --target thumbv7em-none-eabihf
+
+# Run all checks (lint + test + doc + no_std)
+check: lint test doc check-no-std
 
 # Run the same checks as GitHub Actions CI
 ci: fmt-rust lint-rust test doc
