@@ -1,7 +1,0 @@
-error: `prompt` and `prompt_file` are mutually exclusive
- --> tests/ui/conflict_prompt_prompt_file.rs:3:1
-  |
-3 | #[llm_tool(prompt = "a", prompt_file = "b")]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  |
-  = note: this error originates in the attribute macro `llm_tool` (in Nightly builds, run with -Z macro-backtrace for more info)

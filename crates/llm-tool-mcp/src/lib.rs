@@ -3,4 +3,4 @@
 pub mod protocol;
 mod server;
 
-pub use server::McpServer;
+pub use server::{McpServer, McpServerBuilder, RpcOutcome};

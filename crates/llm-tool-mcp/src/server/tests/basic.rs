@@ -187,7 +187,7 @@ async fn initialized_notification_is_accepted() {
 #[tokio::test]
 async fn context_is_passed_to_tools() {
     let registry = ToolRegistry::new().with_tool(ContextTool);
-    let ctx = ToolContext::new(Some("agent-007".into()));
+    let ctx = ToolContext::new().with_conversation_id("agent-007");
     let server = McpServer::new("test", "1.0", registry).with_context(ctx);
 
     let resp = server
@@ -470,29 +470,40 @@ async fn batch_request_returns_invalid_request_on_handle_request() {
 async fn batch_request_via_handle_message_success() {
     let server = test_server();
     let req = r#"[{"jsonrpc":"2.0","id":1,"method":"initialize"},{"jsonrpc":"2.0","id":2,"method":"tools/list"}]"#;
-    let resp_val = server
+    let outcome = server
         .handle_message(req)
         .await
         .expect("batch response expected");
-    let arr = resp_val.as_array().expect("expected array");
-    assert_eq!(arr.len(), 2);
-    assert_eq!(arr[0]["id"], 1);
-    assert_eq!(arr[1]["id"], 2);
-    assert_eq!(arr[1]["result"]["tools"].as_array().unwrap().len(), 3);
+    let RpcOutcome::Batch(ref responses) = outcome else {
+        panic!("expected a batch outcome");
+    };
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0].id, Some(serde_json::json!(1)));
+    assert_eq!(responses[1].id, Some(serde_json::json!(2)));
+    let tools = responses[1].result.as_ref().expect("tools/list result")["tools"]
+        .as_array()
+        .expect("tools array");
+    assert_eq!(tools.len(), 3);
+
+    // The structured outcome renders to a JSON array on the wire.
+    let wire: serde_json::Value = serde_json::from_str(&outcome.to_wire()).expect("valid JSON");
+    assert!(wire.is_array());
 }
 
 #[tokio::test]
 async fn batch_request_with_notifications_omits_notifications() {
     let server = test_server();
     let req = r#"[{"jsonrpc":"2.0","id":1,"method":"initialize"},{"jsonrpc":"2.0","method":"initialized"},{"jsonrpc":"2.0","id":2,"method":"tools/list"}]"#;
-    let resp_val = server
+    let outcome = server
         .handle_message(req)
         .await
         .expect("batch response expected");
-    let arr = resp_val.as_array().expect("expected array");
-    assert_eq!(arr.len(), 2);
-    assert_eq!(arr[0]["id"], 1);
-    assert_eq!(arr[1]["id"], 2);
+    let RpcOutcome::Batch(responses) = outcome else {
+        panic!("expected a batch outcome");
+    };
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0].id, Some(serde_json::json!(1)));
+    assert_eq!(responses[1].id, Some(serde_json::json!(2)));
 }
 
 #[tokio::test]
@@ -510,8 +521,66 @@ async fn empty_array_returns_invalid_request() {
     let err = resp.error.unwrap();
     assert_eq!(err.code, protocol::INVALID_REQUEST);
 
-    let batch_resp = server.handle_message("[]").await.expect("error response");
-    assert_eq!(batch_resp["error"]["code"], protocol::INVALID_REQUEST);
+    let outcome = server.handle_message("[]").await.expect("error response");
+    let RpcOutcome::Single(batch_resp) = outcome else {
+        panic!("expected a single error response");
+    };
+    assert_eq!(
+        batch_resp.error.expect("error present").code,
+        protocol::INVALID_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn outcome_write_json_matches_to_wire() {
+    let server = test_server();
+    let req = r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#;
+    let outcome = server.handle_message(req).await.expect("response expected");
+
+    // write_json appends the wire form to an existing buffer.
+    let mut buf = Vec::new();
+    outcome.write_json(&mut buf);
+
+    let parsed: serde_json::Value = serde_json::from_slice(&buf).expect("valid JSON");
+    assert_eq!(parsed["id"], 7);
+    // The two rendering entry points agree byte-for-byte.
+    assert_eq!(String::from_utf8(buf).expect("utf8"), outcome.to_wire());
+}
+
+#[tokio::test]
+async fn outcome_display_clone_and_eq() {
+    let server = test_server();
+    let req = r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#;
+    let outcome = server.handle_message(req).await.expect("response expected");
+
+    // Display renders the same bytes as to_wire().
+    assert_eq!(outcome.to_string(), outcome.to_wire());
+    // Clone + PartialEq round-trip.
+    assert_eq!(outcome.clone(), outcome);
+    assert!(!outcome.is_batch());
+}
+
+#[tokio::test]
+async fn outcome_into_responses_flattens_single_and_batch() {
+    let server = test_server();
+
+    let single = server
+        .handle_message(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+        .await
+        .expect("single response");
+    assert!(!single.is_batch());
+    assert_eq!(single.into_responses().len(), 1);
+
+    let batch = server
+        .handle_message(
+            r#"[{"jsonrpc":"2.0","id":1,"method":"initialize"},{"jsonrpc":"2.0","id":2,"method":"tools/list"}]"#,
+        )
+        .await
+        .expect("batch response");
+    assert!(batch.is_batch());
+    let responses = batch.into_responses();
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0].id, Some(serde_json::json!(1)));
 }
 
 #[tokio::test]

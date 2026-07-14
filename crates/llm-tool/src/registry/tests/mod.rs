@@ -8,7 +8,7 @@ use crate::llm_tool;
 
 /// Create a default `ToolContext` for tests.
 fn test_ctx() -> ToolContext {
-    ToolContext::new(None)
+    ToolContext::new()
 }
 
 // ── Sample tool structs for tests ────────────────────────────────

@@ -21,12 +21,12 @@
 //! - The `"2.0"` JSON-RPC version is a `&'static str` to avoid allocation.
 
 use std::{
-    collections::HashMap,
+    fmt,
     io::{self, BufRead, Write},
     sync::Arc,
 };
 
-use llm_tool::{ToolContext, ToolDefinition, ToolRegistry};
+use llm_tool::{PromptRegistry, ResourceRegistry, ToolContext, ToolDefinition, ToolRegistry};
 use tracing::{debug, error, info};
 
 use crate::protocol::{
@@ -55,7 +55,7 @@ use crate::protocol::{
 /// }
 ///
 /// let registry = ToolRegistry::new().with_tool(Add);
-/// let ctx = ToolContext::new(Some("my-agent".into()));
+/// let ctx = ToolContext::new().with_conversation_id("my-agent");
 ///
 /// let server = McpServer::new("my-server", "0.1.0", registry)
 ///     .with_context(ctx);
@@ -76,18 +76,103 @@ pub struct McpServer {
     version: String,
     registry: Arc<ToolRegistry>,
     context: Arc<ToolContext>,
-    /// Pre-computed MCP tool schemas — built once at construction,
-    /// wrapped in `Arc` so `tools/list` clones a pointer, not the tree.
-    cached_tools_list: Arc<ToolsListResult>,
-    prompts: Arc<HashMap<&'static str, Box<dyn llm_tool::ErasedPrompt>>>,
-    resources: Arc<Vec<Box<dyn llm_tool::ErasedResource>>>,
+    /// Pre-serialized `tools/list` result body — built once at construction and
+    /// wrapped in `Arc` so `tools/list` clones a pointer plus one JSON value,
+    /// never re-serializing the schema tree.
+    cached_tools_list: Arc<serde_json::Value>,
+    prompts: Arc<PromptRegistry>,
+    resources: Arc<ResourceRegistry>,
+}
+
+/// Builder for [`McpServer`] that registers prompts and resources up front.
+///
+/// Prefer this over constructing a server and mutating it: the builder owns
+/// its [`PromptRegistry`] and [`ResourceRegistry`] outright, so registration
+/// is infallible and never has to unwrap a shared `Arc`.
+///
+/// # Example
+///
+/// ```rust
+/// use llm_tool::{ToolContext, ToolRegistry};
+/// use llm_tool_mcp::McpServer;
+///
+/// let server = McpServer::builder("srv", "0.1.0", ToolRegistry::new())
+///     .with_context(ToolContext::new().with_conversation_id("agent"))
+///     .build();
+/// # let _server = server;
+/// ```
+pub struct McpServerBuilder {
+    name: String,
+    version: String,
+    registry: ToolRegistry,
+    context: ToolContext,
+    prompts: PromptRegistry,
+    resources: ResourceRegistry,
+}
+
+impl McpServerBuilder {
+    /// Start building a server that serves tools from `registry`.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        version: impl Into<String>,
+        registry: ToolRegistry,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            version: version.into(),
+            registry,
+            context: ToolContext::new(),
+            prompts: PromptRegistry::new(),
+            resources: ResourceRegistry::new(),
+        }
+    }
+
+    /// Set the [`ToolContext`] used for all tool dispatches.
+    #[must_use]
+    pub fn with_context(mut self, context: ToolContext) -> Self {
+        self.context = context;
+        self
+    }
+
+    /// Register a prompt template.
+    #[must_use]
+    pub fn with_prompt<P: llm_tool::RustPrompt + 'static>(mut self, prompt: P) -> Self {
+        self.prompts.register(prompt);
+        self
+    }
+
+    /// Register a resource (or resource template).
+    #[must_use]
+    pub fn with_resource<R: llm_tool::RustResource + 'static>(mut self, resource: R) -> Self {
+        self.resources.register(resource);
+        self
+    }
+
+    /// Finish building the [`McpServer`].
+    ///
+    /// Tool schemas are computed and serialized **once** here and cached for
+    /// all subsequent `tools/list` requests.
+    #[must_use]
+    pub fn build(self) -> McpServer {
+        let cached_tools_list = Arc::new(build_tools_list_value(&self.registry));
+        McpServer {
+            name: self.name,
+            version: self.version,
+            registry: Arc::new(self.registry),
+            context: Arc::new(self.context),
+            cached_tools_list,
+            prompts: Arc::new(self.prompts),
+            resources: Arc::new(self.resources),
+        }
+    }
 }
 
 impl McpServer {
-    /// Create a new MCP server.
+    /// Create a new MCP server serving tools from `registry`.
     ///
     /// The `name` and `version` are reported in the MCP `initialize` response.
-    /// Tools are served from the given [`ToolRegistry`].
+    /// To also register prompts or resources, use [`builder`](Self::builder).
     ///
     /// Tool schemas are computed **once** here and cached for all subsequent
     /// `tools/list` requests.
@@ -97,16 +182,18 @@ impl McpServer {
         version: impl Into<String>,
         registry: ToolRegistry,
     ) -> Self {
-        let cached_tools_list = Arc::new(build_tools_list_response(&registry));
-        Self {
-            name: name.into(),
-            version: version.into(),
-            registry: Arc::new(registry),
-            context: Arc::new(ToolContext::new(None)),
-            cached_tools_list,
-            prompts: Arc::new(HashMap::new()),
-            resources: Arc::new(Vec::new()),
-        }
+        McpServerBuilder::new(name, version, registry).build()
+    }
+
+    /// Begin building a server, allowing prompts and resources to be registered
+    /// before [`build`](McpServerBuilder::build).
+    #[must_use]
+    pub fn builder(
+        name: impl Into<String>,
+        version: impl Into<String>,
+        registry: ToolRegistry,
+    ) -> McpServerBuilder {
+        McpServerBuilder::new(name, version, registry)
     }
 
     /// Set the [`ToolContext`] used for all tool dispatches.
@@ -116,36 +203,6 @@ impl McpServer {
     #[must_use]
     pub fn with_context(mut self, context: ToolContext) -> Self {
         self.context = Arc::new(context);
-        self
-    }
-
-    /// Register a prompt with the MCP server.
-    ///
-    /// # Panics
-    ///
-    /// Panics if called after the server has been cloned.
-    #[must_use]
-    pub fn with_prompt<P: llm_tool::RustPrompt + 'static>(mut self, prompt: P) -> Self {
-        let Ok(mut map) = Arc::try_unwrap(self.prompts) else {
-            panic!("cannot add prompt after server has been cloned");
-        };
-        map.insert(P::NAME, Box::new(prompt));
-        self.prompts = Arc::new(map);
-        self
-    }
-
-    /// Register a resource with the MCP server.
-    ///
-    /// # Panics
-    ///
-    /// Panics if called after the server has been cloned.
-    #[must_use]
-    pub fn with_resource<R: llm_tool::RustResource + 'static>(mut self, resource: R) -> Self {
-        let Ok(mut vec) = Arc::try_unwrap(self.resources) else {
-            panic!("cannot add resource after server has been cloned");
-        };
-        vec.push(Box::new(resource));
-        self.resources = Arc::new(vec);
         self
     }
 
@@ -167,8 +224,7 @@ impl McpServer {
     /// # Panics
     ///
     /// Panics if called from within an existing tokio runtime.
-    /// Use [`handle_request`](Self::handle_request) instead for async
-    /// contexts.
+    /// Use [`run_async`](Self::run_async) instead for async contexts.
     ///
     /// # Errors
     ///
@@ -186,9 +242,8 @@ impl McpServer {
     /// # Panics
     ///
     /// Panics if called from within an existing tokio runtime.
-    /// Use [`handle_request`](Self::handle_request) instead for async
-    /// contexts, or use [`run`](Self::run) inside
-    /// [`tokio::task::spawn_blocking`].
+    /// Use [`run_async`](Self::run_async) instead for async contexts, or use
+    /// [`run`](Self::run) inside [`tokio::task::spawn_blocking`].
     ///
     /// # Errors
     ///
@@ -217,6 +272,9 @@ impl McpServer {
         reader: impl BufRead,
         writer: &mut impl Write,
     ) -> io::Result<()> {
+        // Reused across messages so response serialization amortizes to zero
+        // allocations on the hot path.
+        let mut out_buf: Vec<u8> = Vec::new();
         for line_result in reader.lines() {
             let line = line_result?;
 
@@ -226,19 +284,17 @@ impl McpServer {
 
             debug!(request = %line, "mcp request");
 
-            let Some(response_val) = rt.block_on(self.handle_message(&line)) else {
+            let Some(outcome) = rt.block_on(self.handle_message(&line)) else {
                 debug!("dropping notification response");
                 continue;
             };
 
-            let json = serde_json::to_string(&response_val).map_err(|e| {
-                error!(error = %e, "failed to serialize JSON-RPC response");
-                io::Error::other(e)
-            })?;
+            out_buf.clear();
+            outcome.write_json(&mut out_buf);
+            debug!(response = %String::from_utf8_lossy(&out_buf), "mcp response");
+            out_buf.push(b'\n');
 
-            debug!(response = %json, "mcp response");
-
-            writeln!(writer, "{json}")?;
+            writer.write_all(&out_buf)?;
             writer.flush()?;
         }
 
@@ -266,6 +322,9 @@ impl McpServer {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
         let mut lines = reader.lines();
+        // Reused across messages so response serialization amortizes to zero
+        // allocations on the hot path.
+        let mut out_buf: Vec<u8> = Vec::new();
         while let Some(line) = lines.next_line().await? {
             if line.trim().is_empty() {
                 continue;
@@ -273,19 +332,17 @@ impl McpServer {
 
             debug!(request = %line, "mcp request");
 
-            let Some(response_val) = self.handle_message(&line).await else {
+            let Some(outcome) = self.handle_message(&line).await else {
                 debug!("dropping notification response");
                 continue;
             };
 
-            let json = serde_json::to_string(&response_val).map_err(|e| {
-                error!(error = %e, "failed to serialize JSON-RPC response");
-                io::Error::other(e)
-            })?;
+            out_buf.clear();
+            outcome.write_json(&mut out_buf);
+            debug!(response = %String::from_utf8_lossy(&out_buf), "mcp response");
+            out_buf.push(b'\n');
 
-            debug!(response = %json, "mcp response");
-
-            writer.write_all(format!("{json}\n").as_bytes()).await?;
+            writer.write_all(&out_buf).await?;
             writer.flush().await?;
         }
 
@@ -376,14 +433,14 @@ impl McpServer {
         }
     }
 
-    /// Handle a single JSON-RPC request string.
+    /// Handle exactly one JSON-RPC request string, always producing a response.
     ///
-    /// This is the async core used by [`run`](Self::run). Call it directly
-    /// when building a custom transport (WebSocket, HTTP, etc.), or for
-    /// testing.
+    /// Internal single-request core shared by [`handle_message`](Self::handle_message)
+    /// and the crate's own tests. Public callers should use `handle_message`,
+    /// which additionally understands batches and notification-only input.
     ///
     /// Safe to call from within an existing tokio runtime.
-    pub async fn handle_request(&self, line: &str) -> JsonRpcResponse {
+    pub(crate) async fn handle_request(&self, line: &str) -> JsonRpcResponse {
         // Detect batch requests (JSON arrays) — redirect to handle_message.
         if let Some(first_non_ws) = line.trim_start().as_bytes().first() {
             if *first_non_ws == b'[' {
@@ -421,65 +478,75 @@ impl McpServer {
         self.dispatch_method(request).await
     }
 
-    /// Handle a raw JSON-RPC stream line (either a single request or a batch array).
+    /// Handle one JSON-RPC *message* and return the response to send back.
     ///
-    /// Returns `Some(Value)` containing the serialized JSON-RPC response(s) to send back,
-    /// or `None` if the input was solely a notification (or batch of notifications).
+    /// This is **the** entry point for building a custom transport (Axum HTTP,
+    /// `WebSockets`, a message queue, etc.). The [`run`](Self::run) family is
+    /// built on top of it. A JSON-RPC message is either:
     ///
-    /// # Panics
+    /// - a single request/notification object (`{ ... }`), or
+    /// - a batch array of them (`[ { ... }, ... ]`).
     ///
-    /// Panics if the response object cannot be serialized to JSON. This should never
-    /// happen for well-formed MCP response types.
-    pub async fn handle_message(&self, line: &str) -> Option<serde_json::Value> {
+    /// Each request's `method` is dispatched against this server's
+    /// [`ToolRegistry`] (`tools/list`, `tools/call`) and any registered prompts
+    /// (`prompts/*`) and resources (`resources/*`); see the crate docs for the
+    /// full method table.
+    ///
+    /// The result is a structured [`RpcOutcome`] you inspect or render to the
+    /// wire in a single pass via [`to_wire`](RpcOutcome::to_wire) /
+    /// [`Display`](core::fmt::Display) / [`write_json`](RpcOutcome::write_json):
+    ///
+    /// - `Some(`[`Single`](RpcOutcome::Single)`)` — one request → one response.
+    /// - `Some(`[`Batch`](RpcOutcome::Batch)`)` — a batch → one response each,
+    ///   for the non-notification members.
+    /// - `None` — the input was purely notification(s); send nothing back
+    ///   (e.g. reply `202 Accepted` with no body over HTTP).
+    pub async fn handle_message(&self, line: &str) -> Option<RpcOutcome> {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return None;
         }
 
-        if let Some(first_non_ws) = trimmed.as_bytes().first() {
-            if *first_non_ws == b'[' {
-                return self.handle_batch_request(trimmed).await;
-            }
+        if trimmed.as_bytes().first() == Some(&b'[') {
+            return self.dispatch_batch(trimmed).await;
         }
 
         let response = self.handle_request(trimmed).await;
         if response.id.is_none() {
             None
         } else {
-            Some(serde_json::to_value(&response).expect("MCP response must be JSON-serializable"))
+            Some(RpcOutcome::Single(response))
         }
     }
 
-    /// Handle a JSON-RPC 2.0 batch request array.
-    async fn handle_batch_request(&self, line: &str) -> Option<serde_json::Value> {
+    /// Handle a JSON-RPC 2.0 batch request array, collecting one response per
+    /// non-notification member.
+    async fn dispatch_batch(&self, line: &str) -> Option<RpcOutcome> {
         let val: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                let resp = JsonRpcResponse::error(
+                return Some(RpcOutcome::Single(JsonRpcResponse::error(
                     None,
                     protocol::PARSE_ERROR,
                     format!("invalid JSON: {e}"),
-                );
-                return Some(serde_json::to_value(&resp).expect("serializable"));
+                )));
             }
         };
 
         let Some(arr) = val.as_array() else {
-            let resp = JsonRpcResponse::error(
+            return Some(RpcOutcome::Single(JsonRpcResponse::error(
                 None,
                 protocol::INVALID_REQUEST,
                 "expected JSON array for batch request",
-            );
-            return Some(serde_json::to_value(&resp).expect("serializable"));
+            )));
         };
 
         if arr.is_empty() {
-            let resp = JsonRpcResponse::error(
+            return Some(RpcOutcome::Single(JsonRpcResponse::error(
                 None,
                 protocol::INVALID_REQUEST,
                 "batch request array cannot be empty",
-            );
-            return Some(serde_json::to_value(&resp).expect("serializable"));
+            )));
         }
 
         let mut responses = Vec::with_capacity(arr.len());
@@ -511,14 +578,14 @@ impl McpServer {
             };
 
             if let Some(resp) = resp_opt {
-                responses.push(serde_json::to_value(&resp).expect("serializable"));
+                responses.push(resp);
             }
         }
 
         if responses.is_empty() {
             None
         } else {
-            Some(serde_json::Value::Array(responses))
+            Some(RpcOutcome::Batch(responses))
         }
     }
 
@@ -544,15 +611,13 @@ impl McpServer {
                 let list = protocol::ResourcesListResult {
                     resources: self
                         .resources
-                        .iter()
-                        .map(|r| {
-                            let def = r.definition();
-                            protocol::Resource {
-                                uri: def.uri_template,
-                                name: def.name,
-                                description: def.description,
-                                mime_type: def.mime_type,
-                            }
+                        .definitions()
+                        .into_iter()
+                        .map(|def| protocol::Resource {
+                            uri: def.uri_template,
+                            name: def.name,
+                            description: def.description,
+                            mime_type: def.mime_type,
                         })
                         .collect(),
                 };
@@ -560,14 +625,14 @@ impl McpServer {
             }
             "resources/templates/list" => {
                 let list = protocol::ResourceTemplatesListResult {
-                    resource_templates: self.resources.iter().map(|r| r.definition()).collect(),
+                    resource_templates: self.resources.definitions(),
                 };
                 JsonRpcResponse::success(id, list)
             }
             "resources/read" => self.handle_resources_read(id, request.params).await,
             "prompts/list" => {
                 let list = protocol::PromptsListResult {
-                    prompts: self.prompts.values().map(|p| p.definition()).collect(),
+                    prompts: self.prompts.definitions(),
                 };
                 JsonRpcResponse::success(id, list)
             }
@@ -627,8 +692,14 @@ impl McpServer {
 
     fn handle_tools_list(&self, id: Option<serde_json::Value>) -> JsonRpcResponse {
         info!(count = self.registry.len(), "tools/list");
-        // Clone the Arc's inner value; the Serialize impl handles conversion.
-        JsonRpcResponse::success(id, (*self.cached_tools_list).clone())
+        // The tools/list body is pre-serialized at construction; clone the
+        // cached JSON value directly instead of re-serializing the schema tree.
+        JsonRpcResponse {
+            jsonrpc: JSONRPC_VERSION,
+            id,
+            result: Some((*self.cached_tools_list).clone()),
+            error: None,
+        }
     }
 
     async fn handle_tools_call(
@@ -662,7 +733,7 @@ impl McpServer {
             .dispatch(&call_params.name, call_params.arguments, &self.context)
             .await
         {
-            Ok(output) => JsonRpcResponse::success(
+            Some(Ok(output)) => JsonRpcResponse::success(
                 id,
                 ToolCallResult {
                     content: vec![ContentItem {
@@ -672,21 +743,31 @@ impl McpServer {
                     is_error: false,
                 },
             ),
-            Err(e) => {
-                // MCP spec: tool execution errors are returned as success with
-                // isError=true, not as JSON-RPC errors.  JSON-RPC errors are
-                // reserved for protocol-level failures.
-                JsonRpcResponse::success(
-                    id,
-                    ToolCallResult {
-                        content: vec![ContentItem {
-                            content_type: "text",
-                            text: e.to_string(),
-                        }],
-                        is_error: true,
-                    },
-                )
-            }
+            // MCP spec: tool execution errors are returned as success with
+            // isError=true, not as JSON-RPC errors.  JSON-RPC errors are
+            // reserved for protocol-level failures.
+            Some(Err(e)) => JsonRpcResponse::success(
+                id,
+                ToolCallResult {
+                    content: vec![ContentItem {
+                        content_type: "text",
+                        text: e.to_string(),
+                    }],
+                    is_error: true,
+                },
+            ),
+            // Unknown tool: also surfaced as an isError tool result rather than
+            // a protocol error, so the model can recover within the turn.
+            None => JsonRpcResponse::success(
+                id,
+                ToolCallResult {
+                    content: vec![ContentItem {
+                        content_type: "text",
+                        text: format!("Unknown tool: {}", call_params.name),
+                    }],
+                    is_error: true,
+                },
+            ),
         }
     }
 
@@ -712,15 +793,18 @@ impl McpServer {
                 );
             }
         };
-        let Some(prompt) = self.prompts.get(get_params.name.as_str()) else {
+        let Some(prompt_result) = self
+            .prompts
+            .render(&get_params.name, get_params.arguments)
+            .await
+        else {
             return JsonRpcResponse::error(
                 id,
                 protocol::INVALID_PARAMS,
                 format!("unknown prompt: {}", get_params.name),
             );
         };
-        let fut = prompt.render_erased(get_params.arguments);
-        match fut.await {
+        match prompt_result {
             Ok(output) => {
                 let messages = output
                     .messages
@@ -762,21 +846,14 @@ impl McpServer {
                 );
             }
         };
-        let mut matched_fut = None;
-        for res in self.resources.iter() {
-            if let Some(fut) = res.read_erased(&read_params.uri) {
-                matched_fut = Some(fut);
-                break;
-            }
-        }
-        let Some(fut) = matched_fut else {
+        let Some(resource_result) = self.resources.read(&read_params.uri).await else {
             return JsonRpcResponse::error(
                 id,
                 protocol::INVALID_PARAMS,
                 format!("resource not found matching URI: {}", read_params.uri),
             );
         };
-        match fut.await {
+        match resource_result {
             Ok(output) => {
                 let res = protocol::ReadResourceResult {
                     contents: output.contents,
@@ -788,19 +865,104 @@ impl McpServer {
     }
 }
 
+// ── Response serialization ──────────────────────────────────────────
+
+/// A dispatched JSON-RPC result, ready to be inspected or rendered.
+///
+/// Returned by [`McpServer::handle_message`]. A `None` from that method means
+/// there is nothing to send (a notification, or a batch of only
+/// notifications); a `Some` is either a [`Single`](Self::Single) response
+/// object or a [`Batch`](Self::Batch) array.
+///
+/// `RpcOutcome` implements [`Serialize`](serde::Serialize) and
+/// [`Display`](core::fmt::Display), both rendering a `Single` as a JSON object
+/// and a `Batch` as a JSON array. Use
+/// [`to_wire`](Self::to_wire) (or `.to_string()`) for a `String`, or
+/// [`write_json`](Self::write_json) to append directly to a byte buffer — each
+/// serializes in a single pass with no intermediate [`serde_json::Value`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum RpcOutcome {
+    /// A single JSON-RPC response object.
+    Single(JsonRpcResponse),
+    /// A JSON-RPC batch response array (always non-empty).
+    Batch(Vec<JsonRpcResponse>),
+}
+
+impl serde::Serialize for RpcOutcome {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            RpcOutcome::Single(response) => response.serialize(serializer),
+            RpcOutcome::Batch(responses) => responses.serialize(serializer),
+        }
+    }
+}
+
+impl RpcOutcome {
+    /// Render this outcome to a single JSON wire string.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a well-formed MCP response fails to serialize, which
+    /// would indicate a bug in this crate.
+    #[must_use]
+    pub fn to_wire(&self) -> String {
+        serde_json::to_string(self).expect("MCP response must be JSON-serializable")
+    }
+
+    /// Render this outcome's JSON wire form by appending it to `buf`.
+    ///
+    /// Lets callers reuse a single buffer across many responses, avoiding a
+    /// fresh allocation per message.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a well-formed MCP response fails to serialize, which
+    /// would indicate a bug in this crate.
+    pub fn write_json(&self, buf: &mut Vec<u8>) {
+        serde_json::to_writer(buf, self).expect("MCP response must be JSON-serializable");
+    }
+
+    /// Returns `true` if this is a [`Batch`](Self::Batch) of responses.
+    #[must_use]
+    pub fn is_batch(&self) -> bool {
+        matches!(self, RpcOutcome::Batch(_))
+    }
+
+    /// Consume the outcome into a flat list of responses.
+    ///
+    /// A [`Single`](Self::Single) yields a one-element `Vec`; a
+    /// [`Batch`](Self::Batch) yields its responses unchanged.
+    #[must_use]
+    pub fn into_responses(self) -> Vec<JsonRpcResponse> {
+        match self {
+            RpcOutcome::Single(response) => vec![response],
+            RpcOutcome::Batch(responses) => responses,
+        }
+    }
+}
+
+impl fmt::Display for RpcOutcome {
+    /// Renders the JSON wire form (object for `Single`, array for `Batch`).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_wire())
+    }
+}
+
 // ── Schema helpers ──────────────────────────────────────────────────
 
-/// Build the cached `tools/list` response body.
+/// Build and pre-serialize the cached `tools/list` response body.
 ///
-/// Called once at [`McpServer::new`] — the result is wrapped in an
-/// `Arc` so `tools/list` clones a pointer, not the full JSON tree.
-fn build_tools_list_response(registry: &ToolRegistry) -> ToolsListResult {
+/// Called once at [`McpServerBuilder::build`] — the resulting JSON value is
+/// wrapped in an `Arc` so `tools/list` clones a pointer plus one value rather
+/// than re-serializing the schema tree on every request.
+fn build_tools_list_value(registry: &ToolRegistry) -> serde_json::Value {
     let tools = registry
         .definitions()
         .iter()
         .map(definition_to_mcp_schema)
         .collect();
-    ToolsListResult { tools }
+    let list = ToolsListResult { tools };
+    serde_json::to_value(list).expect("tools/list schema must be JSON-serializable")
 }
 
 /// Convert a [`ToolDefinition`] to the MCP `tools/list` schema format.

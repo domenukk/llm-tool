@@ -17,11 +17,42 @@ use serde::{Deserialize, Serialize};
 
 use crate::compat::{HashMap, RwLock, read_lock, write_lock};
 
+/// A cheaply-cloneable handle to a tool's shared key-value state store.
+///
+/// [`ToolContext`] keeps its state behind this handle so multiple contexts
+/// (e.g. successive tool calls within the same agent turn) can read and write
+/// the **same** underlying store. Clone it and hand it to another context via
+/// [`ToolContext::with_shared_state`].
+///
+/// The concrete lock and map types are an implementation detail — they differ
+/// between `std` and `no_std` builds — so they are deliberately not exposed.
+#[derive(Clone)]
+pub struct SharedState(Arc<RwLock<HashMap<String, serde_json::Value>>>);
+
+impl SharedState {
+    /// Create a new, empty shared state store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for SharedState {
+    fn default() -> Self {
+        Self(Arc::new(RwLock::new(HashMap::new())))
+    }
+}
+
+impl core::fmt::Debug for SharedState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SharedState").finish_non_exhaustive()
+    }
+}
+
 /// Context passed to Rust tools during dispatch.
 ///
-/// Provides access to the current conversation ID, a shared key-value state
-/// store that persists across tool calls within the same agent turn, and an
-/// idle flag.
+/// Provides access to the current conversation ID and a shared key-value state
+/// store that persists across tool calls within the same agent turn.
 ///
 /// The state is backed by `Arc<RwLock<HashMap>>` so it can be cheaply cloned
 /// and shared across concurrent tool invocations. Reads acquire a shared
@@ -57,7 +88,7 @@ use crate::compat::{HashMap, RwLock, read_lock, write_lock};
 ///     session_dir: String,
 /// }
 ///
-/// let ctx = ToolContext::new(None);
+/// let ctx = ToolContext::new();
 /// ctx.set_ext(Arc::new(MyState {
 ///     session_dir: "/tmp".into(),
 /// }))
@@ -68,38 +99,56 @@ use crate::compat::{HashMap, RwLock, read_lock, write_lock};
 /// ```
 pub struct ToolContext {
     conversation_id: Option<String>,
-    state: Arc<RwLock<HashMap<String, serde_json::Value>>>,
+    state: SharedState,
     extensions: Arc<RwLock<HashMap<TypeId, Box<dyn Any + Send + Sync>>>>,
-    is_idle: bool,
+}
+
+impl Default for ToolContext {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ToolContext {
-    /// Create a new context with the given conversation ID.
+    /// Create a new, empty context: no conversation ID and a fresh state store.
+    ///
+    /// Customize it with [`with_conversation_id`](Self::with_conversation_id)
+    /// and [`with_shared_state`](Self::with_shared_state).
     #[must_use]
-    pub fn new(conversation_id: Option<String>) -> Self {
+    pub fn new() -> Self {
         Self {
-            conversation_id,
-            state: Arc::new(RwLock::new(HashMap::new())),
+            conversation_id: None,
+            state: SharedState::new(),
             extensions: Arc::new(RwLock::new(HashMap::new())),
-            is_idle: false,
         }
     }
 
-    /// Create a context that shares an externally-provided state map.
+    /// Set the conversation ID. Chainable.
+    #[must_use]
+    pub fn with_conversation_id(mut self, conversation_id: impl Into<String>) -> Self {
+        self.conversation_id = Some(conversation_id.into());
+        self
+    }
+
+    /// Use an externally-provided [`SharedState`] as this context's state store.
     ///
     /// Use this when multiple `ToolContext` instances (e.g. successive tool
     /// calls within the same agent) must read/write the **same** state store.
+    /// Obtain a handle from an existing context via
+    /// [`shared_state`](Self::shared_state).
     #[must_use]
-    pub fn with_shared_state(
-        conversation_id: Option<String>,
-        state: Arc<RwLock<HashMap<String, serde_json::Value>>>,
-    ) -> Self {
-        Self {
-            conversation_id,
-            state,
-            extensions: Arc::new(RwLock::new(HashMap::new())),
-            is_idle: false,
-        }
+    pub fn with_shared_state(mut self, state: SharedState) -> Self {
+        self.state = state;
+        self
+    }
+
+    /// Return a cloneable handle to this context's shared state store.
+    ///
+    /// Pass the returned handle to [`with_shared_state`](Self::with_shared_state)
+    /// on another context to share the same underlying store.
+    #[must_use]
+    pub fn shared_state(&self) -> SharedState {
+        self.state.clone()
     }
 
     /// Return the conversation ID, if one has been set.
@@ -115,7 +164,7 @@ impl ToolContext {
     /// returns `default`. See the [struct-level docs](Self) for rationale.
     #[must_use]
     pub fn get_state(&self, key: &str, default: serde_json::Value) -> serde_json::Value {
-        match read_lock(&self.state) {
+        match read_lock(&self.state.0) {
             Ok(guard) => guard.get(key).cloned().unwrap_or(default),
             Err(e) => {
                 tracing::warn!(key, error = %e, "ToolContext::get_state: lock poisoned, returning default");
@@ -135,7 +184,7 @@ impl ToolContext {
     /// Returns [`ToolError`]
     /// if the lock is poisoned.
     pub fn set_state(&self, key: &str, value: serde_json::Value) -> Result<(), ToolError> {
-        match write_lock(&self.state) {
+        match write_lock(&self.state.0) {
             Ok(mut guard) => {
                 guard.insert(key.to_owned(), value);
                 Ok(())
@@ -146,12 +195,6 @@ impl ToolContext {
                 Err(ToolError::new(msg))
             }
         }
-    }
-
-    /// Whether the agent is currently idle.
-    #[must_use]
-    pub const fn is_idle(&self) -> bool {
-        self.is_idle
     }
 
     /// Store a typed value in the extensions map.
@@ -448,12 +491,6 @@ impl ToolOutput {
         &self.content
     }
 
-    /// Get the text content returned to the model (alias for `content()`).
-    #[must_use]
-    pub fn text(&self) -> &str {
-        &self.content
-    }
-
     /// Consume self and return the owned content string.
     #[must_use]
     pub fn into_content(self) -> String {
@@ -741,6 +778,25 @@ pub mod __private {
 
     use super::{Json, ToolError, ToolOutput};
 
+    /// Report a runtime tool-description template render failure.
+    ///
+    /// Called by `#[llm_tool(..., context = ...)]`-generated `description()`
+    /// code: on a render error the tool falls back to its static description
+    /// body rather than panicking. Logs to stderr under `std`; a no-op under
+    /// `no_std` (where no logger is available).
+    #[cfg(feature = "std")]
+    pub fn log_description_render_error(tool: &str, err: &dyn core::fmt::Display) {
+        eprintln!(
+            "llm-tool: tool `{tool}` description template failed to render ({err}); \
+             falling back to static description"
+        );
+    }
+
+    /// `no_std` no-op counterpart of the `std` logger above.
+    #[cfg(not(feature = "std"))]
+    #[inline]
+    pub fn log_description_render_error(_tool: &str, _err: &dyn core::fmt::Display) {}
+
     /// Wrapper enabling compile-time method dispatch for tool output conversion.
     pub struct Wrap<T>(pub T);
 
@@ -995,14 +1051,5 @@ impl ResourceOutput {
     }
 }
 
-impl From<String> for ResourceOutput {
-    fn from(text: String) -> Self {
-        Self::text("", None, text)
-    }
-}
-
-impl From<&str> for ResourceOutput {
-    fn from(text: &str) -> Self {
-        Self::text("", None, text)
-    }
-}
+#[cfg(all(test, feature = "std"))]
+mod tests;

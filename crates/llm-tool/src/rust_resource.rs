@@ -5,6 +5,7 @@ use alloc::{
     boxed::Box,
     format,
     string::{String, ToString},
+    vec::Vec,
 };
 use core::{future::Future, pin::Pin};
 
@@ -41,6 +42,9 @@ pub trait RustResource: Send + Sync {
 }
 
 /// Build a [`ResourceDefinition`] from any [`RustResource`] implementor.
+///
+/// Infallible: the definition is built purely from associated constants.
+#[must_use]
 pub fn definition_of_resource<T: RustResource>(resource: &T) -> ResourceDefinition {
     ResourceDefinition {
         uri_template: T::URI_TEMPLATE.to_string(),
@@ -94,23 +98,20 @@ pub fn match_uri_template(
 }
 
 /// Type-erased future returned by [`ErasedResource::read_erased`].
-pub type BoxResourceFuture<'a> =
+pub(crate) type BoxResourceFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ResourceOutput, ToolError>> + Send + 'a>>;
 
 /// Type-erased wrapper enabling heterogeneous resource storage.
-pub trait ErasedResource: Send + Sync {
-    /// Return the resource definition.
-    fn definition(&self) -> ResourceDefinition;
-
-    /// Check if the incoming URI matches this resource's pattern, extract variables, and execute `read`.
+///
+/// This is an internal implementation detail of [`ResourceRegistry`]; callers
+/// interact with resources through the registry rather than this trait.
+pub(crate) trait ErasedResource: Send + Sync {
+    /// Check if the incoming URI matches this resource's pattern, extract
+    /// variables, and execute `read`.
     fn read_erased<'a>(&'a self, uri: &'a str) -> Option<BoxResourceFuture<'a>>;
 }
 
 impl<T: RustResource> ErasedResource for T {
-    fn definition(&self) -> ResourceDefinition {
-        definition_of_resource(self)
-    }
-
     fn read_erased<'a>(&'a self, uri: &'a str) -> Option<BoxResourceFuture<'a>> {
         let params_map = match_uri_template(T::URI_TEMPLATE, uri)?;
         Some(Box::pin(async move {
@@ -128,5 +129,262 @@ impl<T: RustResource> ErasedResource for T {
             )?;
             self.read(uri, params).await
         }))
+    }
+}
+
+/// A registered resource: its cached definition plus the type-erased handler.
+struct RegisteredResource {
+    name: &'static str,
+    definition: ResourceDefinition,
+    erased: Box<dyn ErasedResource>,
+}
+
+/// A registry of resources and resource templates for dynamic dispatch.
+///
+/// Mirrors [`ToolRegistry`](crate::ToolRegistry) for resources: it stores
+/// type-erased [`RustResource`] implementations, caches each
+/// [`ResourceDefinition`] at registration time, and reads the first resource
+/// whose URI template matches an incoming URI, keeping the type-erasure
+/// machinery a private implementation detail.
+///
+/// Unlike [`ToolRegistry`](crate::ToolRegistry) and
+/// [`PromptRegistry`](crate::PromptRegistry),
+/// registration is infallible: a [`ResourceDefinition`] is built purely from
+/// associated constants and never serializes a JSON schema, so there is no
+/// `try_register` counterpart.
+#[derive(Default)]
+pub struct ResourceRegistry {
+    resources: Vec<RegisteredResource>,
+}
+
+impl core::fmt::Debug for ResourceRegistry {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let names: Vec<&str> = self.resources.iter().map(|r| r.name).collect();
+        f.debug_struct("ResourceRegistry")
+            .field("resource_count", &self.resources.len())
+            .field("resource_names", &names)
+            .finish()
+    }
+}
+
+impl ResourceRegistry {
+    /// Create an empty resource registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            resources: Vec::new(),
+        }
+    }
+
+    /// Register a [`RustResource`]. Returns `&mut Self` for chaining.
+    pub fn register<R: RustResource + 'static>(&mut self, resource: R) -> &mut Self {
+        self.resources.push(RegisteredResource {
+            name: R::NAME,
+            definition: definition_of_resource(&resource),
+            erased: Box::new(resource),
+        });
+        self
+    }
+
+    /// Register a [`RustResource`], consuming and returning `Self` for chaining.
+    #[must_use]
+    pub fn with_resource<R: RustResource + 'static>(mut self, resource: R) -> Self {
+        self.register(resource);
+        self
+    }
+
+    /// Collect [`ResourceDefinition`]s for all registered resources.
+    ///
+    /// Returns clones of the cached definitions computed at registration time.
+    #[must_use]
+    pub fn definitions(&self) -> Vec<ResourceDefinition> {
+        self.resources
+            .iter()
+            .map(|entry| entry.definition.clone())
+            .collect()
+    }
+
+    /// Number of registered resources.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.resources.len()
+    }
+
+    /// Whether the registry has no registered resources.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.resources.is_empty()
+    }
+
+    /// Whether a resource with the given name is registered.
+    ///
+    /// Note that resources are *read* by URI (see [`matches`](Self::matches)),
+    /// not by name; this checks the registered resource **name** for parity
+    /// with [`ToolRegistry::contains`](crate::ToolRegistry::contains).
+    #[must_use]
+    pub fn contains(&self, name: &str) -> bool {
+        self.resources.iter().any(|entry| entry.name == name)
+    }
+
+    /// Whether any registered resource's URI template matches `uri`.
+    ///
+    /// This is the URI-keyed analog of [`contains`](Self::contains) and mirrors
+    /// what [`read`](Self::read) uses to select a resource.
+    #[must_use]
+    pub fn matches(&self, uri: &str) -> bool {
+        self.resources
+            .iter()
+            .any(|entry| entry.erased.read_erased(uri).is_some())
+    }
+
+    /// Borrow the cached [`ResourceDefinition`] for a registered resource by name.
+    ///
+    /// Returns `None` if no resource named `name` is registered.
+    #[must_use]
+    pub fn definition(&self, name: &str) -> Option<&ResourceDefinition> {
+        self.resources
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| &entry.definition)
+    }
+
+    /// Iterate over `(name, definition)` pairs for every registered resource.
+    ///
+    /// Yields clones of the cached definitions computed at registration time.
+    #[must_use]
+    pub fn iter(&self) -> ResourceDefinitions<'_> {
+        ResourceDefinitions {
+            inner: self.resources.iter(),
+        }
+    }
+
+    /// Read the first resource whose URI template matches `uri`.
+    ///
+    /// Returns `None` if no registered resource's template matches; otherwise
+    /// the inner `Result` carries the read output or a read error.
+    ///
+    /// # Errors
+    ///
+    /// The inner `Result` is `Err` if URI-variable deserialization or reading
+    /// fails.
+    pub async fn read(&self, uri: &str) -> Option<Result<ResourceOutput, ToolError>> {
+        for resource in &self.resources {
+            if let Some(fut) = resource.erased.read_erased(uri) {
+                return Some(fut.await);
+            }
+        }
+        None
+    }
+}
+
+/// Borrowing iterator over `(name, definition)` pairs, yielded by
+/// [`ResourceRegistry::iter`] and by `&ResourceRegistry`'s [`IntoIterator`] impl.
+///
+/// Each cached [`ResourceDefinition`] is cloned lazily as it is yielded.
+pub struct ResourceDefinitions<'a> {
+    inner: core::slice::Iter<'a, RegisteredResource>,
+}
+
+impl Iterator for ResourceDefinitions<'_> {
+    type Item = (&'static str, ResourceDefinition);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next()
+            .map(|entry| (entry.name, entry.definition.clone()))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl ExactSizeIterator for ResourceDefinitions<'_> {
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+/// Iterate over `(name, definition)` pairs for every registered resource.
+impl<'a> IntoIterator for &'a ResourceRegistry {
+    type Item = (&'static str, ResourceDefinition);
+    type IntoIter = ResourceDefinitions<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::match_uri_template;
+
+    #[test]
+    fn exact_match_no_variables() {
+        let m = match_uri_template("config://app", "config://app").expect("should match");
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn no_match_different_literal() {
+        assert!(match_uri_template("config://app", "config://other").is_none());
+    }
+
+    #[test]
+    fn single_trailing_variable_captures_rest() {
+        let m = match_uri_template("file:///{path}", "file:///etc/hosts").expect("should match");
+        assert_eq!(m.get("path").map(String::as_str), Some("etc/hosts"));
+    }
+
+    #[test]
+    fn multiple_variables() {
+        let m = match_uri_template(
+            "file:///logs/{date}/{app}.log",
+            "file:///logs/2024-01-01/server.log",
+        )
+        .expect("should match");
+        assert_eq!(m.get("date").map(String::as_str), Some("2024-01-01"));
+        assert_eq!(m.get("app").map(String::as_str), Some("server"));
+    }
+
+    #[test]
+    fn variable_stops_at_delimiter() {
+        let m = match_uri_template("x://{a}/{b}", "x://one/two").expect("should match");
+        assert_eq!(m.get("a").map(String::as_str), Some("one"));
+        assert_eq!(m.get("b").map(String::as_str), Some("two"));
+    }
+
+    #[test]
+    fn prefix_mismatch_returns_none() {
+        assert!(match_uri_template("x://{a}", "y://foo").is_none());
+    }
+
+    #[test]
+    fn unterminated_template_variable_returns_none() {
+        // '{' with no closing '}' cannot be parsed into a variable.
+        assert!(match_uri_template("x://{a", "x://foo").is_none());
+    }
+
+    #[test]
+    fn missing_delimiter_in_uri_returns_none() {
+        // Template expects '/' after {a}, but the URI has none.
+        assert!(match_uri_template("x://{a}/end", "x://noslash").is_none());
+    }
+
+    #[test]
+    fn trailing_literal_must_match() {
+        // {a} captures up to '.', then ".log" must match the remainder.
+        assert!(match_uri_template("f://{a}.log", "f://name.txt").is_none());
+    }
+
+    #[test]
+    fn empty_variable_value_is_allowed() {
+        let m = match_uri_template("a://{x}/b", "a:///b").expect("should match");
+        assert_eq!(m.get("x").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn longer_uri_than_literal_template_returns_none() {
+        assert!(match_uri_template("a://b", "a://bc").is_none());
     }
 }

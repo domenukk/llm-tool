@@ -65,10 +65,29 @@ impl ToolRegistry {
     /// # Panics
     ///
     /// Panics if the tool's JSON schema cannot be serialized. This indicates a
-    /// bug in the tool's `Params` type (e.g. a broken `JsonSchema` impl).
+    /// bug in the tool's `Params` type (e.g. a broken `JsonSchema` impl). Use
+    /// [`try_register`](Self::try_register) for the non-panicking variant.
     pub fn register<T: RustTool + 'static>(&mut self, tool: T) -> &mut Self {
-        let definition = definition_of(&tool)
-            .unwrap_or_else(|e| panic!("Failed to build definition for tool '{}': {e}", T::NAME));
+        if let Err(e) = self.try_register(tool) {
+            panic!("Failed to build definition for tool '{}': {e}", T::NAME);
+        }
+        self
+    }
+
+    /// Register a [`RustTool`], returning an error instead of panicking if the
+    /// tool's JSON schema cannot be built.
+    ///
+    /// This is the fallible counterpart to [`register`](Self::register); prefer
+    /// it when tool types are supplied dynamically and a broken `JsonSchema`
+    /// impl should not abort the process. If a tool with the same name was
+    /// already registered, it is replaced.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError`] if the tool's `Params` type fails to produce a
+    /// JSON schema.
+    pub fn try_register<T: RustTool + 'static>(&mut self, tool: T) -> Result<&mut Self, ToolError> {
+        let definition = definition_of(&tool)?;
         self.tools.insert(
             T::NAME,
             RegisteredTool {
@@ -76,7 +95,7 @@ impl ToolRegistry {
                 erased: Box::new(tool),
             },
         );
-        self
+        Ok(self)
     }
 
     /// Register a [`RustTool`], consuming and returning `Self` for owned chaining.
@@ -134,35 +153,50 @@ impl ToolRegistry {
 
     /// Dispatch a tool call by name with raw JSON arguments and a context.
     ///
+    /// Returns `None` if no tool named `name` is registered; otherwise the
+    /// inner `Result` carries the tool output or an execution error. This
+    /// mirrors [`PromptRegistry::render`](crate::PromptRegistry::render) and
+    /// [`ResourceRegistry::read`](crate::ResourceRegistry::read).
+    ///
     /// # Errors
     ///
-    /// Returns `Err` if the tool name is unknown or the handler returns an error.
+    /// The inner `Result` is `Err` if argument deserialization fails or the
+    /// tool handler returns an error.
     pub async fn dispatch(
         &self,
         name: &str,
         args: serde_json::Value,
         ctx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        let entry = self
-            .tools
-            .get(name)
-            .ok_or_else(|| ToolError::new(format!("Unknown tool: {name}")))?;
-        entry.erased.call_erased(args, ctx).await
+    ) -> Option<Result<ToolOutput, ToolError>> {
+        let entry = self.tools.get(name)?;
+        Some(entry.erased.call_erased(args, ctx).await)
     }
 
     /// Dispatch a tool call by name with a raw JSON string argument.
     ///
+    /// Returns `None` if no tool named `name` is registered; otherwise the
+    /// inner `Result` carries the tool output or an error.
+    ///
     /// # Errors
     ///
-    /// Returns `Err` if JSON parsing fails, the tool name is unknown, or the handler fails.
+    /// The inner `Result` is `Err` if JSON parsing fails or the handler fails.
     pub async fn dispatch_str(
         &self,
         name: &str,
         args_json: &str,
         ctx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        let args = serde_json::from_str(args_json)
-            .map_err(|e| ToolError::new(format!("Malformed JSON arguments: {e}")))?;
+    ) -> Option<Result<ToolOutput, ToolError>> {
+        if !self.contains(name) {
+            return None;
+        }
+        let args = match serde_json::from_str(args_json) {
+            Ok(args) => args,
+            Err(e) => {
+                return Some(Err(ToolError::new(format!(
+                    "Malformed JSON arguments: {e}"
+                ))));
+            }
+        };
         self.dispatch(name, args, ctx).await
     }
 
@@ -178,13 +212,59 @@ impl ToolRegistry {
         self.tools.is_empty()
     }
 
+    /// Whether a tool with the given name is registered.
+    #[must_use]
+    pub fn contains(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+    }
+
+    /// Borrow the cached [`ToolDefinition`] for a registered tool by name.
+    ///
+    /// Returns `None` if no tool named `name` is registered. Unlike
+    /// [`definitions`](Self::definitions), this clones nothing.
+    #[must_use]
+    pub fn definition(&self, name: &str) -> Option<&ToolDefinition> {
+        self.tools.get(name).map(|entry| &entry.definition)
+    }
+
     /// Iterate over `(name, definition)` pairs for every registered tool.
     ///
-    /// Returns clones of the cached definitions computed at registration time.
-    pub fn iter(&self) -> impl Iterator<Item = (&'static str, ToolDefinition)> + '_ {
-        self.tools
-            .iter()
+    /// Yields clones of the cached definitions computed at registration time.
+    #[must_use]
+    pub fn iter(&self) -> ToolDefinitions<'_> {
+        ToolDefinitions {
+            inner: self.tools.iter(),
+        }
+    }
+}
+
+/// Borrowing iterator over `(name, definition)` pairs, yielded by
+/// [`ToolRegistry::iter`] and by `&ToolRegistry`'s [`IntoIterator`] impl.
+///
+/// Unlike a boxed trait object, this named iterator allocates nothing to
+/// construct and forwards `size_hint`/`len` from the underlying map iterator.
+/// Each cached [`ToolDefinition`] is cloned lazily as it is yielded.
+pub struct ToolDefinitions<'a> {
+    inner: crate::compat::HashMapIter<'a, &'static str, RegisteredTool>,
+}
+
+impl Iterator for ToolDefinitions<'_> {
+    type Item = (&'static str, ToolDefinition);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next()
             .map(|(name, entry)| (*name, entry.definition.clone()))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl ExactSizeIterator for ToolDefinitions<'_> {
+    fn len(&self) -> usize {
+        self.inner.len()
     }
 }
 
@@ -193,14 +273,10 @@ impl ToolRegistry {
 /// Yields `(&'static str, ToolDefinition)` for each tool in the registry.
 impl<'a> IntoIterator for &'a ToolRegistry {
     type Item = (&'static str, ToolDefinition);
-    type IntoIter = Box<dyn Iterator<Item = (&'static str, ToolDefinition)> + 'a>;
+    type IntoIter = ToolDefinitions<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        Box::new(
-            self.tools
-                .iter()
-                .map(|(name, entry)| (*name, entry.definition.clone())),
-        )
+        self.iter()
     }
 }
 

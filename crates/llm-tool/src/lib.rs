@@ -23,7 +23,7 @@ pub use md_tmpl as __md_tmpl;
 /// Public re-export of `md_tmpl` for use in `context = fn` functions.
 ///
 /// Use `llm_tool::md_tmpl::Context` when writing a context function
-/// for `#[llm_tool(prompt_file = "...", context = my_fn)]`.
+/// for `#[llm_tool(description_file = "...", context = my_fn)]`.
 #[cfg(feature = "md-tmpl")]
 pub use md_tmpl;
 /// Re-export `md_tmpl_macros` so `response_file` generated code can

@@ -40,10 +40,11 @@ fn get_config(app: String) -> String {
 
 let registry = ToolRegistry::new().with_tool(Add);
 
-let server = McpServer::new("my-server", "0.1.0", registry)
+let server = McpServer::builder("my-server", "0.1.0", registry)
     .with_prompt(ReviewPrompt)
     .with_resource(GetConfig)
-    .with_context(ToolContext::new(Some("caller-id".into())));
+    .with_context(ToolContext::new().with_conversation_id("caller-id"))
+    .build();
 
 // In production: server.run_stdio().expect("server failed");
 // Here we feed a request via an in-memory buffer:
@@ -112,18 +113,30 @@ let server = McpServer::new("s", "1", ToolRegistry::new());
 # })
 ```
 
-For custom request/response routing (e.g. Axum HTTP POST or `WebSockets`), use
-`handle_request` directly:
+For custom request/response routing (e.g. Axum HTTP POST or `WebSockets`), call
+`handle_message`. It accepts a single request **or** a JSON-RPC batch array and
+returns a structured [`RpcOutcome`] — a `Single` response object or a `Batch`
+array — which you can inspect or render to the wire in a single pass with
+`.to_wire()`. `None` means the input was purely a notification, so there is
+nothing to send back:
 
 ```rust
 # use llm_tool::ToolRegistry;
-# use llm_tool_mcp::McpServer;
+# use llm_tool_mcp::{McpServer, RpcOutcome};
 # tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
 let server = McpServer::new("s", "1", ToolRegistry::new());
 
-let response = server
-    .handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
-    .await;
+let request = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+match server.handle_message(request).await {
+    // `outcome` is a `Single` object or a `Batch` array — render it directly.
+    Some(outcome) => {
+        let body = outcome.to_wire();
+        // ...write `body` to your HTTP/WebSocket response...
+        assert!(body.contains("\"result\""));
+    }
+    // Notification-only input: reply 202/204 with no body.
+    None => {}
+}
 # })
 ```
 

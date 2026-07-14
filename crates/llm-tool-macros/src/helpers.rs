@@ -441,6 +441,33 @@ pub(crate) fn extract_params(func: &ItemFn) -> syn::Result<Vec<ParamInfo>> {
     Ok(params)
 }
 
+/// Reject generic parameters, lifetimes, and `where` clauses on the annotated
+/// function.
+///
+/// The generated `RustTool`/`RustPrompt`/`RustResource` impl is for a concrete,
+/// zero-generic unit struct. A generic signature would expand to code that
+/// references undeclared type/lifetime parameters, yielding confusing errors
+/// pointing at generated code. Fail early with a clear, spanned message.
+pub(crate) fn reject_generic_signature(func: &ItemFn, macro_name: &str) -> syn::Result<()> {
+    let generics = &func.sig.generics;
+    if let Some(where_clause) = &generics.where_clause {
+        return Err(syn::Error::new_spanned(
+            where_clause,
+            format!("#[{macro_name}] does not support `where` clauses; use concrete types"),
+        ));
+    }
+    if !generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            generics,
+            format!(
+                "#[{macro_name}] does not support generic parameters or lifetimes; \
+                 use concrete types"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn extract_doc_string(attrs: &[syn::Attribute]) -> String {
     let lines: Vec<String> = attrs
         .iter()
@@ -517,4 +544,82 @@ pub(crate) fn try_extract_result_types(ty: &syn::Type) -> Option<ReturnInfo> {
         ok_type: Box::new(ok_type.clone()),
         err_type: Box::new(err_type.clone()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use syn::{parse_quote, parse_str};
+
+    use super::*;
+
+    fn ty(s: &str) -> Type {
+        parse_str::<Type>(s).expect("valid type")
+    }
+
+    #[test]
+    fn is_option_type_matches_option_variants() {
+        assert!(is_option_type(&ty("Option<u32>")));
+        assert!(is_option_type(&ty("core::option::Option<String>")));
+        assert!(!is_option_type(&ty("u32")));
+        assert!(!is_option_type(&ty("Vec<u8>")));
+        // Wrong arity is not treated as Option.
+        assert!(!is_option_type(&ty("Option<u32, u32>")));
+    }
+
+    #[test]
+    fn is_str_ref_matches_only_shared_str() {
+        assert!(is_str_ref(&ty("&str")));
+        assert!(is_str_ref(&ty("&'a str")));
+        assert!(!is_str_ref(&ty("&mut str")));
+        assert!(!is_str_ref(&ty("String")));
+        assert!(!is_str_ref(&ty("&String")));
+    }
+
+    #[test]
+    fn is_tool_context_type_matches_context_by_name() {
+        assert!(is_tool_context_type(&ty("ToolContext")));
+        assert!(is_tool_context_type(&ty("&ToolContext")));
+        assert!(is_tool_context_type(&ty("&'a ToolContext")));
+        assert!(is_tool_context_type(&ty("llm_tool::ToolContext")));
+        assert!(!is_tool_context_type(&ty("&MyType")));
+    }
+
+    #[test]
+    fn try_extract_result_types_requires_two_args() {
+        assert!(try_extract_result_types(&ty("Result<u32, String>")).is_some());
+        assert!(try_extract_result_types(&ty("std::result::Result<u32, E>")).is_some());
+        // Single-arg aliases (anyhow::Result, io::Result) are not recognized.
+        assert!(try_extract_result_types(&ty("Result<u32>")).is_none());
+        assert!(try_extract_result_types(&ty("String")).is_none());
+    }
+
+    #[test]
+    fn extract_doc_string_joins_and_trims_lines() {
+        let f: ItemFn = parse_quote! {
+            /// First line.
+            /// Second line.
+            fn foo() {}
+        };
+        assert_eq!(extract_doc_string(&f.attrs), "First line.\nSecond line.");
+
+        let none: ItemFn = parse_quote! {
+            fn bar() {}
+        };
+        assert_eq!(extract_doc_string(&none.attrs), "");
+    }
+
+    #[test]
+    fn reject_generic_signature_flags_generics_lifetimes_and_where() {
+        let generic: ItemFn = parse_quote! { fn foo<T>(x: T) -> T { x } };
+        assert!(reject_generic_signature(&generic, "llm_tool").is_err());
+
+        let lifetime: ItemFn = parse_quote! { fn foo<'a>(x: &'a str) -> &'a str { x } };
+        assert!(reject_generic_signature(&lifetime, "llm_tool").is_err());
+
+        let where_clause: ItemFn = parse_quote! { fn foo(x: u32) -> u32 where u32: Clone { x } };
+        assert!(reject_generic_signature(&where_clause, "llm_tool").is_err());
+
+        let concrete: ItemFn = parse_quote! { fn foo(x: u32) -> u32 { x } };
+        assert!(reject_generic_signature(&concrete, "llm_tool").is_ok());
+    }
 }

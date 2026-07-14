@@ -6,7 +6,7 @@
 
 use llm_tool::{RustTool, ToolRegistry, llm_tool};
 
-#[llm_tool(prompt_file = "tools/static_desc.tmpl.md")]
+#[llm_tool(description_file = "tools/static_desc.tmpl.md")]
 fn get_weather(
     /// The city to get weather for.
     city: String,
@@ -52,7 +52,7 @@ fn template_description_in_registry() {
 }
 
 /// Doc comments are optional when using template descriptions.
-#[llm_tool(prompt_file = "tools/static_desc.tmpl.md")]
+#[llm_tool(description_file = "tools/static_desc.tmpl.md")]
 fn tool_without_docs(
     /// A parameter.
     value: i64,
@@ -82,7 +82,7 @@ fn get_weather_context(_tool: &GetWeatherDynamic) -> llm_tool::md_tmpl::Context 
 }
 
 #[llm_tool(
-    prompt_file = "tools/dynamic_desc.tmpl.md",
+    description_file = "tools/dynamic_desc.tmpl.md",
     context = get_weather_context
 )]
 fn get_weather_dynamic(
@@ -126,7 +126,7 @@ fn dynamic_description_propagates_to_registry() {
 
 // ── Inline Description Tests ──
 
-#[llm_tool(prompt = "Get the current temperature for a location.")]
+#[llm_tool(description = "Get the current temperature for a location.")]
 fn inline_description_tool(
     /// The city name.
     city: String,
@@ -153,7 +153,7 @@ fn inline_description_in_registry() {
 // ── Compile-time Params Tests ──
 
 #[llm_tool(
-    prompt_file = "tools/parameterized_desc.tmpl.md",
+    description_file = "tools/parameterized_desc.tmpl.md",
     params(api_version = "v4.2", env_name = "production")
 )]
 fn parameterized_tool(
@@ -201,7 +201,7 @@ fn compile_time_params_in_registry() {
 
 // ── Compile-time Env Tests ──
 
-#[llm_tool(prompt_file = "tools/env_desc.tmpl.md", env(API_VERSION = "v5.0"))]
+#[llm_tool(description_file = "tools/env_desc.tmpl.md", env(API_VERSION = "v5.0"))]
 fn env_tool(
     /// A query value.
     query: String,
@@ -233,7 +233,7 @@ fn env_description_is_static() {
 }
 
 #[llm_tool(
-    prompt_file = "tools/env_desc.tmpl.md",
+    description_file = "tools/env_desc.tmpl.md",
     env(API_VERSION = "v6.0", MAX_RETRIES = "10")
 )]
 fn env_override_tool(
@@ -259,7 +259,7 @@ fn env_override_default() {
 // ── Env + Params Combination Tests ──
 
 #[llm_tool(
-    prompt_file = "tools/env_plus_params.tmpl.md",
+    description_file = "tools/env_plus_params.tmpl.md",
     params(version = "2.0"),
     env(DEPLOYMENT_ENV = "staging")
 )]
@@ -303,7 +303,7 @@ fn env_context_fn(_tool: &EnvPlusContextTool) -> llm_tool::md_tmpl::Context {
 }
 
 #[llm_tool(
-    prompt_file = "tools/env_plus_context.tmpl.md",
+    description_file = "tools/env_plus_context.tmpl.md",
     context = env_context_fn,
     env(CLUSTER = "prod-alpha")
 )]
@@ -331,7 +331,7 @@ fn env_plus_context_renders_both() {
 // ── Inline Env Tests ──
 
 #[llm_tool(
-    prompt = r#"
+    description = r#"
 ---
 env:
   - SERVICE = str
@@ -369,7 +369,7 @@ fn inline_env_is_static() {
 // ── Typed (Non-String) Env Tests ──
 
 #[llm_tool(
-    prompt_file = "tools/env_desc.tmpl.md",
+    description_file = "tools/env_desc.tmpl.md",
     env(API_VERSION = "v5", MAX_RETRIES = 10)
 )]
 fn typed_env_tool(
@@ -393,7 +393,7 @@ fn typed_env_int_renders_correctly() {
 }
 
 #[llm_tool(
-    prompt = r#"
+    description = r#"
 ---
 env:
   - VERBOSE = bool
@@ -420,7 +420,7 @@ fn bool_env_renders_correctly() {
 
 // ── Float Env Tests ──
 
-#[llm_tool(prompt_file = "tools/float_env.tmpl.md", env(THRESHOLD = 0.95))]
+#[llm_tool(description_file = "tools/float_env.tmpl.md", env(THRESHOLD = 0.95))]
 fn float_env_tool(
     /// A query.
     query: String,
@@ -452,7 +452,7 @@ fn float_env_is_static() {
 }
 
 #[llm_tool(
-    prompt_file = "tools/float_env.tmpl.md",
+    description_file = "tools/float_env.tmpl.md",
     env(THRESHOLD = 0.75, MIN_SCORE = 0.1)
 )]
 fn float_env_override_tool(
@@ -478,7 +478,7 @@ fn float_env_override_default() {
 // ── Multiple Env Vars Tests (3+) ──
 
 #[llm_tool(
-    prompt_file = "tools/multi_env.tmpl.md",
+    description_file = "tools/multi_env.tmpl.md",
     env(
         SERVICE_NAME = "my-api",
         REGION = "us-west-2",
@@ -525,7 +525,7 @@ fn multi_env_is_static() {
 }
 
 #[llm_tool(
-    prompt_file = "tools/multi_env.tmpl.md",
+    description_file = "tools/multi_env.tmpl.md",
     env(SERVICE_NAME = "cache-svc", REGION = "eu-central-1")
 )]
 fn multi_env_defaults_tool(
@@ -556,7 +556,7 @@ fn multi_env_uses_defaults_when_not_overridden() {
     );
 }
 
-// ── Inline Prompt + Context Tests ──
+// ── Inline Description + Context Tests ──
 
 fn inline_context_fn(_tool: &InlineContextTool) -> llm_tool::md_tmpl::Context {
     llm_tool::md_tmpl::Context::from_serialize(&serde_json::json!({
@@ -566,7 +566,7 @@ fn inline_context_fn(_tool: &InlineContextTool) -> llm_tool::md_tmpl::Context {
 }
 
 #[llm_tool(
-    prompt = r#"
+    description = r#"
 ---
 params:
   - model_name = str
@@ -583,7 +583,7 @@ fn inline_context_tool(
 }
 
 #[test]
-fn inline_prompt_with_context_renders_at_runtime() {
+fn inline_description_with_context_renders_at_runtime() {
     let tool = InlineContextTool;
     let desc = tool.description();
     assert!(
@@ -593,7 +593,7 @@ fn inline_prompt_with_context_renders_at_runtime() {
 }
 
 #[test]
-fn inline_prompt_with_context_is_dynamic() {
+fn inline_description_with_context_is_dynamic() {
     let tool = InlineContextTool;
     let desc = tool.description();
     assert!(
@@ -603,7 +603,7 @@ fn inline_prompt_with_context_is_dynamic() {
 }
 
 #[test]
-fn inline_prompt_with_context_in_registry() {
+fn inline_description_with_context_in_registry() {
     let registry = ToolRegistry::new().with_tool(InlineContextTool);
     let defs = registry.definitions();
     assert_eq!(defs.len(), 1);
@@ -614,10 +614,10 @@ fn inline_prompt_with_context_in_registry() {
     );
 }
 
-// ── Inline Prompt + Params Tests ──
+// ── Inline Description + Params Tests ──
 
 #[llm_tool(
-    prompt = r#"
+    description = r#"
 ---
 params:
   - deployment = str
@@ -634,7 +634,7 @@ fn inline_params_tool(
 }
 
 #[test]
-fn inline_prompt_with_params_renders_at_compile_time() {
+fn inline_description_with_params_renders_at_compile_time() {
     let desc = <InlineParamsTool as RustTool>::DESCRIPTION;
     assert!(
         desc.contains("canary"),
@@ -643,7 +643,7 @@ fn inline_prompt_with_params_renders_at_compile_time() {
 }
 
 #[test]
-fn inline_prompt_with_params_is_static() {
+fn inline_description_with_params_is_static() {
     let tool = InlineParamsTool;
     let desc = tool.description();
     assert!(
@@ -653,7 +653,7 @@ fn inline_prompt_with_params_is_static() {
 }
 
 #[test]
-fn inline_prompt_with_params_in_registry() {
+fn inline_description_with_params_in_registry() {
     let registry = ToolRegistry::new().with_tool(InlineParamsTool);
     let defs = registry.definitions();
     assert_eq!(defs.len(), 1);
@@ -664,7 +664,7 @@ fn inline_prompt_with_params_in_registry() {
     );
 }
 
-// ── Inline Prompt + Env + Context Combination ──
+// ── Inline Description + Env + Context Combination ──
 
 fn inline_env_context_fn(_tool: &InlineEnvContextTool) -> llm_tool::md_tmpl::Context {
     llm_tool::md_tmpl::Context::from_serialize(&serde_json::json!({
@@ -674,7 +674,7 @@ fn inline_env_context_fn(_tool: &InlineEnvContextTool) -> llm_tool::md_tmpl::Con
 }
 
 #[llm_tool(
-    prompt = r#"
+    description = r#"
 ---
 env:
   - INSTANCE = str
@@ -705,5 +705,51 @@ fn inline_env_plus_context_renders_both() {
     assert!(
         desc.contains("42"),
         "should contain context var in inline template, got: {desc}"
+    );
+}
+
+// ── Runtime Render-Failure Fallback ──
+
+/// Returns an empty context so the template's `context.api_version` /
+/// `context.env_name` lookups fail at runtime. This exercises the graceful
+/// fallback in the generated `description()` method: it must return the static
+/// body instead of panicking.
+fn broken_desc_context(_tool: &FallbackDescTool) -> llm_tool::md_tmpl::Context {
+    llm_tool::md_tmpl::Context::from_serialize(&serde_json::json!({})).unwrap()
+}
+
+#[llm_tool(description_file = "tools/dynamic_desc.tmpl.md", context = broken_desc_context)]
+fn fallback_desc_tool(
+    /// The city to lookup.
+    city: String,
+) -> Result<String, String> {
+    Ok(format!("Weather for {city}"))
+}
+
+#[test]
+fn description_render_failure_falls_back_to_static_body() {
+    let tool = FallbackDescTool;
+    // Must NOT panic even though the runtime render fails.
+    let desc = tool.description();
+    assert!(
+        matches!(desc, std::borrow::Cow::Borrowed(_)),
+        "a failed render must fall back to the static (Borrowed) body"
+    );
+    assert!(
+        desc.contains("{{ context.api_version }}"),
+        "fallback should be the raw, unrendered template body, got: {desc}"
+    );
+}
+
+#[test]
+fn description_render_failure_does_not_break_registry() {
+    // Listing tools must never panic when a dynamic description fails to render.
+    let registry = ToolRegistry::new().with_tool(FallbackDescTool);
+    let defs = registry.definitions();
+    assert_eq!(defs.len(), 1);
+    assert!(
+        defs[0].description.contains("Perform weather checks."),
+        "registry should contain the static fallback body, got: {}",
+        defs[0].description
     );
 }

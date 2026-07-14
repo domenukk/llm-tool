@@ -81,22 +81,51 @@ fn compile_env_only_template(
         .map_err(|e| syn::Error::new(span, format!("{label} render error: {e}")))
 }
 
+/// Build the generated `description(&self)` method for a runtime `context = fn`
+/// template.
+///
+/// On a render error at runtime the method logs the failure and falls back to
+/// `fallback_body` (the template body rendered at compile time) instead of
+/// panicking, so listing tools can never crash the server.
+#[cfg(feature = "md-tmpl")]
+fn build_context_description_method(
+    desc_mod_name: &syn::Ident,
+    context_fn: &syn::Path,
+    fn_name: &syn::Ident,
+    fallback_body: &str,
+) -> proc_macro2::TokenStream {
+    let fn_name_str = syn::LitStr::new(&fn_name.to_string(), fn_name.span());
+    let fallback = syn::LitStr::new(fallback_body, proc_macro2::Span::call_site());
+    quote! {
+        fn description(&self) -> ::llm_tool::__private::Cow<'static, str> {
+            let ctx = #context_fn(self);
+            match #desc_mod_name::template().render_ctx(&ctx) {
+                Ok(rendered) => ::llm_tool::__private::Cow::Owned(rendered),
+                Err(err) => {
+                    ::llm_tool::__private::log_description_render_error(#fn_name_str, &err);
+                    ::llm_tool::__private::Cow::Borrowed(#fallback)
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn resolve_description(
     func: &ItemFn,
     attr: Option<&ToolAttr>,
 ) -> syn::Result<DescriptionInfo> {
     match attr {
-        // Inline prompt template or string.
+        // Inline description template or string.
         Some(
             tool_attr @ ToolAttr {
-                prompt_inline: Some(_),
+                description_inline: Some(_),
                 ..
             },
         ) => resolve_inline_description(tool_attr, &func.sig.ident),
         // Template file.
         Some(
             tool_attr @ ToolAttr {
-                prompt_file_path: Some(_),
+                description_file_path: Some(_),
                 ..
             },
         ) => resolve_template_description(tool_attr, &func.sig.ident),
@@ -108,7 +137,7 @@ pub(crate) fn resolve_description(
                     &func.sig.ident,
                     "#[llm_tool] functions must have a doc comment \
                      (used as the tool description), or use \
-                     #[llm_tool(prompt = \"...\")]",
+                     #[llm_tool(description = \"...\")]",
                 ));
             }
             Ok(DescriptionInfo {
@@ -131,16 +160,16 @@ pub(crate) fn resolve_inline_description(
         // NOLINT: suppress unused-variable warning in non-md-tmpl cfg branch
         let _ = fn_name;
         let span = attr
-            .prompt_inline
+            .description_inline
             .as_ref()
             .map_or(proc_macro2::Span::call_site(), LitStr::span);
         if attr.has_inline_params || attr.has_context_fn {
             return Err(syn::Error::new(
                 span,
-                "the `md-tmpl` feature must be enabled to use dynamic inline prompts",
+                "the `md-tmpl` feature must be enabled to use dynamic inline descriptions",
             ));
         }
-        let desc = attr.prompt_inline.as_ref().unwrap().value();
+        let desc = attr.description_inline.as_ref().unwrap().value();
         Ok(DescriptionInfo {
             static_description: desc,
             helper_tokens: quote! {},
@@ -163,13 +192,13 @@ pub(crate) fn resolve_template_description(
         // NOLINT: suppress unused-variable warning in non-md-tmpl cfg branch
         let _ = fn_name;
         let span = attr
-            .prompt_file_path
+            .description_file_path
             .as_ref()
             .map_or(proc_macro2::Span::call_site(), LitStr::span);
         Err(syn::Error::new(
             span,
             "the `md-tmpl` feature must be enabled to use \
-             `#[llm_tool(prompt_file = \"...\")]`. \
+             `#[llm_tool(description_file = \"...\")]`. \
              Add `features = [\"md-tmpl\"]` to your llm-tool dependency.",
         ))
     }
@@ -190,9 +219,9 @@ pub(crate) fn resolve_template_description_impl(
     fn_name: &syn::Ident,
 ) -> syn::Result<DescriptionInfo> {
     let template_lit = attr
-        .prompt_file_path
+        .description_file_path
         .as_ref()
-        .expect("prompt_file_path validated");
+        .expect("description_file_path validated");
     let rel_path = template_lit.value();
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let full_path = std::path::Path::new(&manifest_dir).join(&rel_path);
@@ -299,9 +328,9 @@ pub(crate) fn resolve_inline_description_impl(
     fn_name: &syn::Ident,
 ) -> syn::Result<DescriptionInfo> {
     let template_lit = attr
-        .prompt_inline
+        .description_inline
         .as_ref()
-        .expect("prompt_inline validated");
+        .expect("description_inline validated");
     let source = template_lit.value();
     let trimmed = source.trim_start();
     if !trimmed.starts_with("---") {
@@ -369,14 +398,8 @@ pub(crate) fn resolve_inline_description_impl(
         };
         let context_fn = attr.context_fn.as_ref().unwrap();
 
-        let description_method = quote! {
-            fn description(&self) -> ::llm_tool::__private::Cow<'static, str> {
-                let ctx = #context_fn(self);
-                let rendered = #desc_mod_name::template().render_ctx(&ctx)
-                    .expect("Failed to render tool description template");
-                ::llm_tool::__private::Cow::Owned(rendered)
-            }
-        };
+        let description_method =
+            build_context_description_method(&desc_mod_name, context_fn, fn_name, &body_str);
 
         Ok(DescriptionInfo {
             static_description: body_str.clone(),
@@ -459,14 +482,8 @@ pub(crate) fn resolve_context_description(
         );
     };
 
-    let description_method = quote! {
-        fn description(&self) -> ::llm_tool::__private::Cow<'static, str> {
-            let ctx = #context_fn(self);
-            let rendered = #desc_mod_name::template().render_ctx(&ctx)
-                .expect("Failed to render tool description template");
-            ::llm_tool::__private::Cow::Owned(rendered)
-        }
-    };
+    let description_method =
+        build_context_description_method(&desc_mod_name, context_fn, fn_name, body_str);
 
     Ok(DescriptionInfo {
         static_description: body_str.to_string(),
@@ -561,7 +578,7 @@ pub(crate) fn resolve_template_with_params(
 
     // Build context and render at compile time.
     // Use Template::compile with base_dir so {% include %} and env: resolve correctly.
-    let base_dir = attr.prompt_file_path.as_ref().map(|lit| {
+    let base_dir = attr.description_file_path.as_ref().map(|lit| {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
         let full = std::path::PathBuf::from(&manifest_dir).join(lit.value());
         full.parent()

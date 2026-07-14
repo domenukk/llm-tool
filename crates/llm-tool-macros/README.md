@@ -40,22 +40,22 @@ The macro produces:
 
 ## Rules
 
-| Requirement                        | Detail                                                                                                                                |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| **Doc comment on function**        | Required — becomes the tool description.                                                                                              |
-| **Doc comment on every parameter** | Required — becomes the JSON Schema field description.                                                                                 |
-| **Return type**                    | `Result<T, E>` or bare `T` (infallible).                                                                                              |
-| **`T` (Ok type)**                  | `String` (auto-wrapped into `ToolOutput`), `ToolOutput` (passed through), any `T: Serialize` (auto-serialized to JSON), or `Json<T>`. |
-| **`E` (Err type)**                 | Any `E: Into<ToolError>` — built-in for `ToolError`, `String`, `std::io::Error`, `serde_json::Error`, `Box<dyn Error + Send + Sync>`. |
-| **`async fn`**                     | Supported — the generated `call()` is always async.                                                                                   |
-| **`&str` params**                  | Accepted — the struct stores `String`, macro auto-borrows.                                                                            |
-| **`Option<T>` params**             | Auto-annotated with `#[serde(default)]` → not in `required`.                                                                          |
-| **`&ToolContext` param**           | Recognized as execution context, forwarded from registry, excluded from params struct.                                                |
-| **`prompt_file = "..."`**          | Load description from a `.tmpl.md` template file (requires `md-tmpl` feature). Zero runtime cost.                                     |
-| **`params(k = "v", ...)`**         | Compile-time key-value pairs for template variables. Requires `prompt_file`.                                                          |
-| **`env(K = "v", ...)`**            | Compile-time values for `env:` frontmatter declarations. Requires `prompt_file` or `prompt`. Combinable with `params` or `context`.   |
-| **`context = fn`**                 | Runtime template context function. Signature: `fn(&Tool) -> Context`. Requires `prompt_file`.                                         |
-| **`self` receiver**                | Not allowed — must be a free function.                                                                                                |
+| Requirement                        | Detail                                                                                                                                        |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Doc comment on function**        | Required — becomes the tool description.                                                                                                      |
+| **Doc comment on every parameter** | Required — becomes the JSON Schema field description.                                                                                         |
+| **Return type**                    | `Result<T, E>` or bare `T` (infallible).                                                                                                      |
+| **`T` (Ok type)**                  | `String` (auto-wrapped into `ToolOutput`), `ToolOutput` (passed through), any `T: Serialize` (auto-serialized to JSON), or `Json<T>`.         |
+| **`E` (Err type)**                 | Any `E: Into<ToolError>` — built-in for `ToolError`, `String`, `std::io::Error`, `serde_json::Error`, `Box<dyn Error + Send + Sync>`.         |
+| **`async fn`**                     | Supported — the generated `call()` is always async.                                                                                           |
+| **`&str` params**                  | Accepted — the struct stores `String`, macro auto-borrows.                                                                                    |
+| **`Option<T>` params**             | Auto-annotated with `#[serde(default)]` → not in `required`.                                                                                  |
+| **`&ToolContext` param**           | Recognized as execution context, forwarded from registry, excluded from params struct.                                                        |
+| **`description_file = "..."`**     | Load description from a `.tmpl.md` template file (requires `md-tmpl` feature). Zero runtime cost.                                             |
+| **`params(k = "v", ...)`**         | Compile-time key-value pairs for template variables. Requires `description_file`.                                                             |
+| **`env(K = "v", ...)`**            | Compile-time values for `env:` frontmatter declarations. Requires `description_file` or `description`. Combinable with `params` or `context`. |
+| **`context = fn`**                 | Runtime template context function. Signature: `fn(&Tool) -> Context`. Requires `description_file`.                                            |
+| **`self` receiver**                | Not allowed — must be a free function.                                                                                                        |
 
 ## License
 

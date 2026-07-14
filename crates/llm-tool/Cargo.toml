@@ -1,6 +1,6 @@
 [package]
 name = "llm-tool"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.86"
 description = "Framework-agnostic Rust tool definitions for LLM agents"
@@ -19,7 +19,7 @@ std = [
   "hashbrown/default",
   "md-tmpl?/std",
 ]
-# Enable `#[llm_tool(prompt_file = "path.tmpl.md")]` or
+# Enable `#[llm_tool(description_file = "path.tmpl.md")]` or
 # `#[llm_tool(response_file = "path.tmpl.md")]` for template-based
 # tool descriptions and response rendering. Requires `md-tmpl`
 # as a direct dependency for runtime context types (`Context`, `Template`).
@@ -31,11 +31,11 @@ md-tmpl = [
 ]
 
 [dependencies]
-llm-tool-macros = { path = "../llm-tool-macros", version = "0.6.0" }
-md-tmpl = { version = "0.6.0", optional = true, default-features = false, features = [
+llm-tool-macros = { path = "../llm-tool-macros", version = "0.7.0" }
+md-tmpl = { version = "0.7.0", optional = true, default-features = false, features = [
   "serde",
 ] }
-md-tmpl-macros = { version = "0.6.0", optional = true, default-features = false, features = [
+md-tmpl-macros = { version = "0.7.0", optional = true, default-features = false, features = [
   "serde",
 ] }
 hashbrown = { version = "0.17", default-features = false, features = [

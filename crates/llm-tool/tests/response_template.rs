@@ -18,7 +18,7 @@ struct WeatherResponse {
 }
 
 #[llm_tool(
-    prompt = "Get the weather for a city.",
+    description = "Get the weather for a city.",
     response_file = "tools/weather_response.tmpl.md"
 )]
 fn get_weather_templated(
@@ -36,7 +36,7 @@ fn get_weather_templated(
 #[tokio::test]
 async fn response_template_renders_struct_fields() {
     let registry = ToolRegistry::new().with_tool(GetWeatherTemplated);
-    let ctx = ToolContext::new(None);
+    let ctx = ToolContext::new();
 
     let output = registry
         .dispatch(
@@ -45,6 +45,7 @@ async fn response_template_renders_struct_fields() {
             &ctx,
         )
         .await
+        .expect("tool registered")
         .unwrap();
 
     let content = output.content();
@@ -66,7 +67,7 @@ async fn response_template_renders_struct_fields() {
 #[tokio::test]
 async fn response_template_attaches_metadata() {
     let registry = ToolRegistry::new().with_tool(GetWeatherTemplated);
-    let ctx = ToolContext::new(None);
+    let ctx = ToolContext::new();
 
     let output = registry
         .dispatch(
@@ -75,6 +76,7 @@ async fn response_template_attaches_metadata() {
             &ctx,
         )
         .await
+        .expect("tool registered")
         .unwrap();
 
     let meta = output.metadata();
@@ -104,7 +106,7 @@ fn response_template_tool_has_correct_description() {
 // ── Response template with inline string ──
 
 #[llm_tool(
-    prompt = "Get the inline weather.",
+    description = "Get the inline weather.",
     response = r#"
 ---
 params:
@@ -129,7 +131,7 @@ async fn get_weather_inline(
 #[tokio::test]
 async fn test_inline_response_template() {
     let registry = ToolRegistry::new().with_tool(GetWeatherInline);
-    let ctx = ToolContext::new(None);
+    let ctx = ToolContext::new();
 
     let output = registry
         .dispatch(
@@ -138,6 +140,7 @@ async fn test_inline_response_template() {
             &ctx,
         )
         .await
+        .expect("tool registered")
         .unwrap();
 
     assert_eq!(
@@ -166,7 +169,7 @@ struct SearchResponse {
 }
 
 #[llm_tool(
-    prompt = "Search for things.",
+    description = "Search for things.",
     response_file = "tools/search_response.tmpl.md"
 )]
 fn search_tool(
@@ -186,7 +189,7 @@ fn search_tool(
 #[tokio::test]
 async fn test_search_response_template() {
     let registry = ToolRegistry::new().with_tool(SearchTool);
-    let ctx = ToolContext::new(None);
+    let ctx = ToolContext::new();
     let output = registry
         .dispatch(
             "search_tool",
@@ -194,6 +197,7 @@ async fn test_search_response_template() {
             &ctx,
         )
         .await
+        .expect("tool registered")
         .unwrap();
     assert!(output.content().contains("Search results for \"language\""));
 }
@@ -201,7 +205,7 @@ async fn test_search_response_template() {
 // ── Response file + env combination ──
 
 #[llm_tool(
-    prompt = "Search a service.",
+    description = "Search a service.",
     response_file = "tools/env_response.tmpl.md",
     env(SERVICE_NAME = "my-api")
 )]
@@ -218,7 +222,7 @@ fn env_response_tool(
 #[tokio::test]
 async fn response_file_with_env_renders_env_var() {
     let registry = ToolRegistry::new().with_tool(EnvResponseTool);
-    let ctx = ToolContext::new(None);
+    let ctx = ToolContext::new();
 
     let output = registry
         .dispatch(
@@ -227,6 +231,7 @@ async fn response_file_with_env_renders_env_var() {
             &ctx,
         )
         .await
+        .expect("tool registered")
         .unwrap();
 
     let content = output.content();
@@ -245,20 +250,20 @@ async fn response_file_with_env_renders_env_var() {
 }
 
 #[test]
-fn env_response_tool_description_comes_from_prompt() {
+fn env_response_tool_description_comes_from_description() {
     let registry = ToolRegistry::new().with_tool(EnvResponseTool);
     let defs = registry.definitions();
     assert_eq!(defs.len(), 1);
     assert_eq!(
         defs[0].description, "Search a service.",
-        "description should come from prompt, not response template"
+        "description should come from the description attribute, not the response template"
     );
 }
 
 #[tokio::test]
 async fn response_file_with_env_attaches_metadata() {
     let registry = ToolRegistry::new().with_tool(EnvResponseTool);
-    let ctx = ToolContext::new(None);
+    let ctx = ToolContext::new();
 
     let output = registry
         .dispatch(
@@ -267,6 +272,7 @@ async fn response_file_with_env_attaches_metadata() {
             &ctx,
         )
         .await
+        .expect("tool registered")
         .unwrap();
 
     let meta = output.metadata();
@@ -280,7 +286,7 @@ async fn response_file_with_env_attaches_metadata() {
 // ── Inline response + env combination ──
 
 #[llm_tool(
-    prompt = "Query a service with inline response.",
+    description = "Query a service with inline response.",
     response = r#"
 ---
 env:
@@ -309,7 +315,7 @@ fn inline_env_response_tool(
 #[tokio::test]
 async fn inline_response_with_env_renders_env_var() {
     let registry = ToolRegistry::new().with_tool(InlineEnvResponseTool);
-    let ctx = ToolContext::new(None);
+    let ctx = ToolContext::new();
 
     let output = registry
         .dispatch(
@@ -318,6 +324,7 @@ async fn inline_response_with_env_renders_env_var() {
             &ctx,
         )
         .await
+        .expect("tool registered")
         .unwrap();
 
     let content = output.content();
@@ -336,17 +343,17 @@ async fn inline_response_with_env_renders_env_var() {
 }
 
 #[test]
-fn inline_env_response_description_comes_from_prompt() {
+fn inline_env_response_description_comes_from_description() {
     assert_eq!(
         <InlineEnvResponseTool as llm_tool::RustTool>::DESCRIPTION,
         "Query a service with inline response."
     );
 }
 
-// ── Prompt + response_file both present ──
+// ── Description + response_file both present ──
 
 #[derive(Serialize)]
-struct PromptPlusResponseResult {
+struct DescriptionPlusResponseResult {
     city: String,
     temp_f: i64,
     condition: String,
@@ -354,14 +361,14 @@ struct PromptPlusResponseResult {
 }
 
 #[llm_tool(
-    prompt = "Get weather details for a city.",
+    description = "Get weather details for a city.",
     response_file = "tools/weather_response.tmpl.md"
 )]
-fn prompt_plus_response_tool(
+fn description_plus_response_tool(
     /// The city.
     city: String,
-) -> Result<PromptPlusResponseResult, ToolError> {
-    Ok(PromptPlusResponseResult {
+) -> Result<DescriptionPlusResponseResult, ToolError> {
+    Ok(DescriptionPlusResponseResult {
         city,
         temp_f: 85,
         condition: "Hot".into(),
@@ -370,26 +377,27 @@ fn prompt_plus_response_tool(
 }
 
 #[test]
-fn prompt_plus_response_description_from_prompt() {
-    let desc = <PromptPlusResponseTool as llm_tool::RustTool>::DESCRIPTION;
+fn description_plus_response_description_from_description() {
+    let desc = <DescriptionPlusResponseTool as llm_tool::RustTool>::DESCRIPTION;
     assert_eq!(
         desc, "Get weather details for a city.",
-        "description should come from prompt= attribute"
+        "description should come from the description attribute"
     );
 }
 
 #[tokio::test]
-async fn prompt_plus_response_output_from_template() {
-    let registry = ToolRegistry::new().with_tool(PromptPlusResponseTool);
-    let ctx = ToolContext::new(None);
+async fn description_plus_response_output_from_template() {
+    let registry = ToolRegistry::new().with_tool(DescriptionPlusResponseTool);
+    let ctx = ToolContext::new();
 
     let output = registry
         .dispatch(
-            "prompt_plus_response_tool",
+            "description_plus_response_tool",
             serde_json::json!({"city": "Phoenix"}),
             &ctx,
         )
         .await
+        .expect("tool registered")
         .unwrap();
 
     let content = output.content();
@@ -411,10 +419,10 @@ async fn prompt_plus_response_output_from_template() {
     );
 }
 
-// ── Prompt_file + response_file both present ──
+// ── Description_file + response_file both present ──
 
 #[derive(Serialize)]
-struct PromptFileResponseResult {
+struct DescriptionFileResponseResult {
     city: String,
     temp_f: i64,
     condition: String,
@@ -422,14 +430,14 @@ struct PromptFileResponseResult {
 }
 
 #[llm_tool(
-    prompt_file = "tools/prompt_for_combined.tmpl.md",
+    description_file = "tools/description_for_combined.tmpl.md",
     response_file = "tools/weather_response.tmpl.md"
 )]
-fn prompt_file_plus_response_tool(
+fn description_file_plus_response_tool(
     /// The city name.
     city: String,
-) -> Result<PromptFileResponseResult, ToolError> {
-    Ok(PromptFileResponseResult {
+) -> Result<DescriptionFileResponseResult, ToolError> {
+    Ok(DescriptionFileResponseResult {
         city,
         temp_f: 55,
         condition: "Rainy".into(),
@@ -438,26 +446,27 @@ fn prompt_file_plus_response_tool(
 }
 
 #[test]
-fn prompt_file_plus_response_description_from_prompt_file() {
-    let desc = <PromptFilePlusResponseTool as llm_tool::RustTool>::DESCRIPTION;
+fn description_file_plus_response_description_from_description_file() {
+    let desc = <DescriptionFilePlusResponseTool as llm_tool::RustTool>::DESCRIPTION;
     assert!(
         desc.contains("Look up detailed weather information"),
-        "description should come from prompt_file, got: {desc}"
+        "description should come from description_file, got: {desc}"
     );
 }
 
 #[tokio::test]
-async fn prompt_file_plus_response_output_from_response_file() {
-    let registry = ToolRegistry::new().with_tool(PromptFilePlusResponseTool);
-    let ctx = ToolContext::new(None);
+async fn description_file_plus_response_output_from_response_file() {
+    let registry = ToolRegistry::new().with_tool(DescriptionFilePlusResponseTool);
+    let ctx = ToolContext::new();
 
     let output = registry
         .dispatch(
-            "prompt_file_plus_response_tool",
+            "description_file_plus_response_tool",
             serde_json::json!({"city": "London"}),
             &ctx,
         )
         .await
+        .expect("tool registered")
         .unwrap();
 
     let content = output.content();
@@ -480,17 +489,18 @@ async fn prompt_file_plus_response_output_from_response_file() {
 }
 
 #[tokio::test]
-async fn prompt_file_plus_response_attaches_metadata() {
-    let registry = ToolRegistry::new().with_tool(PromptFilePlusResponseTool);
-    let ctx = ToolContext::new(None);
+async fn description_file_plus_response_attaches_metadata() {
+    let registry = ToolRegistry::new().with_tool(DescriptionFilePlusResponseTool);
+    let ctx = ToolContext::new();
 
     let output = registry
         .dispatch(
-            "prompt_file_plus_response_tool",
+            "description_file_plus_response_tool",
             serde_json::json!({"city": "Berlin"}),
             &ctx,
         )
         .await
+        .expect("tool registered")
         .unwrap();
 
     let meta = output.metadata();
@@ -502,7 +512,7 @@ async fn prompt_file_plus_response_attaches_metadata() {
 
 // ── Dispatch and execution tests for env tools ──
 
-#[llm_tool(prompt_file = "tools/env_desc.tmpl.md", env(API_VERSION = "v7.0"))]
+#[llm_tool(description_file = "tools/env_desc.tmpl.md", env(API_VERSION = "v7.0"))]
 fn dispatch_env_tool(
     /// A query value.
     query: String,
@@ -513,7 +523,7 @@ fn dispatch_env_tool(
 #[tokio::test]
 async fn env_tool_dispatch_returns_correct_output() {
     let registry = ToolRegistry::new().with_tool(DispatchEnvTool);
-    let ctx = ToolContext::new(None);
+    let ctx = ToolContext::new();
 
     let output = registry
         .dispatch(
@@ -522,6 +532,7 @@ async fn env_tool_dispatch_returns_correct_output() {
             &ctx,
         )
         .await
+        .expect("tool registered")
         .unwrap();
 
     assert_eq!(
@@ -544,7 +555,7 @@ fn env_tool_dispatch_description_is_rendered() {
 }
 
 #[llm_tool(
-    prompt_file = "tools/multi_env.tmpl.md",
+    description_file = "tools/multi_env.tmpl.md",
     env(
         SERVICE_NAME = "dispatch-svc",
         REGION = "ap-south-1",
@@ -561,7 +572,7 @@ fn dispatch_multi_env_tool(
 #[tokio::test]
 async fn multi_env_tool_dispatch_executes_correctly() {
     let registry = ToolRegistry::new().with_tool(DispatchMultiEnvTool);
-    let ctx = ToolContext::new(None);
+    let ctx = ToolContext::new();
 
     let output = registry
         .dispatch(
@@ -570,6 +581,7 @@ async fn multi_env_tool_dispatch_executes_correctly() {
             &ctx,
         )
         .await
+        .expect("tool registered")
         .unwrap();
 
     assert_eq!(output.content(), "multi-env executed: world");

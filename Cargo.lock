@@ -132,12 +132,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "const-str"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18f12cc9948ed9604230cdddc7c86e270f9401ccbe3c2e98a4378c5e7632212f"
-
-[[package]]
 name = "convert_case"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -445,7 +439,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "llm-tool"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "futures",
  "hashbrown",
@@ -465,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "llm-tool-macros"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "convert_case",
  "hashbrown",
@@ -477,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "llm-tool-mcp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "llm-tool",
  "rmcp",
@@ -497,9 +491,9 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "md-tmpl"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51c4736c87f891c94a749628e986f2cfc0324f8686767c0aecce2405fbb21fd3"
+checksum = "8b5097ef6893328a5e9b5d6366a1ecd81e08c2f232ba851a8c3fcc7df88bfaa2"
 dependencies = [
  "md-tmpl-core",
  "md-tmpl-macros",
@@ -508,12 +502,11 @@ dependencies = [
 
 [[package]]
 name = "md-tmpl-core"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73ee8561683bdb0fb3d965536a417920a7f458f13932762f8194fe2423e3b1c3"
+checksum = "952f549041f4f0eea8f7d88da7c9397246040ff4fecfac9435ec9e5ca729967a"
 dependencies = [
  "ciborium",
- "const-str",
  "flexbuffers",
  "hashbrown",
  "itoa",
@@ -525,9 +518,9 @@ dependencies = [
 
 [[package]]
 name = "md-tmpl-macros"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b82525ec9fc8c07d27043b88e32340f93a18a1764f79b33f5f3d76fba31d67c7"
+checksum = "f4eb5fbaf451507acdc3dfba1f27c3b4bf49cf299131aeaed5e1720155978bd5"
 dependencies = [
  "hashbrown",
  "md-tmpl-core",

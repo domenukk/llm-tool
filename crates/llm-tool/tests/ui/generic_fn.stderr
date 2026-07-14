@@ -1,0 +1,5 @@
+error: #[llm_tool] does not support generic parameters or lifetimes; use concrete types
+ --> tests/ui/generic_fn.rs:5:16
+  |
+5 | fn generic_tool<T: std::fmt::Display>(
+  |                ^^^^^^^^^^^^^^^^^^^^^^

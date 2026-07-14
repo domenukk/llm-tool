@@ -24,6 +24,7 @@ Running on {{ api_version }}
 
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/template_missing_context.rs");
+    t.compile_fail("tests/ui/prompt_response_unsupported.rs");
 }
 
 struct OnDrop<F: FnOnce()>(Option<F>);

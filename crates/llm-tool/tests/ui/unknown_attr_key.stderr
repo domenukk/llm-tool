@@ -1,0 +1,5 @@
+error: expected `description`, `description_file`, `response`, `response_file`, `params`, `env`, or `context`
+ --> tests/ui/unknown_attr_key.rs:4:12
+  |
+4 | #[llm_tool(bogus = "nope")]
+  |            ^^^^^
