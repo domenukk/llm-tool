@@ -3,7 +3,9 @@
 use alloc::{borrow::Cow, boxed::Box, format, string::ToString, vec::Vec};
 use core::{future::Future, pin::Pin};
 
-use super::types::{PromptArgumentDefinition, PromptDefinition, PromptOutput, ToolError};
+use super::types::{
+    PromptArgumentDefinition, PromptDefinition, PromptOutput, RegistryItem, ToolError,
+};
 use crate::compat::{HashMap, HashMapIter};
 
 /// A custom prompt template implemented in Rust with strongly-typed parameters.
@@ -237,20 +239,20 @@ impl PromptRegistry {
 
     /// Render a registered prompt by name with raw JSON arguments.
     ///
-    /// Returns `None` if no prompt named `name` is registered; otherwise the
-    /// inner `Result` carries the rendered output or a render error.
-    ///
     /// # Errors
     ///
-    /// The inner `Result` is `Err` if argument deserialization or rendering
-    /// fails.
+    /// Returns [`ToolError::not_found`] if no prompt named `name` is registered
+    /// (carrying `error_kind = "not_registered"` metadata), or a render error
+    /// if argument deserialization or rendering fails.
     pub async fn render(
         &self,
         name: &str,
         args: serde_json::Value,
-    ) -> Option<Result<PromptOutput, ToolError>> {
-        let entry = self.prompts.get(name)?;
-        Some(entry.erased.render_erased(args).await)
+    ) -> Result<PromptOutput, ToolError> {
+        let Some(entry) = self.prompts.get(name) else {
+            return Err(ToolError::not_found(RegistryItem::Prompt, name));
+        };
+        entry.erased.render_erased(args).await
     }
 }
 

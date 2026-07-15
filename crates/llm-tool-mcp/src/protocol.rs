@@ -27,6 +27,60 @@ pub const INVALID_PARAMS: i64 = -32602;
 /// Internal server error.
 pub const INTERNAL_ERROR: i64 = -32603;
 
+// ── MCP JSON-RPC method names ───────────────────────────────────────
+//
+// Every JSON-RPC `method` string the server dispatches on has a named
+// constant here, so the wire protocol is defined in exactly one place and
+// the server match arms never repeat a magic string literal.
+
+/// `initialize` — capability negotiation handshake.
+pub const METHOD_INITIALIZE: &str = "initialize";
+
+/// `ping` — liveness check; server replies with an empty result.
+pub const METHOD_PING: &str = "ping";
+
+/// `logging/setLevel` — client sets the server log level.
+pub const METHOD_LOGGING_SET_LEVEL: &str = "logging/setLevel";
+
+/// `notifications/initialized` — client signals it finished initializing.
+pub const METHOD_NOTIFICATIONS_INITIALIZED: &str = "notifications/initialized";
+
+/// `initialized` — bare alias some clients send instead of the namespaced form.
+pub const METHOD_INITIALIZED: &str = "initialized";
+
+/// `notifications/cancelled` — client cancels an in-flight request.
+pub const METHOD_NOTIFICATIONS_CANCELLED: &str = "notifications/cancelled";
+
+/// `tools/list` — enumerate available tools and their schemas.
+pub const METHOD_TOOLS_LIST: &str = "tools/list";
+
+/// `tools/call` — invoke a named tool with arguments.
+pub const METHOD_TOOLS_CALL: &str = "tools/call";
+
+/// `resources/list` — enumerate concrete resources.
+pub const METHOD_RESOURCES_LIST: &str = "resources/list";
+
+/// `resources/templates/list` — enumerate resource URI templates.
+pub const METHOD_RESOURCES_TEMPLATES_LIST: &str = "resources/templates/list";
+
+/// `resources/read` — read a resource by URI.
+pub const METHOD_RESOURCES_READ: &str = "resources/read";
+
+/// `prompts/list` — enumerate registered prompts.
+pub const METHOD_PROMPTS_LIST: &str = "prompts/list";
+
+/// `prompts/get` — render a prompt with arguments.
+pub const METHOD_PROMPTS_GET: &str = "prompts/get";
+
+/// `completion/complete` — argument-completion request.
+pub const METHOD_COMPLETION_COMPLETE: &str = "completion/complete";
+
+/// `notifications/progress` — progress update notification.
+pub const METHOD_NOTIFICATIONS_PROGRESS: &str = "notifications/progress";
+
+/// `notifications/message` — log-message notification.
+pub const METHOD_NOTIFICATIONS_MESSAGE: &str = "notifications/message";
+
 // ── Request ─────────────────────────────────────────────────────────
 
 /// A JSON-RPC 2.0 request.
@@ -227,14 +281,44 @@ pub struct ToolCallResult {
     pub is_error: bool,
 }
 
+impl ToolCallResult {
+    /// The text of the first content block, if any.
+    ///
+    /// Convenience for callers of [`McpServer::dispatch_tool`] who want the
+    /// tool's textual output without indexing into [`content`](Self::content).
+    ///
+    /// [`McpServer::dispatch_tool`]: crate::McpServer::dispatch_tool
+    #[must_use]
+    pub fn text(&self) -> Option<&str> {
+        self.content.first().map(|item| item.text.as_str())
+    }
+}
+
+/// The `type` value of a text [`ContentItem`] — currently the only content type
+/// this server emits.
+pub const CONTENT_TYPE_TEXT: &str = "text";
+
 /// A single content block in a `tools/call` response.
 #[derive(Debug, Serialize)]
 pub struct ContentItem {
-    /// Content type — currently always `"text"`.
+    /// Content type — currently always [`CONTENT_TYPE_TEXT`].
     #[serde(rename = "type")]
     pub content_type: &'static str,
     /// The text content.
     pub text: String,
+}
+
+impl ContentItem {
+    /// Build a text content block, tagging it with [`CONTENT_TYPE_TEXT`].
+    ///
+    /// Prefer this over constructing [`ContentItem`] literally so the content
+    /// type is set consistently in one place.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            content_type: CONTENT_TYPE_TEXT,
+            text: text.into(),
+        }
+    }
 }
 
 // ── Prompts ─────────────────────────────────────────────────────────
@@ -454,5 +538,51 @@ mod tests {
     #[test]
     fn jsonrpc_version_constant() {
         assert_eq!(JSONRPC_VERSION, "2.0");
+    }
+
+    #[test]
+    fn method_consts_match_wire_strings() {
+        assert_eq!(METHOD_INITIALIZE, "initialize");
+        assert_eq!(METHOD_PING, "ping");
+        assert_eq!(METHOD_LOGGING_SET_LEVEL, "logging/setLevel");
+        assert_eq!(
+            METHOD_NOTIFICATIONS_INITIALIZED,
+            "notifications/initialized"
+        );
+        assert_eq!(METHOD_INITIALIZED, "initialized");
+        assert_eq!(METHOD_NOTIFICATIONS_CANCELLED, "notifications/cancelled");
+        assert_eq!(METHOD_TOOLS_LIST, "tools/list");
+        assert_eq!(METHOD_TOOLS_CALL, "tools/call");
+        assert_eq!(METHOD_RESOURCES_LIST, "resources/list");
+        assert_eq!(METHOD_RESOURCES_TEMPLATES_LIST, "resources/templates/list");
+        assert_eq!(METHOD_RESOURCES_READ, "resources/read");
+        assert_eq!(METHOD_PROMPTS_LIST, "prompts/list");
+        assert_eq!(METHOD_PROMPTS_GET, "prompts/get");
+        assert_eq!(METHOD_COMPLETION_COMPLETE, "completion/complete");
+        assert_eq!(METHOD_NOTIFICATIONS_PROGRESS, "notifications/progress");
+        assert_eq!(METHOD_NOTIFICATIONS_MESSAGE, "notifications/message");
+    }
+
+    #[test]
+    fn content_item_text_constructor_sets_type() {
+        let item = ContentItem::text("hello");
+        assert_eq!(item.content_type, CONTENT_TYPE_TEXT);
+        assert_eq!(item.content_type, "text");
+        assert_eq!(item.text, "hello");
+    }
+
+    #[test]
+    fn tool_call_result_text_returns_first_block() {
+        let result = ToolCallResult {
+            content: vec![ContentItem::text("first"), ContentItem::text("second")],
+            is_error: false,
+        };
+        assert_eq!(result.text(), Some("first"));
+
+        let empty = ToolCallResult {
+            content: vec![],
+            is_error: true,
+        };
+        assert_eq!(empty.text(), None);
     }
 }

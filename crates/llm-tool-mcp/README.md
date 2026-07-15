@@ -59,7 +59,38 @@ assert_eq!(resp["result"]["content"][0]["text"], "42");
 
 ## Transports: Stdio vs TCP vs Unix Sockets
 
-`McpServer` is builder-style and supports all common execution models out-of-the-box:
+`McpServer` is builder-style and supports all common execution models
+out-of-the-box. Two flavors are available:
+
+- **Blocking convenience** — `run_stdio`, `run_tcp`, `run_unix`, and the
+  transport-dispatching `serve(Transport)`. These build a Tokio runtime
+  internally, so a simple binary's `main` needs no `async`. They block until
+  the transport finishes.
+- **Async first-class** — `run_async`, `listen_tcp`, `listen_unix`. Use these
+  when you already have a Tokio runtime (as most real applications do) so the
+  server shares it instead of spawning a second one.
+
+```rust
+# use llm_tool::ToolRegistry;
+# use llm_tool_mcp::{McpServer, Transport};
+let server = McpServer::new("my-server", "0.1.0", ToolRegistry::new());
+
+// ── Blocking convenience (no async main required) ──
+
+// 1. Standard MCP desktop client transport (stdio subprocess):
+// server.run_stdio().expect("stdio server failed");
+
+// 2. TCP network server (localhost only):
+// server.run_tcp("127.0.0.1:3000").expect("tcp server failed");
+
+// 3. Unix Domain Socket (local IPC):
+// server.run_unix("/tmp/my-agent.sock").expect("unix server failed");
+
+// 4. Pick a transport at runtime (e.g. from CLI flags) and serve it:
+let transport = Transport::Tcp("0.0.0.0:8080".parse().unwrap());
+// server.serve(transport).expect("server failed");
+# let _ = transport;
+```
 
 ```rust
 # use llm_tool::ToolRegistry;
@@ -67,16 +98,9 @@ assert_eq!(resp["result"]["content"][0]["text"], "42");
 # tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
 let server = McpServer::new("my-server", "0.1.0", ToolRegistry::new());
 
-// 1. Standard MCP desktop client transport (stdio subprocess):
-// server.run_stdio().expect("stdio server failed");
+// ── Async first-class (inside an existing Tokio runtime) ──
 
-// 2. TCP network server (localhost only):
 // server.listen_tcp("127.0.0.1:3000").await.expect("tcp bind failed");
-
-// 3. TCP network server (external / container / docker):
-// server.listen_tcp("0.0.0.0:8080").await.expect("tcp bind failed");
-
-// 4. Unix Domain Socket (local IPC):
 // server.listen_unix("/tmp/my-agent.sock").await.expect("unix bind failed");
 # })
 ```

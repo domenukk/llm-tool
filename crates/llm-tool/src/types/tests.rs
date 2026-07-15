@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use super::{
-    Json, PromptOutput, ResourceOutput, ResourceOutputContent, SharedState, ToolContext, ToolError,
-    ToolOutput,
+    Json, PromptOutput, PromptRole, RegistryItem, ResourceOutput, ResourceOutputContent,
+    SharedState, ToolContext, ToolError, ToolOutput,
 };
 use crate::compat::{RwLock, write_lock};
 
@@ -171,6 +171,42 @@ fn tool_error_from_io_error() {
     assert_eq!(err.metadata()["error_kind"], serde_json::json!("NotFound"));
 }
 
+// ── ToolError::not_found / is_not_found ───────────────────────────────
+
+#[test]
+fn registry_item_display() {
+    assert_eq!(RegistryItem::Tool.to_string(), "tool");
+    assert_eq!(RegistryItem::Prompt.to_string(), "prompt");
+    assert_eq!(RegistryItem::Resource.to_string(), "resource");
+}
+
+#[test]
+fn not_found_sets_message_and_predicate() {
+    let err = ToolError::not_found(RegistryItem::Tool, "add_nummbers");
+    assert!(err.to_string().contains("add_nummbers"));
+    assert!(err.to_string().contains("tool"));
+    assert!(err.is_not_found());
+    assert_eq!(
+        err.metadata()[ToolError::ERROR_KIND_KEY],
+        serde_json::json!(ToolError::KIND_NOT_REGISTERED)
+    );
+}
+
+#[test]
+fn is_not_found_false_for_plain_error() {
+    // A generic execution error must not be mistaken for a registry miss.
+    assert!(!ToolError::new("handler blew up").is_not_found());
+}
+
+#[test]
+fn is_not_found_does_not_collide_with_io_not_found() {
+    // `From<io::Error>` also writes `error_kind`, but with the io kind's debug
+    // name ("NotFound"), which must NOT be treated as a registry miss.
+    let io = std::io::Error::new(std::io::ErrorKind::NotFound, "missing file");
+    let err: ToolError = io.into();
+    assert!(!err.is_not_found());
+}
+
 #[test]
 fn tool_error_from_serde_json_error() {
     let parse_err = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
@@ -199,14 +235,31 @@ fn tool_error_from_infallible_via_question_mark() {
 // ── PromptOutput / ResourceOutput ────────────────────────────────────
 
 #[test]
-fn prompt_output_from_str_and_string() {
+fn prompt_role_display_and_as_str() {
+    assert_eq!(PromptRole::User.as_str(), "user");
+    assert_eq!(PromptRole::Assistant.as_str(), "assistant");
+    assert_eq!(PromptRole::System.as_str(), "system");
+    assert_eq!(PromptRole::User.to_string(), "user");
+}
+
+#[test]
+fn prompt_output_constructors() {
     let p: PromptOutput = "hi".into();
     assert_eq!(p.messages.len(), 1);
-    assert_eq!(p.messages[0].role, "user");
+    assert_eq!(p.messages[0].role, PromptRole::User);
+    assert_eq!(p.messages[0].role.as_str(), "user");
     assert_eq!(p.messages[0].content, "hi");
 
     let p2: PromptOutput = String::from("yo").into();
     assert_eq!(p2.messages[0].content, "yo");
+
+    let a = PromptOutput::assistant("resp");
+    assert_eq!(a.messages[0].role, PromptRole::Assistant);
+    assert_eq!(a.messages[0].content, "resp");
+
+    let s = PromptOutput::system("instructions");
+    assert_eq!(s.messages[0].role, PromptRole::System);
+    assert_eq!(s.messages[0].content, "instructions");
 }
 
 #[test]

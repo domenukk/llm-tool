@@ -4,7 +4,7 @@ use alloc::{boxed::Box, format, vec::Vec};
 
 use super::{
     rust_tool::{ErasedTool, RustTool, definition_of},
-    types::{ToolContext, ToolDefinition, ToolError, ToolOutput},
+    types::{RegistryItem, ToolContext, ToolDefinition, ToolError, ToolOutput},
 };
 use crate::compat::HashMap;
 
@@ -153,51 +153,41 @@ impl ToolRegistry {
 
     /// Dispatch a tool call by name with raw JSON arguments and a context.
     ///
-    /// Returns `None` if no tool named `name` is registered; otherwise the
-    /// inner `Result` carries the tool output or an execution error. This
-    /// mirrors [`PromptRegistry::render`](crate::PromptRegistry::render) and
-    /// [`ResourceRegistry::read`](crate::ResourceRegistry::read).
-    ///
     /// # Errors
     ///
-    /// The inner `Result` is `Err` if argument deserialization fails or the
-    /// tool handler returns an error.
+    /// Returns [`ToolError::not_found`] if no tool named `name` is registered
+    /// (carrying `error_kind = "not_registered"` metadata), or the tool's own
+    /// error if argument deserialization fails or the handler returns an error.
     pub async fn dispatch(
         &self,
         name: &str,
         args: serde_json::Value,
         ctx: &ToolContext,
-    ) -> Option<Result<ToolOutput, ToolError>> {
-        let entry = self.tools.get(name)?;
-        Some(entry.erased.call_erased(args, ctx).await)
+    ) -> Result<ToolOutput, ToolError> {
+        let Some(entry) = self.tools.get(name) else {
+            return Err(ToolError::not_found(RegistryItem::Tool, name));
+        };
+        entry.erased.call_erased(args, ctx).await
     }
 
     /// Dispatch a tool call by name with a raw JSON string argument.
     ///
-    /// Returns `None` if no tool named `name` is registered; otherwise the
-    /// inner `Result` carries the tool output or an error.
-    ///
     /// # Errors
     ///
-    /// The inner `Result` is `Err` if JSON parsing fails or the handler fails.
+    /// Returns [`ToolError::not_found`] if no tool named `name` is registered,
+    /// or the tool's own error if JSON parsing or the handler fails.
     pub async fn dispatch_str(
         &self,
         name: &str,
         args_json: &str,
         ctx: &ToolContext,
-    ) -> Option<Result<ToolOutput, ToolError>> {
-        if !self.contains(name) {
-            return None;
-        }
-        let args = match serde_json::from_str(args_json) {
-            Ok(args) => args,
-            Err(e) => {
-                return Some(Err(ToolError::new(format!(
-                    "Malformed JSON arguments: {e}"
-                ))));
-            }
+    ) -> Result<ToolOutput, ToolError> {
+        let Some(entry) = self.tools.get(name) else {
+            return Err(ToolError::not_found(RegistryItem::Tool, name));
         };
-        self.dispatch(name, args, ctx).await
+        let args = serde_json::from_str(args_json)
+            .map_err(|e| ToolError::new(format!("Malformed JSON arguments: {e}")))?;
+        entry.erased.call_erased(args, ctx).await
     }
 
     /// Number of registered tools.

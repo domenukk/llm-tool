@@ -8,6 +8,7 @@ extern crate alloc;
 extern crate self as llm_tool;
 
 mod compat;
+mod private;
 mod registry;
 mod rust_prompt;
 mod rust_resource;
@@ -32,6 +33,8 @@ pub use md_tmpl;
 #[cfg(feature = "md-tmpl")]
 #[doc(hidden)]
 pub use md_tmpl_macros as __md_tmpl_macros;
+#[doc(hidden)]
+pub use private::__private;
 pub use registry::*;
 pub use rust_prompt::*;
 pub use rust_resource::*;

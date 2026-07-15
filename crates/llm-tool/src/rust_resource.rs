@@ -9,7 +9,7 @@ use alloc::{
 };
 use core::{future::Future, pin::Pin};
 
-use super::types::{ResourceDefinition, ResourceOutput, ToolError};
+use super::types::{RegistryItem, ResourceDefinition, ResourceOutput, ToolError};
 
 /// A custom resource or resource template implemented in Rust.
 pub trait RustResource: Send + Sync {
@@ -260,20 +260,18 @@ impl ResourceRegistry {
 
     /// Read the first resource whose URI template matches `uri`.
     ///
-    /// Returns `None` if no registered resource's template matches; otherwise
-    /// the inner `Result` carries the read output or a read error.
-    ///
     /// # Errors
     ///
-    /// The inner `Result` is `Err` if URI-variable deserialization or reading
-    /// fails.
-    pub async fn read(&self, uri: &str) -> Option<Result<ResourceOutput, ToolError>> {
+    /// Returns [`ToolError::not_found`] if no registered resource's template
+    /// matches `uri` (carrying `error_kind = "not_registered"` metadata), or a
+    /// read error if URI-variable deserialization or reading fails.
+    pub async fn read(&self, uri: &str) -> Result<ResourceOutput, ToolError> {
         for resource in &self.resources {
             if let Some(fut) = resource.erased.read_erased(uri) {
-                return Some(fut.await);
+                return fut.await;
             }
         }
-        None
+        Err(ToolError::not_found(RegistryItem::Resource, uri))
     }
 }
 

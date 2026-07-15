@@ -77,7 +77,6 @@ Supports both metric and imperial unit systems."
     let out = registry
         .dispatch("multiply", serde_json::json!({ "a": 6, "b": 7 }), &ctx)
         .await
-        .expect("tool registered")
         .expect("dispatch multiply failed");
     assert_eq!(out.content(), "42");
 
@@ -85,7 +84,6 @@ Supports both metric and imperial unit systems."
     let out = registry
         .dispatch("get_state_val", serde_json::json!({ "_dummy": true }), &ctx)
         .await
-        .expect("tool registered")
         .expect("dispatch get_state_val failed");
     assert_eq!(out.content(), "42");
 
@@ -98,7 +96,6 @@ Supports both metric and imperial unit systems."
                 &ctx,
             )
             .await
-            .expect("tool registered")
             .expect("dispatch static_tmpl_tool failed");
         assert_eq!(out.content(), "Weather for Paris");
     }

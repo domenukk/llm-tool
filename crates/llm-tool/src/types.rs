@@ -327,12 +327,12 @@ fn other_type_name(value: &serde_json::Value) -> &'static str {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolOutput {
-    /// The text content returned to the model.
-    content: String,
-    /// Structured metadata for hooks / policies / logging.
-    /// NOT sent to the model.
+    /// Text content sent to the LLM.
+    pub(crate) content: String,
+    /// Structured metadata attached to the output.
+    /// NOT sent to the LLM.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    metadata: HashMap<String, serde_json::Value>,
+    pub(crate) metadata: HashMap<String, serde_json::Value>,
 }
 
 impl ToolOutput {
@@ -596,7 +596,43 @@ impl<T: serde::Serialize> From<Json<T>> for ToolOutput {
     }
 }
 
+/// The category of a registered entity (tool, prompt, or resource).
+///
+/// Used by [`ToolError::not_found`] and the registry dispatchers to
+/// provide clear, type-safe identification of which kind of item was
+/// looked up.
+///
+/// # Example
+///
+/// ```
+/// use llm_tool::RegistryItem;
+///
+/// assert_eq!(RegistryItem::Tool.to_string(), "tool");
+/// assert_eq!(RegistryItem::Prompt.to_string(), "prompt");
+/// assert_eq!(RegistryItem::Resource.to_string(), "resource");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RegistryItem {
+    /// An executable tool.
+    Tool,
+    /// A prompt template.
+    Prompt,
+    /// A readable resource.
+    Resource,
+}
+
+impl core::fmt::Display for RegistryItem {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Tool => write!(f, "tool"),
+            Self::Prompt => write!(f, "prompt"),
+            Self::Resource => write!(f, "resource"),
+        }
+    }
+}
+
 /// An error returned from a tool execution.
+///
 /// The error message is sent back to the model as the tool's error response.
 /// Structured metadata can be attached for hooks and logging — it is **not**
 /// sent to the model.
@@ -653,6 +689,40 @@ impl ToolError {
         }
     }
 
+    /// Metadata key identifying the structured category of an error.
+    pub const ERROR_KIND_KEY: &'static str = "error_kind";
+    /// [`ERROR_KIND_KEY`](Self::ERROR_KIND_KEY) value used by
+    /// [`not_found`](Self::not_found) to mark a registry-lookup miss.
+    pub const KIND_NOT_REGISTERED: &'static str = "not_registered";
+
+    /// Construct an error for a registry lookup that found no entry named
+    /// `name` of the given [`RegistryItem`].
+    ///
+    /// The human-readable message is suitable to hand back to the model so it
+    /// can self-correct (e.g. retry with a valid name). An
+    /// [`ERROR_KIND_KEY`](Self::ERROR_KIND_KEY) metadata field is attached —
+    /// never sent to the model — so hosts can still distinguish a routing miss
+    /// from a genuine execution failure for telemetry or policy decisions.
+    /// Prefer [`is_not_found`](Self::is_not_found) over inspecting the metadata
+    /// directly.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use llm_tool::{RegistryItem, ToolError};
+    ///
+    /// let err = ToolError::not_found(RegistryItem::Tool, "add_nummbers");
+    /// assert!(err.to_string().contains("add_nummbers"));
+    /// assert!(err.is_not_found());
+    /// ```
+    #[must_use]
+    pub fn not_found(kind: RegistryItem, name: &str) -> Self {
+        Self::new(format!("no {kind} named '{name}' is registered")).with_meta(
+            Self::ERROR_KIND_KEY,
+            serde_json::json!(Self::KIND_NOT_REGISTERED),
+        )
+    }
+
     /// Attach a single metadata key-value pair. Chainable.
     ///
     /// For attaching multiple fields at once, prefer
@@ -696,6 +766,29 @@ impl ToolError {
     pub fn metadata(&self) -> &HashMap<String, serde_json::Value> {
         &self.metadata
     }
+
+    /// Whether this error denotes a registry-lookup miss, i.e. it was produced
+    /// by [`not_found`](Self::not_found).
+    ///
+    /// Lets hosts branch on "the model asked for something that isn't
+    /// registered" versus "a registered handler failed" without matching on
+    /// message strings.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use llm_tool::{RegistryItem, ToolError};
+    ///
+    /// assert!(ToolError::not_found(RegistryItem::Prompt, "summarize").is_not_found());
+    /// assert!(!ToolError::new("handler blew up").is_not_found());
+    /// ```
+    #[must_use]
+    pub fn is_not_found(&self) -> bool {
+        self.metadata
+            .get(Self::ERROR_KIND_KEY)
+            .and_then(serde_json::Value::as_str)
+            == Some(Self::KIND_NOT_REGISTERED)
+    }
 }
 
 impl core::fmt::Display for ToolError {
@@ -721,8 +814,10 @@ impl From<&str> for ToolError {
 #[cfg(feature = "std")]
 impl From<std::io::Error> for ToolError {
     fn from(e: std::io::Error) -> Self {
-        Self::new(e.to_string())
-            .with_meta("error_kind", serde_json::json!(format!("{:?}", e.kind())))
+        Self::new(e.to_string()).with_meta(
+            Self::ERROR_KIND_KEY,
+            serde_json::json!(format!("{:?}", e.kind())),
+        )
     }
 }
 
@@ -742,151 +837,6 @@ impl From<Box<dyn core::error::Error + Send + Sync>> for ToolError {
 impl From<core::convert::Infallible> for ToolError {
     fn from(never: core::convert::Infallible) -> Self {
         match never {}
-    }
-}
-
-/// Compile-time dispatch for converting tool return values into [`ToolOutput`].
-///
-/// Uses the "autoref specialization" pattern: the compiler checks inherent
-/// methods on `Wrap<T>` first (for `String`, `ToolOutput`, `Json<T>`),
-/// then falls back to the `SerializeFallback` trait blanket impl for
-/// `T: Serialize`. This eliminates all proc-macro type-name matching.
-///
-/// **Not public API** — used only by the `#[llm_tool]` proc macro.
-#[doc(hidden)]
-pub mod __private {
-    // Re-exports for generated code to work in no_std contexts.
-    #[cfg(not(feature = "std"))]
-    pub use alloc::borrow::Cow;
-    #[cfg(not(feature = "std"))]
-    use alloc::{
-        format,
-        string::{String, ToString},
-    };
-    pub use core::{convert::Into, result::Result};
-    #[cfg(feature = "std")]
-    pub use std::borrow::Cow;
-    /// Lazy initializer — [`std::sync::LazyLock`] under `std`,
-    /// [`spin::Lazy`] under `no_std`.
-    #[cfg(feature = "std")]
-    pub use std::sync::LazyLock as Lazy;
-
-    /// Lazy initializer — [`std::sync::LazyLock`] under `std`,
-    /// [`spin::LazyLock`] under `no_std`.
-    #[cfg(not(feature = "std"))]
-    pub use spin::LazyLock as Lazy;
-
-    use super::{Json, ToolError, ToolOutput};
-
-    /// Report a runtime tool-description template render failure.
-    ///
-    /// Called by `#[llm_tool(..., context = ...)]`-generated `description()`
-    /// code: on a render error the tool falls back to its static description
-    /// body rather than panicking. Logs to stderr under `std`; a no-op under
-    /// `no_std` (where no logger is available).
-    #[cfg(feature = "std")]
-    pub fn log_description_render_error(tool: &str, err: &dyn core::fmt::Display) {
-        eprintln!(
-            "llm-tool: tool `{tool}` description template failed to render ({err}); \
-             falling back to static description"
-        );
-    }
-
-    /// `no_std` no-op counterpart of the `std` logger above.
-    #[cfg(not(feature = "std"))]
-    #[inline]
-    pub fn log_description_render_error(_tool: &str, _err: &dyn core::fmt::Display) {}
-
-    /// Wrapper enabling compile-time method dispatch for tool output conversion.
-    pub struct Wrap<T>(pub T);
-
-    // ── Inherent methods (highest priority in method resolution) ──
-
-    impl Wrap<ToolOutput> {
-        /// `ToolOutput` → identity pass-through.
-        pub fn __convert(self) -> Result<ToolOutput, ToolError> {
-            Ok(self.0)
-        }
-    }
-
-    impl Wrap<String> {
-        /// `String` → wrap as plain text (no JSON encoding).
-        pub fn __convert(self) -> Result<ToolOutput, ToolError> {
-            Ok(ToolOutput::new(self.0))
-        }
-        pub fn __convert_prompt(self) -> Result<super::PromptOutput, ToolError> {
-            Ok(super::PromptOutput::user(self.0))
-        }
-        pub fn __convert_resource(
-            self,
-            uri: &str,
-            mime_type: Option<&str>,
-        ) -> Result<super::ResourceOutput, ToolError> {
-            Ok(super::ResourceOutput::text(uri, mime_type, self.0))
-        }
-    }
-
-    impl Wrap<&str> {
-        pub fn __convert_prompt(self) -> Result<super::PromptOutput, ToolError> {
-            Ok(super::PromptOutput::user(self.0))
-        }
-        pub fn __convert_resource(
-            self,
-            uri: &str,
-            mime_type: Option<&str>,
-        ) -> Result<super::ResourceOutput, ToolError> {
-            Ok(super::ResourceOutput::text(uri, mime_type, self.0))
-        }
-    }
-
-    impl Wrap<super::PromptOutput> {
-        pub fn __convert_prompt(self) -> Result<super::PromptOutput, ToolError> {
-            Ok(self.0)
-        }
-    }
-
-    impl Wrap<super::ResourceOutput> {
-        pub fn __convert_resource(
-            self,
-            _uri: &str,
-            _mime_type: Option<&str>,
-        ) -> Result<super::ResourceOutput, ToolError> {
-            Ok(self.0)
-        }
-    }
-
-    impl<T: serde::Serialize> Wrap<Json<T>> {
-        /// `Json<T>` → serialize to JSON string.
-        pub fn __convert(self) -> Result<ToolOutput, ToolError> {
-            Ok((self.0).into())
-        }
-    }
-
-    // ── Trait fallback (lower priority in method resolution) ──
-
-    /// Fallback conversion for any `T: Serialize` not covered by inherent methods.
-    ///
-    /// The compiler checks inherent methods first, so `String` and `ToolOutput`
-    /// use their inherent impls. Everything else falls through to this trait,
-    /// which serializes the value to JSON.
-    pub trait SerializeFallback {
-        /// Serialize `self` to JSON and wrap as [`ToolOutput`].
-        fn __convert(self) -> Result<ToolOutput, ToolError>;
-    }
-
-    impl<T: serde::Serialize> SerializeFallback for Wrap<T> {
-        fn __convert(self) -> Result<ToolOutput, ToolError> {
-            let json_value = serde_json::to_value(&self.0)
-                .map_err(|e| ToolError::new(format!("serialization failed: {e}")))?;
-            let content = json_value.to_string();
-            match json_value {
-                serde_json::Value::Object(map) => Ok(ToolOutput {
-                    content,
-                    metadata: map.into_iter().collect(),
-                }),
-                _ => Ok(ToolOutput::new(content)),
-            }
-        }
     }
 }
 
@@ -933,13 +883,69 @@ pub struct PromptArgumentDefinition {
     pub required: bool,
 }
 
+/// The role of a message in a prompt output (`user`, `assistant`, or `system`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptRole {
+    /// User message.
+    User,
+    /// Assistant message.
+    Assistant,
+    /// System message.
+    System,
+}
+
+impl PromptRole {
+    /// The string slice representation of the role (`"user"`, `"assistant"`, or `"system"`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
+        }
+    }
+}
+
+impl core::fmt::Display for PromptRole {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A rendered message inside a prompt output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptOutputMessage {
-    /// Role (`"user"` or `"assistant"`).
-    pub role: alloc::borrow::Cow<'static, str>,
+    /// Message role.
+    pub role: PromptRole,
     /// Text content.
     pub content: String,
+}
+
+impl PromptOutputMessage {
+    /// Create a user role message.
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: PromptRole::User,
+            content: content.into(),
+        }
+    }
+
+    /// Create an assistant role message.
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: PromptRole::Assistant,
+            content: content.into(),
+        }
+    }
+
+    /// Create a system role message.
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: PromptRole::System,
+            content: content.into(),
+        }
+    }
 }
 
 /// The output returned by rendering a prompt template.
@@ -953,10 +959,21 @@ impl PromptOutput {
     /// Create a new prompt output with a single user message.
     pub fn user(content: impl Into<String>) -> Self {
         Self {
-            messages: alloc::vec![PromptOutputMessage {
-                role: alloc::borrow::Cow::Borrowed("user"),
-                content: content.into(),
-            }],
+            messages: alloc::vec![PromptOutputMessage::user(content)],
+        }
+    }
+
+    /// Create a new prompt output with a single assistant message.
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            messages: alloc::vec![PromptOutputMessage::assistant(content)],
+        }
+    }
+
+    /// Create a new prompt output with a single system message.
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            messages: alloc::vec![PromptOutputMessage::system(content)],
         }
     }
 }

@@ -23,8 +23,8 @@ JSON Schemas, automatic deserialization, and instant
 
 ```toml
 [dependencies]
-llm-tool = "0.7"
-llm-tool-mcp = "0.7" # Optional: for MCP server support
+llm-tool = "0.8"
+llm-tool-mcp = "0.8" # Optional: for MCP server support
 ```
 
 ### Define a Tool
@@ -59,7 +59,7 @@ let ctx = llm_tool::ToolContext::new();
 let output = registry
     .dispatch("get_weather", serde_json::json!({"location": "London"}), &ctx)
     .await
-    .expect("tool is registered") // `dispatch` returns `None` for unknown tools
+    // `dispatch` returns `Err(ToolError::not_found(..))` for unknown tools.
     .expect("dispatch succeeds");
 # let _ = output;
 # });

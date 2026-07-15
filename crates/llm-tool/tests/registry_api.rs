@@ -2,13 +2,14 @@
 //!
 //! These lock down the public lookup surface shared by [`ToolRegistry`],
 //! [`PromptRegistry`], and [`ResourceRegistry`]: `contains`, `definition`,
-//! `iter`/`IntoIterator`, and the `Option<Result<..>>` dispatch/render/read
-//! shape where `None` means "not found" and the inner `Result` carries the
+//! `iter`/`IntoIterator`, and the flat `Result<.., ToolError>` dispatch/render/read
+//! shape where a missing entry is `Err(ToolError::not_found(..))` (carrying
+//! `error_kind == "not_registered"` metadata) and a present entry carries the
 //! execution outcome.
 
 use llm_tool::{
-    PromptRegistry, ResourceRegistry, ToolContext, ToolError, ToolRegistry, llm_prompt,
-    llm_resource, llm_tool,
+    PromptRegistry, RegistryItem, ResourceRegistry, ToolContext, ToolError, ToolRegistry,
+    llm_prompt, llm_resource, llm_tool,
 };
 
 // ── Fixtures ─────────────────────────────────────────────────────────
@@ -51,6 +52,15 @@ fn blob(key: String) -> Result<String, ToolError> {
     Ok(format!("value for {key}"))
 }
 
+// ── RegistryItem ─────────────────────────────────────────────────────
+
+#[test]
+fn registry_item_enum_public_api() {
+    assert_eq!(RegistryItem::Tool.to_string(), "tool");
+    assert_eq!(RegistryItem::Prompt.to_string(), "prompt");
+    assert_eq!(RegistryItem::Resource.to_string(), "resource");
+}
+
 // ── ToolRegistry ─────────────────────────────────────────────────────
 
 #[test]
@@ -88,23 +98,24 @@ fn tool_registry_iter_matches_definitions() {
 }
 
 #[tokio::test]
-async fn tool_registry_dispatch_unknown_is_none() {
+async fn tool_registry_dispatch_unknown_is_not_found() {
     let reg = ToolRegistry::new().with_tool(Echo);
     let ctx = ToolContext::new();
 
     let out = reg
         .dispatch("echo", serde_json::json!({"text": "hi"}), &ctx)
         .await
-        .expect("known tool yields Some")
         .expect("dispatch succeeds");
     assert_eq!(out.content(), "hi");
 
-    // Unknown tool → None, never a spurious Err.
-    assert!(
-        reg.dispatch("nope", serde_json::json!({}), &ctx)
-            .await
-            .is_none()
-    );
+    // Unknown tool → not_found Err, never a spurious execution error.
+    let err = reg
+        .dispatch("nope", serde_json::json!({}), &ctx)
+        .await
+        .expect_err("unknown tool yields not_found error");
+    assert!(err.is_not_found());
+    assert_eq!(err.metadata()["error_kind"], "not_registered");
+    assert!(err.to_string().contains("nope"), "unexpected error: {err}");
 }
 
 #[test]
@@ -158,7 +169,6 @@ async fn prompt_registry_render_known_and_unknown() {
     let out = reg
         .render("greet", serde_json::json!({"who": "World"}))
         .await
-        .expect("known prompt yields Some")
         .expect("render succeeds");
     assert!(
         out.messages[0].content.contains("Hello, World!"),
@@ -166,8 +176,17 @@ async fn prompt_registry_render_known_and_unknown() {
         out.messages
     );
 
-    // Unknown prompt → None.
-    assert!(reg.render("missing", serde_json::json!({})).await.is_none());
+    // Unknown prompt → not_found Err.
+    let err = reg
+        .render("missing", serde_json::json!({}))
+        .await
+        .expect_err("unknown prompt yields not_found error");
+    assert!(err.is_not_found());
+    assert_eq!(err.metadata()["error_kind"], "not_registered");
+    assert!(
+        err.to_string().contains("missing"),
+        "unexpected error: {err}"
+    );
 }
 
 // ── ResourceRegistry ─────────────────────────────────────────────────
@@ -214,7 +233,6 @@ async fn resource_registry_read_matching_and_non_matching() {
     let out = reg
         .read("file:///data/hello.txt")
         .await
-        .expect("matching URI yields Some")
         .expect("read succeeds");
     // The read output should carry the resource contents for the extracted key.
     let json = serde_json::to_value(&out).expect("serialize resource output");
@@ -226,6 +244,13 @@ async fn resource_registry_read_matching_and_non_matching() {
         "unexpected resource content: {json}"
     );
 
-    // A URI that matches no template → None.
-    assert!(reg.read("file:///nope/hello.json").await.is_none());
+    // A URI that matches no template → not_found Err.
+    let uri = "file:///nope/hello.json";
+    let err = reg
+        .read(uri)
+        .await
+        .expect_err("non-matching URI yields not_found error");
+    assert!(err.is_not_found());
+    assert_eq!(err.metadata()["error_kind"], "not_registered");
+    assert!(err.to_string().contains(uri), "unexpected error: {err}");
 }

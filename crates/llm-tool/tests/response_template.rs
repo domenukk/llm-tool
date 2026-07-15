@@ -45,7 +45,6 @@ async fn response_template_renders_struct_fields() {
             &ctx,
         )
         .await
-        .expect("tool registered")
         .unwrap();
 
     let content = output.content();
@@ -76,7 +75,6 @@ async fn response_template_attaches_metadata() {
             &ctx,
         )
         .await
-        .expect("tool registered")
         .unwrap();
 
     let meta = output.metadata();
@@ -140,7 +138,6 @@ async fn test_inline_response_template() {
             &ctx,
         )
         .await
-        .expect("tool registered")
         .unwrap();
 
     assert_eq!(
@@ -197,7 +194,6 @@ async fn test_search_response_template() {
             &ctx,
         )
         .await
-        .expect("tool registered")
         .unwrap();
     assert!(output.content().contains("Search results for \"language\""));
 }
@@ -231,7 +227,6 @@ async fn response_file_with_env_renders_env_var() {
             &ctx,
         )
         .await
-        .expect("tool registered")
         .unwrap();
 
     let content = output.content();
@@ -272,7 +267,6 @@ async fn response_file_with_env_attaches_metadata() {
             &ctx,
         )
         .await
-        .expect("tool registered")
         .unwrap();
 
     let meta = output.metadata();
@@ -324,7 +318,6 @@ async fn inline_response_with_env_renders_env_var() {
             &ctx,
         )
         .await
-        .expect("tool registered")
         .unwrap();
 
     let content = output.content();
@@ -397,7 +390,6 @@ async fn description_plus_response_output_from_template() {
             &ctx,
         )
         .await
-        .expect("tool registered")
         .unwrap();
 
     let content = output.content();
@@ -466,7 +458,6 @@ async fn description_file_plus_response_output_from_response_file() {
             &ctx,
         )
         .await
-        .expect("tool registered")
         .unwrap();
 
     let content = output.content();
@@ -500,7 +491,6 @@ async fn description_file_plus_response_attaches_metadata() {
             &ctx,
         )
         .await
-        .expect("tool registered")
         .unwrap();
 
     let meta = output.metadata();
@@ -532,7 +522,6 @@ async fn env_tool_dispatch_returns_correct_output() {
             &ctx,
         )
         .await
-        .expect("tool registered")
         .unwrap();
 
     assert_eq!(
@@ -581,7 +570,6 @@ async fn multi_env_tool_dispatch_executes_correctly() {
             &ctx,
         )
         .await
-        .expect("tool registered")
         .unwrap();
 
     assert_eq!(output.content(), "multi-env executed: world");

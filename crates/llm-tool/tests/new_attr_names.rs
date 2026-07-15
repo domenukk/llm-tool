@@ -119,7 +119,6 @@ async fn response_file_renders_struct_fields() {
             &ctx,
         )
         .await
-        .expect("tool registered")
         .expect("dispatch should succeed");
 
     assert!(
@@ -141,7 +140,6 @@ async fn response_file_attaches_metadata() {
             &ctx,
         )
         .await
-        .expect("tool registered")
         .expect("dispatch should succeed");
 
     assert!(

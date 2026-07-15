@@ -5,6 +5,7 @@ pub use llm_tool::*;
 pub use super::*;
 
 mod basic;
+mod blocking_and_dispatch;
 mod prompts_resources;
 mod rmcp_integration;
 

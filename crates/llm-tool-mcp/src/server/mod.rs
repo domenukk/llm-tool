@@ -35,6 +35,39 @@ use crate::protocol::{
     ToolCallParams, ToolCallResult, ToolCapabilities, ToolsListResult,
 };
 
+/// A transport for the blocking [`McpServer::serve`] entry point.
+///
+/// Lets a binary select stdio, TCP, or a Unix domain socket at runtime (e.g.
+/// from CLI args) and hand it to [`serve`](McpServer::serve) in a single call,
+/// instead of matching over transports and calling the individual blocking
+/// runners itself.
+///
+/// This drives the **blocking** convenience runners. Tokio applications should
+/// prefer the async [`run_async`](McpServer::run_async),
+/// [`listen_tcp`](McpServer::listen_tcp), and
+/// [`listen_unix`](McpServer::listen_unix) methods directly.
+///
+/// # Example
+///
+/// ```rust
+/// use llm_tool_mcp::Transport;
+///
+/// let tcp = Transport::Tcp("127.0.0.1:3000".parse().unwrap());
+/// // A binary might build one of these from `--stdio` / `--tcp <addr>` flags,
+/// // then call `server.serve(transport)`.
+/// assert!(matches!(tcp, Transport::Tcp(_)));
+/// ```
+#[derive(Debug, Clone)]
+pub enum Transport {
+    /// Serve on stdin/stdout — the standard MCP subprocess transport.
+    Stdio,
+    /// Serve on the given TCP socket address.
+    Tcp(std::net::SocketAddr),
+    /// Serve on a Unix domain socket at the given filesystem path.
+    #[cfg(unix)]
+    Unix(std::path::PathBuf),
+}
+
 /// An MCP server that serves tools from a [`ToolRegistry`] over JSON-RPC.
 ///
 /// # Example
@@ -216,10 +249,15 @@ impl McpServer {
 
     // ── Public entry points ─────────────────────────────────────────
 
-    /// Run the server on stdin/stdout.
+    /// Run the server on stdin/stdout, blocking until stdin is closed.
+    ///
+    /// This is a blocking convenience for the common "just serve" binary: it
+    /// builds a tokio runtime internally so `main` needs no `async`. If you are
+    /// already inside a tokio application, drive the server with the async
+    /// [`run_async`](Self::run_async) instead.
     ///
     /// Reads JSON-RPC lines from stdin, dispatches them, and writes
-    /// responses to stdout.  Blocks until stdin is closed.
+    /// responses to stdout.
     ///
     /// # Panics
     ///
@@ -231,6 +269,104 @@ impl McpServer {
     /// Returns `Err` if the tokio runtime cannot be created.
     pub fn run_stdio(&self) -> io::Result<()> {
         self.run(io::stdin().lock(), io::stdout().lock())
+    }
+
+    /// Serve MCP over TCP, blocking forever (until a fatal accept error).
+    ///
+    /// Blocking convenience mirroring [`run_stdio`](Self::run_stdio) for the
+    /// TCP transport: it builds a **multi-threaded** tokio runtime internally
+    /// (each accepted connection is served on its own task) and blocks on
+    /// [`listen_tcp`](Self::listen_tcp). Use it for simple standalone binaries
+    /// that only need to serve TCP.
+    ///
+    /// For tokio applications, prefer the async [`listen_tcp`](Self::listen_tcp)
+    /// (or [`run_tcp_listener`](Self::run_tcp_listener)) so the server shares
+    /// your existing runtime rather than spinning up a second one.
+    ///
+    /// - Localhost only: `server.run_tcp("127.0.0.1:3000")?`
+    /// - External / Docker: `server.run_tcp("0.0.0.0:8080")?`
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from within an existing tokio runtime; use
+    /// [`listen_tcp`](Self::listen_tcp) in that case.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the tokio runtime cannot be created or binding to the
+    /// TCP address fails.
+    pub fn run_tcp(&self, addr: impl tokio::net::ToSocketAddrs) -> io::Result<()> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(self.listen_tcp(addr))
+    }
+
+    /// Serve MCP over a Unix domain socket, blocking forever (until a fatal
+    /// accept error).
+    ///
+    /// Blocking convenience mirroring [`run_stdio`](Self::run_stdio) for the
+    /// Unix-socket transport: it builds a **multi-threaded** tokio runtime
+    /// internally (each accepted connection is served on its own task) and
+    /// blocks on [`listen_unix`](Self::listen_unix). Use it for simple
+    /// standalone IPC binaries.
+    ///
+    /// For tokio applications, prefer the async
+    /// [`listen_unix`](Self::listen_unix) so the server shares your existing
+    /// runtime.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from within an existing tokio runtime; use
+    /// [`listen_unix`](Self::listen_unix) in that case.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the tokio runtime cannot be created or binding to the
+    /// domain socket path fails.
+    #[cfg(unix)]
+    pub fn run_unix(&self, path: impl AsRef<std::path::Path>) -> io::Result<()> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(self.listen_unix(path))
+    }
+
+    /// Serve MCP over the given [`Transport`], blocking until it finishes.
+    ///
+    /// A one-call blocking dispatcher that collapses a stdio-vs-TCP-vs-Unix
+    /// selection into a single line — ideal for a binary that picks its
+    /// transport from CLI args or config:
+    ///
+    /// ```no_run
+    /// # use llm_tool::ToolRegistry;
+    /// # use llm_tool_mcp::{McpServer, Transport};
+    /// let server = McpServer::new("srv", "0.1.0", ToolRegistry::new());
+    /// let transport = Transport::Tcp("127.0.0.1:3000".parse().unwrap());
+    /// server.serve(transport).expect("server failed");
+    /// ```
+    ///
+    /// This is a blocking convenience built on [`run_stdio`](Self::run_stdio),
+    /// [`run_tcp`](Self::run_tcp) and [`run_unix`](Self::run_unix). Tokio
+    /// applications should instead drive the async
+    /// [`run_async`](Self::run_async) / [`listen_tcp`](Self::listen_tcp) /
+    /// [`listen_unix`](Self::listen_unix) methods directly.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from within an existing tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the tokio runtime cannot be created or the underlying
+    /// transport fails to bind / serve.
+    pub fn serve(&self, transport: Transport) -> io::Result<()> {
+        match transport {
+            Transport::Stdio => self.run_stdio(),
+            Transport::Tcp(addr) => self.run_tcp(addr),
+            #[cfg(unix)]
+            Transport::Unix(path) => self.run_unix(path),
+        }
     }
 
     /// Run the server on arbitrary reader/writer streams.
@@ -594,20 +730,23 @@ impl McpServer {
         let id = request.id.clone();
 
         match request.method.as_str() {
-            "initialize" => self.handle_initialize(id, request.params.as_ref()),
-            "ping" | "logging/setLevel" => JsonRpcResponse::success(id, protocol::EmptyResult {}),
-            // MCP clients may send `initialized` as a notification — acknowledge it.
-            "notifications/initialized" | "initialized" => {
+            protocol::METHOD_INITIALIZE => self.handle_initialize(id, request.params.as_ref()),
+            // No-op acknowledgements: liveness/log-level, plus the `initialized`
+            // notification some clients send (both namespaced and bare forms).
+            protocol::METHOD_PING
+            | protocol::METHOD_LOGGING_SET_LEVEL
+            | protocol::METHOD_NOTIFICATIONS_INITIALIZED
+            | protocol::METHOD_INITIALIZED => {
                 JsonRpcResponse::success(id, protocol::EmptyResult {})
             }
             // Cancellation notifications — acknowledge silently.
-            "notifications/cancelled" => {
+            protocol::METHOD_NOTIFICATIONS_CANCELLED => {
                 debug!("received cancellation notification");
                 JsonRpcResponse::success(id, protocol::EmptyResult {})
             }
-            "tools/list" => self.handle_tools_list(id),
-            "tools/call" => self.handle_tools_call(id, request.params).await,
-            "resources/list" => {
+            protocol::METHOD_TOOLS_LIST => self.handle_tools_list(id),
+            protocol::METHOD_TOOLS_CALL => self.handle_tools_call(id, request.params).await,
+            protocol::METHOD_RESOURCES_LIST => {
                 let list = protocol::ResourcesListResult {
                     resources: self
                         .resources
@@ -623,24 +762,24 @@ impl McpServer {
                 };
                 JsonRpcResponse::success(id, list)
             }
-            "resources/templates/list" => {
+            protocol::METHOD_RESOURCES_TEMPLATES_LIST => {
                 let list = protocol::ResourceTemplatesListResult {
                     resource_templates: self.resources.definitions(),
                 };
                 JsonRpcResponse::success(id, list)
             }
-            "resources/read" => self.handle_resources_read(id, request.params).await,
-            "prompts/list" => {
+            protocol::METHOD_RESOURCES_READ => self.handle_resources_read(id, request.params).await,
+            protocol::METHOD_PROMPTS_LIST => {
                 let list = protocol::PromptsListResult {
                     prompts: self.prompts.definitions(),
                 };
                 JsonRpcResponse::success(id, list)
             }
-            "prompts/get" => self.handle_prompts_get(id, request.params).await,
-            "completion/complete" => {
+            protocol::METHOD_PROMPTS_GET => self.handle_prompts_get(id, request.params).await,
+            protocol::METHOD_COMPLETION_COMPLETE => {
                 JsonRpcResponse::success(id, protocol::CompletionCompleteResult::default())
             }
-            "notifications/progress" | "notifications/message" => {
+            protocol::METHOD_NOTIFICATIONS_PROGRESS | protocol::METHOD_NOTIFICATIONS_MESSAGE => {
                 debug!("received progress/message notification");
                 JsonRpcResponse::success(id, protocol::EmptyResult {})
             }
@@ -702,6 +841,72 @@ impl McpServer {
         }
     }
 
+    /// Dispatch a `tools/call` programmatically and return the typed result.
+    ///
+    /// This runs the tool through the **exact same** code path as the JSON-RPC
+    /// wire handler (`tools/call`), so the not-found and error mapping is
+    /// identical: an unknown tool or a failing handler both yield a
+    /// [`ToolCallResult`] with [`is_error`](ToolCallResult::is_error) set to
+    /// `true` and the message surfaced in the content — never a panic or a
+    /// JSON-RPC-level error.
+    ///
+    /// Prefer this over hand-building JSON-RPC frames when calling a tool from
+    /// Rust (e.g. in tests): you get the typed [`ToolCallResult`] directly and
+    /// can read [`ToolCallResult::text`] instead of indexing into JSON.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use llm_tool::{ToolContext, ToolError, ToolRegistry, llm_tool};
+    /// # use llm_tool_mcp::McpServer;
+    /// /// Adds two numbers.
+    /// #[llm_tool]
+    /// fn add(
+    ///     /// First operand.
+    ///     a: i64,
+    ///     /// Second operand.
+    ///     b: i64,
+    /// ) -> Result<String, ToolError> {
+    ///     Ok(format!("{}", a + b))
+    /// }
+    ///
+    /// # tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+    /// let server = McpServer::new("srv", "0.1.0", ToolRegistry::new().with_tool(Add));
+    /// let result = server.dispatch_tool("add", serde_json::json!({"a": 2, "b": 3})).await;
+    /// assert!(!result.is_error);
+    /// assert_eq!(result.text(), Some("5"));
+    /// # })
+    /// ```
+    pub async fn dispatch_tool(&self, name: &str, arguments: serde_json::Value) -> ToolCallResult {
+        self.call_tool(name, arguments).await
+    }
+
+    /// Shared tool-call core: dispatch against the registry and map the outcome
+    /// to a [`ToolCallResult`].
+    ///
+    /// Both the wire handler ([`handle_tools_call`](Self::handle_tools_call))
+    /// and the programmatic entry point ([`dispatch_tool`](Self::dispatch_tool))
+    /// funnel through here so the success / error / not-found mapping lives in
+    /// exactly one place.
+    ///
+    /// Per the MCP spec, tool execution errors — and unknown tools — are
+    /// reported as a result with `isError=true`, not as JSON-RPC errors, so the
+    /// model can recover within the turn. JSON-RPC errors are reserved for
+    /// protocol-level failures (handled by the caller).
+    async fn call_tool(&self, name: &str, arguments: serde_json::Value) -> ToolCallResult {
+        debug!(tool = %name, "tools/call");
+        match self.registry.dispatch(name, arguments, &self.context).await {
+            Ok(output) => ToolCallResult {
+                content: vec![ContentItem::text(output.into_content())],
+                is_error: false,
+            },
+            Err(e) => ToolCallResult {
+                content: vec![ContentItem::text(e.to_string())],
+                is_error: true,
+            },
+        }
+    }
+
     async fn handle_tools_call(
         &self,
         id: Option<serde_json::Value>,
@@ -726,49 +931,10 @@ impl McpServer {
             }
         };
 
-        debug!(tool = %call_params.name, "tools/call");
-
-        match self
-            .registry
-            .dispatch(&call_params.name, call_params.arguments, &self.context)
-            .await
-        {
-            Some(Ok(output)) => JsonRpcResponse::success(
-                id,
-                ToolCallResult {
-                    content: vec![ContentItem {
-                        content_type: "text",
-                        text: output.content().to_owned(),
-                    }],
-                    is_error: false,
-                },
-            ),
-            // MCP spec: tool execution errors are returned as success with
-            // isError=true, not as JSON-RPC errors.  JSON-RPC errors are
-            // reserved for protocol-level failures.
-            Some(Err(e)) => JsonRpcResponse::success(
-                id,
-                ToolCallResult {
-                    content: vec![ContentItem {
-                        content_type: "text",
-                        text: e.to_string(),
-                    }],
-                    is_error: true,
-                },
-            ),
-            // Unknown tool: also surfaced as an isError tool result rather than
-            // a protocol error, so the model can recover within the turn.
-            None => JsonRpcResponse::success(
-                id,
-                ToolCallResult {
-                    content: vec![ContentItem {
-                        content_type: "text",
-                        text: format!("Unknown tool: {}", call_params.name),
-                    }],
-                    is_error: true,
-                },
-            ),
-        }
+        let result = self
+            .call_tool(&call_params.name, call_params.arguments)
+            .await;
+        JsonRpcResponse::success(id, result)
     }
 
     async fn handle_prompts_get(
@@ -793,24 +959,17 @@ impl McpServer {
                 );
             }
         };
-        let Some(prompt_result) = self
+        match self
             .prompts
             .render(&get_params.name, get_params.arguments)
             .await
-        else {
-            return JsonRpcResponse::error(
-                id,
-                protocol::INVALID_PARAMS,
-                format!("unknown prompt: {}", get_params.name),
-            );
-        };
-        match prompt_result {
+        {
             Ok(output) => {
                 let messages = output
                     .messages
                     .into_iter()
                     .map(|m| protocol::PromptMessage {
-                        role: m.role.into_owned(),
+                        role: m.role.to_string(),
                         content: protocol::PromptMessageContent::Text { text: m.content },
                     })
                     .collect();
@@ -846,14 +1005,7 @@ impl McpServer {
                 );
             }
         };
-        let Some(resource_result) = self.resources.read(&read_params.uri).await else {
-            return JsonRpcResponse::error(
-                id,
-                protocol::INVALID_PARAMS,
-                format!("resource not found matching URI: {}", read_params.uri),
-            );
-        };
-        match resource_result {
+        match self.resources.read(&read_params.uri).await {
             Ok(output) => {
                 let res = protocol::ReadResourceResult {
                     contents: output.contents,

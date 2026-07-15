@@ -25,10 +25,7 @@ async fn tool_macro_async_fn_dispatches_with_await() {
             &test_ctx(),
         )
         .await;
-    assert_eq!(
-        result.expect("tool registered").unwrap().content(),
-        "echo: hello async"
-    );
+    assert_eq!(result.unwrap().content(), "echo: hello async");
 }
 
 /// Async tool that reads a file via `tokio::fs`, proving real I/O works.
@@ -58,10 +55,7 @@ async fn tool_macro_async_fn_reads_file() {
             &test_ctx(),
         )
         .await;
-    assert_eq!(
-        result.expect("tool registered").unwrap().content(),
-        "async macro content"
-    );
+    assert_eq!(result.unwrap().content(), "async macro content");
 }
 
 // ── R8: Option<T> auto-default via #[llm_tool] ────────────────────
@@ -111,10 +105,7 @@ async fn tool_macro_option_param_missing_from_json() {
             &test_ctx(),
         )
         .await;
-    assert_eq!(
-        result.expect("tool registered").unwrap().content(),
-        "Hello, World!"
-    );
+    assert_eq!(result.unwrap().content(), "Hello, World!");
 }
 
 #[tokio::test]
@@ -130,10 +121,7 @@ async fn tool_macro_option_param_provided_in_json() {
             &test_ctx(),
         )
         .await;
-    assert_eq!(
-        result.expect("tool registered").unwrap().content(),
-        "Hi, World!"
-    );
+    assert_eq!(result.unwrap().content(), "Hi, World!");
 }
 
 /// Tool combining async + Option<T> to verify both features work together.
@@ -163,7 +151,7 @@ async fn tool_macro_async_with_optional_param() {
             &test_ctx(),
         )
         .await;
-    assert_eq!(r1.expect("tool registered").unwrap().content(), "base");
+    assert_eq!(r1.unwrap().content(), "base");
 
     // With optional param.
     let r2 = d
@@ -173,7 +161,7 @@ async fn tool_macro_async_with_optional_param() {
             &test_ctx(),
         )
         .await;
-    assert_eq!(r2.expect("tool registered").unwrap().content(), "base_ext");
+    assert_eq!(r2.unwrap().content(), "base_ext");
 }
 
 #[test]
@@ -314,17 +302,11 @@ async fn dispatch_passes_context_to_tool() {
 
     // First call.
     let r1 = d.dispatch("ctx_tool", serde_json::json!({}), &ctx).await;
-    assert_eq!(
-        r1.expect("tool registered").unwrap().content(),
-        "conv=test-conv, call=0"
-    );
+    assert_eq!(r1.unwrap().content(), "conv=test-conv, call=0");
 
     // Second call — state persists.
     let r2 = d.dispatch("ctx_tool", serde_json::json!({}), &ctx).await;
-    assert_eq!(
-        r2.expect("tool registered").unwrap().content(),
-        "conv=test-conv, call=1"
-    );
+    assert_eq!(r2.unwrap().content(), "conv=test-conv, call=1");
 }
 
 // ── ToolOutput metadata tests ───────────────────────────────────
@@ -369,7 +351,6 @@ async fn dispatch_preserves_tool_output_metadata() {
             &test_ctx(),
         )
         .await
-        .expect("tool registered")
         .unwrap();
 
     assert_eq!(result.content(), "processed: /etc/hosts");
@@ -468,7 +449,6 @@ async fn dispatch_preserves_tool_error_metadata() {
     let err = d
         .dispatch("metadata_error_tool", serde_json::json!({}), &test_ctx())
         .await
-        .expect("tool registered")
         .unwrap_err();
 
     assert_eq!(err.message, "service unavailable");
@@ -499,7 +479,6 @@ async fn macro_tool_returning_tool_output_preserves_metadata() {
             &test_ctx(),
         )
         .await
-        .expect("tool registered")
         .unwrap();
 
     assert_eq!(result.content(), "echoed: hello");
@@ -640,7 +619,6 @@ async fn macro_tool_returning_struct_populates_metadata_automatically() {
             &test_ctx(),
         )
         .await
-        .expect("tool registered")
         .unwrap();
 
     assert!(result.content().contains("success"));
@@ -667,7 +645,6 @@ async fn macro_tool_returning_primitive_leaves_metadata_empty() {
     let result = d
         .dispatch("return_primitive", serde_json::json!({}), &test_ctx())
         .await
-        .expect("tool registered")
         .unwrap();
 
     assert_eq!(result.content(), "42");
@@ -691,7 +668,6 @@ async fn macro_tool_returning_json_wrapper_populates_metadata() {
     let result = d
         .dispatch("return_json_wrapper", serde_json::json!({}), &test_ctx())
         .await
-        .expect("tool registered")
         .unwrap();
 
     assert!(result.content().contains("success"));

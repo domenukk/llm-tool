@@ -127,6 +127,38 @@ async fn rmcp_client_prompts_resources_integration_test() {
         .expect("read resource failed");
     assert_eq!(read_res.contents.len(), 1);
 
+    // 5. Verify list_all_resource_templates exposes the templated resource.
+    let templates = client
+        .list_all_resource_templates()
+        .await
+        .expect("list resource templates failed");
+    assert_eq!(templates.len(), 1);
+    assert_eq!(templates[0].name, "get_config");
+
+    // 6. Verify getting an unknown prompt surfaces a JSON-RPC error.
+    let unknown_prompt_err = client
+        .get_prompt(rmcp::model::GetPromptRequestParams::new("does_not_exist"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(unknown_prompt_err, rmcp::ServiceError::McpError(_)),
+        "expected McpError for unknown prompt, got {unknown_prompt_err:?}"
+    );
+
+    // 7. Verify reading an unknown resource surfaces INVALID_PARAMS.
+    let missing_resource_err = client
+        .read_resource(rmcp::model::ReadResourceRequestParams::new(
+            "file:///config",
+        ))
+        .await
+        .unwrap_err();
+    match missing_resource_err {
+        rmcp::ServiceError::McpError(err) => {
+            assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        }
+        other => panic!("expected McpError with INVALID_PARAMS, got {other:?}"),
+    }
+
     // NOLINT: test cleanup — close errors are non-fatal
     let _ = client.close().await;
 }

@@ -68,7 +68,8 @@ async fn rmcp_client_integration_test() {
         rmcp::model::ContentBlock::Text(t) => &t.text,
         other => panic!("expected text content, got {other:?}"),
     };
-    assert!(unknown_text.contains("Unknown tool: non_existent"));
+    assert!(unknown_text.contains("non_existent"));
+    assert!(unknown_text.contains("no tool named"));
 
     // 5. Verify list_all_prompts returns empty list
     let prompts = client

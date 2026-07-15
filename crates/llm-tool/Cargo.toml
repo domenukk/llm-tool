@@ -1,6 +1,6 @@
 [package]
 name = "llm-tool"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.86"
 description = "Framework-agnostic Rust tool definitions for LLM agents"
@@ -31,7 +31,7 @@ md-tmpl = [
 ]
 
 [dependencies]
-llm-tool-macros = { path = "../llm-tool-macros", version = "0.7.0" }
+llm-tool-macros = { path = "../llm-tool-macros", version = "0.8.0" }
 md-tmpl = { version = "0.7.0", optional = true, default-features = false, features = [
   "serde",
 ] }
