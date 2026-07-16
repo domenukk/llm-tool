@@ -1,9 +1,16 @@
+#[cfg(feature = "md-tmpl")]
+use quote::format_ident;
 use quote::quote;
+#[cfg(feature = "md-tmpl")]
+use syn::LitStr;
 use syn::{FnArg, GenericArgument, ItemFn, Pat, PatType, PathArguments, Type};
 
-// NOLINT: proc-macro internal — wildcard import of crate types is the standard pattern
-#[allow(clippy::wildcard_imports)]
-use crate::*;
+use crate::{
+    ATTR_CONTEXT, ATTR_LLM_TOOL, ParamInfo, ReturnInfo, TYPE_OPTION, TYPE_STR, TYPE_TOOL_CONTEXT,
+    ToolAttr,
+};
+#[cfg(feature = "md-tmpl")]
+use crate::{desc, response_struct_gen};
 
 /// Build the struct field types and any auto-borrow bindings for `&str` params.
 pub(crate) fn build_param_types_and_borrows(
@@ -202,7 +209,9 @@ pub(crate) fn resolve_response_template_file(
         const _: &str = include_str!(#path_str);
     };
 
-    let base_dir = full_path.parent().unwrap_or(std::path::Path::new("."));
+    let base_dir = full_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
     let env_values = desc::env_pairs(attr);
     let env_refs: Vec<(&str, md_tmpl::Value)> = env_values
         .iter()

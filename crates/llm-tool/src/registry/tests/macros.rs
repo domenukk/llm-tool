@@ -279,7 +279,9 @@ async fn dispatch_passes_context_to_tool() {
         const DESCRIPTION: &'static str = "Reads conversation_id from context.";
 
         // NOLINT: required for backward-compatible async trait impl in tests
-        #[allow(unknown_lints, clippy::unused_async_trait_impl)]
+        #[allow(unknown_lints)]
+        // NOLINT: forward-compat guard for clippy::unused_async_trait_impl
+        #[expect(clippy::unused_async_trait_impl)]
         async fn call(
             &self,
             _params: Self::Params,
@@ -326,7 +328,9 @@ impl RustTool for MetadataTool {
     const DESCRIPTION: &'static str = "Returns output with metadata.";
 
     // NOLINT: required for backward-compatible async trait impl in tests
-    #[allow(unknown_lints, clippy::unused_async_trait_impl)]
+    #[allow(unknown_lints)]
+    // NOLINT: forward-compat guard for clippy::unused_async_trait_impl
+    #[expect(clippy::unused_async_trait_impl)]
     async fn call(
         &self,
         params: Self::Params,
@@ -430,7 +434,9 @@ impl RustTool for MetadataErrorTool {
     const DESCRIPTION: &'static str = "Always fails with metadata.";
 
     // NOLINT: required for backward-compatible async trait impl in tests
-    #[allow(unknown_lints, clippy::unused_async_trait_impl)]
+    #[allow(unknown_lints)]
+    // NOLINT: forward-compat guard for clippy::unused_async_trait_impl
+    #[expect(clippy::unused_async_trait_impl)]
     async fn call(
         &self,
         _params: Self::Params,

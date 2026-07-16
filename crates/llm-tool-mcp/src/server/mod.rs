@@ -632,8 +632,8 @@ impl McpServer {
     /// wire in a single pass via [`to_wire`](RpcOutcome::to_wire) /
     /// [`Display`](core::fmt::Display) / [`write_json`](RpcOutcome::write_json):
     ///
-    /// - `Some(`[`Single`](RpcOutcome::Single)`)` — one request → one response.
-    /// - `Some(`[`Batch`](RpcOutcome::Batch)`)` — a batch → one response each,
+    /// - <code>Some([Single](RpcOutcome::Single))</code> — one request → one response.
+    /// - <code>Some([Batch](RpcOutcome::Batch))</code> — a batch → one response each,
     ///   for the non-notification members.
     /// - `None` — the input was purely notification(s); send nothing back
     ///   (e.g. reply `202 Accepted` with no body over HTTP).
@@ -1032,7 +1032,7 @@ impl McpServer {
 /// [`to_wire`](Self::to_wire) (or `.to_string()`) for a `String`, or
 /// [`write_json`](Self::write_json) to append directly to a byte buffer — each
 /// serializes in a single pass with no intermediate [`serde_json::Value`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RpcOutcome {
     /// A single JSON-RPC response object.
     Single(JsonRpcResponse),
@@ -1043,8 +1043,8 @@ pub enum RpcOutcome {
 impl serde::Serialize for RpcOutcome {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            RpcOutcome::Single(response) => response.serialize(serializer),
-            RpcOutcome::Batch(responses) => responses.serialize(serializer),
+            Self::Single(response) => response.serialize(serializer),
+            Self::Batch(responses) => responses.serialize(serializer),
         }
     }
 }
@@ -1076,8 +1076,8 @@ impl RpcOutcome {
 
     /// Returns `true` if this is a [`Batch`](Self::Batch) of responses.
     #[must_use]
-    pub fn is_batch(&self) -> bool {
-        matches!(self, RpcOutcome::Batch(_))
+    pub const fn is_batch(&self) -> bool {
+        matches!(self, Self::Batch(_))
     }
 
     /// Consume the outcome into a flat list of responses.
@@ -1087,8 +1087,8 @@ impl RpcOutcome {
     #[must_use]
     pub fn into_responses(self) -> Vec<JsonRpcResponse> {
         match self {
-            RpcOutcome::Single(response) => vec![response],
-            RpcOutcome::Batch(responses) => responses,
+            Self::Single(response) => vec![response],
+            Self::Batch(responses) => responses,
         }
     }
 }

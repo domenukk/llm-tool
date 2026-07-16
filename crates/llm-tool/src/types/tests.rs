@@ -20,7 +20,7 @@ fn with_shared_state_shares_store() {
     let a = ToolContext::new()
         .with_conversation_id("conv")
         .with_shared_state(store.clone());
-    let b = ToolContext::new().with_shared_state(store.clone());
+    let b = ToolContext::new().with_shared_state(store);
 
     a.set_state("k", serde_json::json!(1)).unwrap();
     // `b` observes `a`'s write because they share the same backing store.

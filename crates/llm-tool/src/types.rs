@@ -269,7 +269,7 @@ pub use llm_tool_macros::{llm_prompt, llm_resource, llm_tool};
 pub use schemars::JsonSchema;
 
 /// Human-readable JSON type name for error messages.
-fn other_type_name(value: &serde_json::Value) -> &'static str {
+const fn other_type_name(value: &serde_json::Value) -> &'static str {
     match value {
         serde_json::Value::Null => "null",
         serde_json::Value::Bool(_) => "bool",
@@ -499,7 +499,7 @@ impl ToolOutput {
 
     /// The structured metadata map.
     #[must_use]
-    pub fn metadata(&self) -> &HashMap<String, serde_json::Value> {
+    pub const fn metadata(&self) -> &HashMap<String, serde_json::Value> {
         &self.metadata
     }
 }
@@ -763,7 +763,7 @@ impl ToolError {
 
     /// The structured metadata map.
     #[must_use]
-    pub fn metadata(&self) -> &HashMap<String, serde_json::Value> {
+    pub const fn metadata(&self) -> &HashMap<String, serde_json::Value> {
         &self.metadata
     }
 

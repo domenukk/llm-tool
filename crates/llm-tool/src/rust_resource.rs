@@ -170,7 +170,7 @@ impl core::fmt::Debug for ResourceRegistry {
 impl ResourceRegistry {
     /// Create an empty resource registry.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             resources: Vec::new(),
         }

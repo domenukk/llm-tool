@@ -23,8 +23,8 @@ JSON Schemas, automatic deserialization, and instant
 
 ```toml
 [dependencies]
-llm-tool = "0.8"
-llm-tool-mcp = "0.8" # Optional: for MCP server support
+llm-tool = "0.9"
+llm-tool-mcp = "0.9" # Optional: for MCP server support
 ```
 
 ### Define a Tool

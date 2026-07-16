@@ -623,9 +623,8 @@ struct DescriptionInfo {
 
 pub(crate) mod desc;
 pub(crate) mod helpers;
-// NOLINT: proc-macro internal — wildcard re-export of desc module types
-#[allow(clippy::wildcard_imports)]
-pub(crate) use desc::*;
-// NOLINT: proc-macro internal — wildcard re-export of helpers module types
-#[allow(clippy::wildcard_imports)]
-pub(crate) use helpers::*;
+pub(crate) use desc::resolve_description;
+pub(crate) use helpers::{
+    build_body_tokens, build_param_types_and_borrows, build_serde_defaults, extract_doc_string,
+    extract_params, parse_return_type, reject_generic_signature, resolve_response_template,
+};

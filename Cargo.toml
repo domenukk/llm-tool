@@ -4,7 +4,15 @@ resolver = "3"
 
 [workspace.lints.clippy]
 pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
 all = { level = "deny", priority = -1 }
+# False positive in proc-macro crates: pub(crate) + wildcard re-exports is the standard pattern.
+redundant_pub_crate = "allow"
+# Worse readability in quote!{} macro contexts where if/else is clearer.
+option_if_let_else = "allow"
+# External macros (md-tmpl) generate PartialEq derives without Eq; we can't control their output.
+derive_partial_eq_without_eq = "allow"
 
 [workspace.lints.rust]
 warnings = "deny"
+unsafe_code = "deny"

@@ -104,7 +104,7 @@ pub struct JsonRpcRequest {
 // ── Response ────────────────────────────────────────────────────────
 
 /// A JSON-RPC 2.0 response.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JsonRpcResponse {
     /// Protocol version — always `"2.0"`.
     pub jsonrpc: &'static str,
@@ -122,7 +122,7 @@ pub struct JsonRpcResponse {
 }
 
 /// A JSON-RPC 2.0 error object.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JsonRpcError {
     /// Numeric error code.
     pub code: i64,

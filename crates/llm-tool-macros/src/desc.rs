@@ -1,9 +1,9 @@
+#[cfg(feature = "md-tmpl")]
+use quote::format_ident;
 use quote::quote;
 use syn::{ItemFn, LitStr};
 
-// NOLINT: proc-macro internal — wildcard import of crate types is the standard pattern
-#[allow(clippy::wildcard_imports)]
-use crate::*;
+use crate::{DescriptionInfo, ToolAttr, extract_doc_string};
 
 /// Convert the `env_vars` from a `ToolAttr` into a `Vec<(String, String)>`
 /// for passing to md-tmpl compilation functions.
@@ -162,7 +162,7 @@ pub(crate) fn resolve_inline_description(
         let span = attr
             .description_inline
             .as_ref()
-            .map_or(proc_macro2::Span::call_site(), LitStr::span);
+            .map_or_else(proc_macro2::Span::call_site, LitStr::span);
         if attr.has_inline_params || attr.has_context_fn {
             return Err(syn::Error::new(
                 span,
@@ -194,7 +194,7 @@ pub(crate) fn resolve_template_description(
         let span = attr
             .description_file_path
             .as_ref()
-            .map_or(proc_macro2::Span::call_site(), LitStr::span);
+            .map_or_else(proc_macro2::Span::call_site, LitStr::span);
         Err(syn::Error::new(
             span,
             "the `md-tmpl` feature must be enabled to use \
@@ -233,7 +233,9 @@ pub(crate) fn resolve_template_description_impl(
         )
     })?;
 
-    let base_dir = full_path.parent().unwrap_or(std::path::Path::new("."));
+    let base_dir = full_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
     let env_values = env_pairs(attr);
     let env_refs: Vec<(&str, md_tmpl::Value)> = env_values
         .iter()
@@ -402,7 +404,7 @@ pub(crate) fn resolve_inline_description_impl(
             build_context_description_method(&desc_mod_name, context_fn, fn_name, &body_str);
 
         Ok(DescriptionInfo {
-            static_description: body_str.clone(),
+            static_description: body_str,
             helper_tokens,
             description_method: Some(description_method),
             dep_tracking: quote! {},
@@ -582,7 +584,7 @@ pub(crate) fn resolve_template_with_params(
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
         let full = std::path::PathBuf::from(&manifest_dir).join(lit.value());
         full.parent()
-            .unwrap_or(std::path::Path::new("."))
+            .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf()
     });
     let mut opts = md_tmpl::CompileOptions::default().allow_unused(true);
