@@ -15,10 +15,10 @@ Running on {{ api_version }}
     .unwrap();
 
     let _guard = OnDrop(Some(|| {
-        if let Err(e) = std::fs::remove_file("/tmp/dynamic_desc_test.tmpl.md") {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("failed to clean up /tmp/dynamic_desc_test.tmpl.md: {e}");
-            }
+        if let Err(e) = std::fs::remove_file("/tmp/dynamic_desc_test.tmpl.md")
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("failed to clean up /tmp/dynamic_desc_test.tmpl.md: {e}");
         }
     }));
 

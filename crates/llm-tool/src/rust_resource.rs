@@ -206,13 +206,13 @@ impl ResourceRegistry {
 
     /// Number of registered resources.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.resources.len()
     }
 
     /// Whether the registry has no registered resources.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.resources.is_empty()
     }
 

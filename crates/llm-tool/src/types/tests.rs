@@ -51,6 +51,47 @@ fn get_state_returns_default_when_absent() {
     );
 }
 
+// ── ToolContext::with_caller ──────────────────────────────────────────
+
+#[test]
+fn with_caller_overrides_identity_but_shares_state() {
+    let base = ToolContext::new().with_conversation_id("server");
+    let alice = base.with_caller("alice");
+
+    assert_eq!(base.conversation_id(), Some("server"));
+    assert_eq!(alice.conversation_id(), Some("alice"));
+
+    // The derived context shares the *same* backing state store.
+    base.set_state("k", serde_json::json!(1)).unwrap();
+    assert_eq!(
+        alice.get_state("k", serde_json::json!(0)),
+        serde_json::json!(1)
+    );
+    alice.set_state("k2", serde_json::json!(2)).unwrap();
+    assert_eq!(
+        base.get_state("k2", serde_json::json!(0)),
+        serde_json::json!(2)
+    );
+}
+
+#[test]
+fn with_caller_shares_extensions() {
+    #[derive(Clone, PartialEq, Debug)]
+    struct Marker(u32);
+
+    let base = ToolContext::new().with_conversation_id("server");
+    base.set_ext(Marker(7)).unwrap();
+
+    // A per-connection caller sees extensions injected on the base context.
+    let derived = base.with_caller("bob");
+    assert_eq!(derived.get_ext::<Marker>(), Some(Marker(7)));
+
+    // And extensions set through the derived context are visible on the base,
+    // confirming a single shared extension map.
+    derived.set_ext(String::from("hello")).unwrap();
+    assert_eq!(base.get_ext::<String>().as_deref(), Some("hello"));
+}
+
 // ── ToolContext: typed extensions ────────────────────────────────────
 
 #[test]

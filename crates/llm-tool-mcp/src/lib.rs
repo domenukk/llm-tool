@@ -3,4 +3,4 @@
 pub mod protocol;
 mod server;
 
-pub use server::{McpServer, McpServerBuilder, RpcOutcome, Transport};
+pub use server::{Connection, McpServer, McpServerBuilder, RegistryFactory, RpcOutcome, Transport};

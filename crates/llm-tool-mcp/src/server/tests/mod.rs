@@ -6,6 +6,8 @@ pub use super::*;
 
 mod basic;
 mod blocking_and_dispatch;
+mod per_caller_registry;
+mod per_connection_identity;
 mod prompts_resources;
 mod rmcp_integration;
 

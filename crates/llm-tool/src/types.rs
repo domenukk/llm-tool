@@ -130,6 +130,38 @@ impl ToolContext {
         self
     }
 
+    /// Derive a new context that carries a different conversation ID while
+    /// **sharing** this context's state store and typed extensions.
+    ///
+    /// Both the shared state ([`SharedState`]) and the typed extension map are
+    /// held behind `Arc`, so the returned context reads and writes the *same*
+    /// underlying stores — only the conversation identity differs. This is the
+    /// primitive a single MCP server uses to serve **many** callers: each
+    /// connection derives its own identity from the shared, session-wide
+    /// context without duplicating extensions like injected session state.
+    ///
+    /// ```rust
+    /// use std::sync::Arc;
+    ///
+    /// use llm_tool::ToolContext;
+    ///
+    /// let session = ToolContext::new().with_conversation_id("server");
+    /// session.set_ext(Arc::new(42u64)).unwrap();
+    ///
+    /// let alice = session.with_caller("alice");
+    /// assert_eq!(alice.conversation_id(), Some("alice"));
+    /// // Extensions are shared, not copied.
+    /// assert_eq!(alice.get_ext::<Arc<u64>>().as_deref(), Some(&42));
+    /// ```
+    #[must_use]
+    pub fn with_caller(&self, conversation_id: impl Into<String>) -> Self {
+        Self {
+            conversation_id: Some(conversation_id.into()),
+            state: self.state.clone(),
+            extensions: Arc::clone(&self.extensions),
+        }
+    }
+
     /// Use an externally-provided [`SharedState`] as this context's state store.
     ///
     /// Use this when multiple `ToolContext` instances (e.g. successive tool
