@@ -78,6 +78,7 @@ fn compile_env_only_template(
         .map_err(|e| syn::Error::new(span, format!("{label} compile error: {e}")))?;
     template
         .render_ctx(&md_tmpl::Context::new())
+        .map(|s| s.replace("\r\n", "\n"))
         .map_err(|e| syn::Error::new(span, format!("{label} render error: {e}")))
 }
 
@@ -249,7 +250,7 @@ pub(crate) fn resolve_template_description_impl(
             )
         })?;
 
-    let body_str = body.trim().to_string();
+    let body_str = body.trim().replace("\r\n", "\n");
     let path_str = full_path.to_string_lossy().to_string();
 
     // include_str! establishes a file dependency so cargo rebuilds
@@ -352,7 +353,7 @@ pub(crate) fn resolve_inline_description_impl(
     let (fm, body) = md_tmpl::parse_frontmatter_with_env(&source, &env_refs)
         .map_err(|e| syn::Error::new(template_lit.span(), format!("inline template error: {e}")))?;
 
-    let body_str = body.trim().to_string();
+    let body_str = body.trim().replace("\r\n", "\n");
 
     let has_params = attr.has_inline_params;
     let has_context = attr.has_context_fn;
@@ -636,6 +637,7 @@ pub(crate) fn resolve_template_with_params(
     let rendered = template
         .render_ctx(&ctx)
         .map_err(|e| syn::Error::new(span, format!("template '{rel_path}' render error: {e}")))?;
+    let rendered = rendered.replace("\r\n", "\n");
 
     Ok(DescriptionInfo {
         static_description: rendered,

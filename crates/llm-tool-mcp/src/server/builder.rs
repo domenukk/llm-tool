@@ -30,6 +30,7 @@ use super::{CallerView, McpServer, RegistryFactory, build_tools_list_value};
 pub struct McpServerBuilder {
     name: String,
     version: String,
+    instructions: Option<String>,
     registry: ToolRegistry,
     context: ToolContext,
     prompts: PromptRegistry,
@@ -49,6 +50,7 @@ impl McpServerBuilder {
         Self {
             name: name.into(),
             version: version.into(),
+            instructions: None,
             registry,
             context: ToolContext::new(),
             prompts: PromptRegistry::new(),
@@ -62,6 +64,13 @@ impl McpServerBuilder {
     #[must_use]
     pub fn with_context(mut self, context: ToolContext) -> Self {
         self.context = context;
+        self
+    }
+
+    /// Provide instructions describing how to use the server.
+    #[must_use]
+    pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.instructions = Some(instructions.into());
         self
     }
 
@@ -139,6 +148,7 @@ impl McpServerBuilder {
         McpServer {
             name: self.name,
             version: self.version,
+            instructions: self.instructions,
             registry,
             context: Arc::new(self.context),
             cached_tools_list,

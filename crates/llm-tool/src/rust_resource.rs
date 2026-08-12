@@ -84,8 +84,9 @@ pub fn match_uri_template(
             u_rem = "";
             val
         } else {
-            let next_char = t_rem.chars().next()?;
-            let val_end = u_rem.find(next_char)?;
+            let next_brace = t_rem.find('{').unwrap_or(t_rem.len());
+            let delimiter = &t_rem[..next_brace];
+            let val_end = u_rem.find(delimiter)?;
             let val = &u_rem[..val_end];
             u_rem = &u_rem[val_end..];
             val
@@ -108,6 +109,8 @@ pub(crate) type BoxResourceFuture<'a> =
 pub(crate) trait ErasedResource: Send + Sync {
     /// Check if the incoming URI matches this resource's pattern, extract
     /// variables, and execute `read`.
+    ///
+    /// Returns `None` if `uri` does not match this resource's pattern.
     fn read_erased<'a>(&'a self, uri: &'a str) -> Option<BoxResourceFuture<'a>>;
 }
 
@@ -141,17 +144,38 @@ struct RegisteredResource {
 
 /// A registry of resources and resource templates for dynamic dispatch.
 ///
-/// Mirrors [`ToolRegistry`](crate::ToolRegistry) for resources: it stores
-/// type-erased [`RustResource`] implementations, caches each
-/// [`ResourceDefinition`] at registration time, and reads the first resource
-/// whose URI template matches an incoming URI, keeping the type-erasure
-/// machinery a private implementation detail.
+/// Models MCP's `resources/list`, `resources/read`, and `resources/templates/list`
+/// primitives. Tools provide actionable commands; resources provide readable
+/// context (static documents, log files, configuration snapshots).
 ///
-/// Unlike [`ToolRegistry`](crate::ToolRegistry) and
-/// [`PromptRegistry`](crate::PromptRegistry),
-/// registration is infallible: a [`ResourceDefinition`] is built purely from
-/// associated constants and never serializes a JSON schema, so there is no
-/// `try_register` counterpart.
+/// # Example
+///
+/// ```
+/// use llm_tool::{ResourceOutput, ResourceRegistry, RustResource, ToolError};
+///
+/// struct ConfigResource;
+///
+/// impl RustResource for ConfigResource {
+///     const NAME: &'static str = "config";
+///     const URI_TEMPLATE: &'static str = "file:///etc/app.conf";
+///     const DESCRIPTION: &'static str = "Application configuration";
+///     const MIME_TYPE: Option<&'static str> = Some("text/plain");
+///     type Params = ();
+///
+///     async fn read(
+///         &self,
+///         uri: &str,
+///         _params: Self::Params,
+///     ) -> Result<ResourceOutput, ToolError> {
+///         Ok(ResourceOutput::text(uri, Some("text/plain"), "debug=true"))
+///     }
+/// }
+///
+/// let mut reg = ResourceRegistry::new();
+/// reg.register(ConfigResource);
+/// assert_eq!(reg.len(), 1);
+/// assert!(reg.matches("file:///etc/app.conf"));
+/// ```
 #[derive(Default)]
 pub struct ResourceRegistry {
     resources: Vec<RegisteredResource>,
@@ -168,7 +192,7 @@ impl core::fmt::Debug for ResourceRegistry {
 }
 
 impl ResourceRegistry {
-    /// Create an empty resource registry.
+    /// Create a new, empty resource registry.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -176,8 +200,13 @@ impl ResourceRegistry {
         }
     }
 
-    /// Register a [`RustResource`]. Returns `&mut Self` for chaining.
+    /// Register a [`RustResource`].
+    ///
+    /// Replaces any existing registration with the same [`RustResource::NAME`].
     pub fn register<R: RustResource + 'static>(&mut self, resource: R) -> &mut Self {
+        if let Some(pos) = self.resources.iter().position(|e| e.name == R::NAME) {
+            self.resources.remove(pos);
+        }
         self.resources.push(RegisteredResource {
             name: R::NAME,
             definition: definition_of_resource(&resource),
@@ -191,6 +220,21 @@ impl ResourceRegistry {
     pub fn with_resource<R: RustResource + 'static>(mut self, resource: R) -> Self {
         self.register(resource);
         self
+    }
+
+    /// Remove a resource by name, returning `true` if it was present.
+    pub fn remove(&mut self, name: &str) -> bool {
+        if let Some(pos) = self.resources.iter().position(|e| e.name == name) {
+            self.resources.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear all registered resources.
+    pub fn clear(&mut self) {
+        self.resources.clear();
     }
 
     /// Collect [`ResourceDefinition`]s for all registered resources.

@@ -441,15 +441,15 @@ async fn invalid_jsonrpc_version_returns_invalid_request() {
 }
 
 #[tokio::test]
-async fn missing_jsonrpc_version_returns_parse_error() {
+async fn missing_jsonrpc_version_returns_invalid_request() {
     let server = test_server();
-    // Missing "jsonrpc" field entirely — serde will fail to deserialize.
+    // Missing "jsonrpc" field entirely — invalid JSON-RPC request object.
     let resp = server
         .handle_request(r#"{"id":1,"method":"initialize"}"#)
         .await;
 
     let err = resp.error.unwrap();
-    assert_eq!(err.code, protocol::PARSE_ERROR);
+    assert_eq!(err.code, protocol::INVALID_REQUEST);
 }
 
 // ── Batch request handling ───────────────────────────────────────
@@ -921,4 +921,59 @@ fn notification_initialized_no_output_in_run() {
 
     // Notification should produce zero bytes of output.
     assert!(output.is_empty());
+}
+
+#[tokio::test]
+async fn handle_message_returns_error_for_malformed_json_not_dropped() {
+    let server = test_server();
+    let outcome = server.handle_message("invalid json content").await;
+    assert!(outcome.is_some());
+    let RpcOutcome::Single(resp) = outcome.unwrap() else {
+        panic!("expected single response");
+    };
+    assert!(resp.id.is_none());
+    let err = resp.error.unwrap();
+    assert_eq!(err.code, protocol::PARSE_ERROR);
+}
+
+#[tokio::test]
+async fn handle_request_preserves_id_on_schema_error() {
+    let server = test_server();
+    // Valid JSON with ID but invalid structure for JSON-RPC (e.g. method is a number)
+    let resp = server
+        .handle_request(r#"{"jsonrpc":"2.0","id":42,"method":123}"#)
+        .await;
+    assert_eq!(resp.id, Some(serde_json::json!(42)));
+    let err = resp.error.unwrap();
+    assert_eq!(err.code, protocol::INVALID_REQUEST);
+}
+
+#[tokio::test]
+async fn initialize_includes_instructions_when_configured() {
+    let registry = ToolRegistry::new();
+    let server = McpServer::builder("test", "1.0", registry)
+        .with_instructions("Custom server instructions")
+        .build();
+
+    let resp = server
+        .handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#)
+        .await;
+    assert!(resp.error.is_none());
+    let result = resp.result.unwrap();
+    assert_eq!(result["instructions"], "Custom server instructions");
+}
+
+#[tokio::test]
+async fn initialize_capabilities_omitted_when_registries_empty() {
+    let registry = ToolRegistry::new();
+    let server = McpServer::builder("test", "1.0", registry).build();
+
+    let resp = server
+        .handle_request(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#)
+        .await;
+    assert!(resp.error.is_none());
+    let result = resp.result.unwrap();
+    assert!(result["capabilities"].get("tools").is_some());
+    assert!(result["capabilities"].get("prompts").is_none());
+    assert!(result["capabilities"].get("resources").is_none());
 }

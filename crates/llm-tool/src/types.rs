@@ -35,6 +35,54 @@ impl SharedState {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Retrieve a value from the shared state, returning `default` if the key
+    /// is absent or the lock is poisoned.
+    #[must_use]
+    pub fn get_state(&self, key: &str, default: serde_json::Value) -> serde_json::Value {
+        match read_lock(&self.0) {
+            Ok(guard) => guard.get(key).cloned().unwrap_or(default),
+            Err(e) => {
+                tracing::warn!(key, error = %e, "SharedState::get_state: lock poisoned, returning default");
+                default
+            }
+        }
+    }
+
+    /// Insert or update a value in the shared state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError`] if the lock is poisoned.
+    pub fn set_state(&self, key: &str, value: serde_json::Value) -> Result<(), ToolError> {
+        match write_lock(&self.0) {
+            Ok(mut guard) => {
+                guard.insert(key.to_owned(), value);
+                Ok(())
+            }
+            Err(e) => {
+                let msg = format!("SharedState::set_state: lock poisoned for key '{key}': {e}");
+                tracing::warn!("{msg}");
+                Err(ToolError::new(msg))
+            }
+        }
+    }
+
+    /// Remove a value from the shared state by key, returning `true` if it was present.
+    #[must_use]
+    pub fn remove_state(&self, key: &str) -> bool {
+        match write_lock(&self.0) {
+            Ok(mut guard) => guard.remove(key).is_some(),
+            Err(_) => false,
+        }
+    }
+
+    /// Clear all entries from the shared state.
+    pub fn clear_state(&self) {
+        if let Ok(mut guard) = write_lock(&self.0) {
+            guard.clear();
+        }
+    }
 }
 
 impl Default for SharedState {
@@ -58,12 +106,6 @@ impl core::fmt::Debug for SharedState {
 /// and shared across concurrent tool invocations. Reads acquire a shared
 /// lock; only writes take an exclusive lock.
 ///
-/// # `get_state` vs `set_state` error handling
-///
-/// These two methods intentionally handle mutex poisoning differently:
-///
-/// - **[`get_state`](Self::get_state)** acquires a **read** lock and returns
-///   the caller-supplied `default` when the lock is poisoned. Reads are
 ///   best-effort — a missing value is indistinguishable from a default, so
 ///   returning `default` keeps the tool running without surfacing
 ///   infrastructure errors to the model.
@@ -101,6 +143,30 @@ pub struct ToolContext {
     conversation_id: Option<String>,
     state: SharedState,
     extensions: Arc<RwLock<HashMap<TypeId, Box<dyn Any + Send + Sync>>>>,
+}
+
+impl Clone for ToolContext {
+    fn clone(&self) -> Self {
+        Self {
+            conversation_id: self.conversation_id.clone(),
+            state: self.state.clone(),
+            extensions: Arc::clone(&self.extensions),
+        }
+    }
+}
+
+impl core::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let count = match read_lock(&self.extensions) {
+            Ok(g) => g.len(),
+            Err(_) => 0,
+        };
+        f.debug_struct("ToolContext")
+            .field("conversation_id", &self.conversation_id)
+            .field("state", &self.state)
+            .field("extensions_count", &count)
+            .finish()
+    }
 }
 
 impl Default for ToolContext {
@@ -774,22 +840,27 @@ impl ToolError {
     ///
     /// Returns `Err(self)` if `value` doesn't serialize to a JSON object.
     pub fn with_metadata<T: serde::Serialize>(mut self, value: &T) -> Result<Self, Self> {
-        let json = serde_json::to_value(value).map_err(|e| {
-            Self::new(format!(
-                "{} (metadata serialization also failed: {e})",
-                self.message
-            ))
-        })?;
+        let json = match serde_json::to_value(value) {
+            Ok(j) => j,
+            Err(e) => {
+                self.message =
+                    format!("{} (metadata serialization also failed: {e})", self.message);
+                return Err(self);
+            }
+        };
         match json {
             serde_json::Value::Object(map) => {
                 self.metadata.extend(map);
                 Ok(self)
             }
-            other => Err(Self::new(format!(
-                "{} (metadata must serialize to a JSON object, got {})",
-                self.message,
-                other_type_name(&other),
-            ))),
+            other => {
+                self.message = format!(
+                    "{} (metadata must serialize to a JSON object, got {})",
+                    self.message,
+                    other_type_name(&other),
+                );
+                Err(self)
+            }
         }
     }
 
@@ -877,7 +948,7 @@ impl From<core::convert::Infallible> for ToolError {
 /// This struct holds the metadata the SDK needs to expose the tool to the
 /// model. The actual handler function is registered separately via
 /// [`ToolRegistry::register`](super::ToolRegistry::register).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolDefinition {
     /// Unique tool name (e.g. `"flash_device"`).
     pub name: String,

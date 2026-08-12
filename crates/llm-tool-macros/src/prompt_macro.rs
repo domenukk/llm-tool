@@ -4,9 +4,9 @@ use quote::{format_ident, quote};
 use syn::ItemFn;
 
 use crate::{
-    DescriptionInfo, ParamInfo, ReturnInfo, ToolAttr, build_param_types_and_borrows,
-    build_serde_defaults, extract_doc_string, extract_params, parse_return_type,
-    reject_generic_signature, resolve_description,
+    DescriptionInfo, MACRO_LLM_PROMPT, ParamInfo, ReturnInfo, ToolAttr,
+    build_param_types_and_borrows, build_serde_defaults, extract_doc_string, extract_params,
+    parse_return_type, reject_generic_signature, resolve_description,
 };
 
 /// Build the body tokens for a prompt's `render` method.
@@ -63,7 +63,7 @@ fn build_prompt_body_tokens(
 pub fn prompt_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<TokenStream> {
     let crate_path = quote! { ::llm_tool };
     let fn_name = &func.sig.ident;
-    reject_generic_signature(func, "llm_prompt")?;
+    reject_generic_signature(func, MACRO_LLM_PROMPT)?;
     if let Some(resp) =
         attr.and_then(|a| a.response_file_path.as_ref().or(a.response_inline.as_ref()))
     {
@@ -84,8 +84,14 @@ pub fn prompt_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<TokenS
         dep_tracking,
     } = resolve_description(func, attr)?;
 
-    let all_params = extract_params(func)?;
-    let params: Vec<&ParamInfo> = all_params.iter().filter(|p| !p.is_context).collect();
+    let all_params = extract_params(func, MACRO_LLM_PROMPT)?;
+    if all_params.iter().any(|p| p.is_context) {
+        return Err(syn::Error::new_spanned(
+            &func.sig,
+            "#[llm_prompt] functions do not accept a ToolContext parameter",
+        ));
+    }
+    let params: Vec<&ParamInfo> = all_params.iter().collect();
 
     for param in &params {
         if param.doc_attrs.is_empty() {
@@ -100,7 +106,7 @@ pub fn prompt_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<TokenS
         }
     }
 
-    let return_info = parse_return_type(func)?;
+    let return_info = parse_return_type(func, MACRO_LLM_PROMPT)?;
 
     let param_names: Vec<_> = params.iter().map(|p| &p.name).collect();
     let param_descriptions: Vec<String> = params
@@ -117,6 +123,17 @@ pub fn prompt_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<TokenS
     let struct_doc = format!(
         "Auto-generated prompt struct. See the `#[llm_prompt]`-annotated function `{fn_name}` for the implementation."
     );
+
+    let mut_tokens: Vec<proc_macro2::TokenStream> = params
+        .iter()
+        .map(|p| {
+            if p.is_mut {
+                quote! { mut }
+            } else {
+                quote! {}
+            }
+        })
+        .collect();
 
     Ok(quote! {
         #dep_tracking
@@ -143,7 +160,7 @@ pub fn prompt_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<TokenS
             #description_method
 
             async fn render(&self, params: Self::Params) -> ::core::result::Result<#crate_path::PromptOutput, #crate_path::ToolError> {
-                let #params_name { #( #param_names, )* } = params;
+                let #params_name { #( #mut_tokens #param_names, )* } = params;
                 #( #borrow_bindings )*
                 #body_tokens
             }

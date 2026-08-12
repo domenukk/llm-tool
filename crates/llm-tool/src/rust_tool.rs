@@ -173,6 +173,11 @@ pub(crate) trait ErasedTool: Send + Sync {
         args: serde_json::Value,
         ctx: &'a ToolContext,
     ) -> BoxToolFuture<'a>;
+
+    /// Deserialize `args_json` directly from a JSON string and call the handler,
+    /// returning a boxed future without intermediate DOM allocation.
+    fn call_erased_str<'a>(&'a self, args_json: &'a str, ctx: &'a ToolContext)
+    -> BoxToolFuture<'a>;
 }
 
 impl<T: RustTool> ErasedTool for T {
@@ -183,6 +188,19 @@ impl<T: RustTool> ErasedTool for T {
     ) -> BoxToolFuture<'a> {
         Box::pin(async move {
             let params: T::Params = serde_json::from_value(args).map_err(|e| {
+                ToolError::new(format!("Failed to deserialize tool parameters: {e}"))
+            })?;
+            self.call(params, ctx).await
+        })
+    }
+
+    fn call_erased_str<'a>(
+        &'a self,
+        args_json: &'a str,
+        ctx: &'a ToolContext,
+    ) -> BoxToolFuture<'a> {
+        Box::pin(async move {
+            let params: T::Params = serde_json::from_str(args_json).map_err(|e| {
                 ToolError::new(format!("Failed to deserialize tool parameters: {e}"))
             })?;
             self.call(params, ctx).await

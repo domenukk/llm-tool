@@ -47,13 +47,33 @@ impl McpServer {
             }
         }
 
-        let request: JsonRpcRequest = match serde_json::from_str(line) {
+        let val: serde_json::Value = match serde_json::from_str(line) {
             Ok(r) => r,
             Err(e) => {
                 return JsonRpcResponse::error(
                     None,
                     protocol::PARSE_ERROR,
                     format!("invalid JSON: {e}"),
+                );
+            }
+        };
+
+        let Some(obj) = val.as_object() else {
+            return JsonRpcResponse::error(
+                None,
+                protocol::INVALID_REQUEST,
+                "expected JSON-RPC request object",
+            );
+        };
+
+        let id = obj.get("id").cloned();
+        let request: JsonRpcRequest = match serde_json::from_value(val) {
+            Ok(r) => r,
+            Err(e) => {
+                return JsonRpcResponse::error(
+                    id,
+                    protocol::INVALID_REQUEST,
+                    format!("invalid JSON-RPC request: {e}"),
                 );
             }
         };
@@ -123,7 +143,9 @@ impl McpServer {
         }
 
         let response = self.handle_request_conn(trimmed, conn).await;
-        if response.id.is_none() {
+        // JSON-RPC 2.0 §4.1: notifications (requests without an ID that succeeded)
+        // must not produce a response. Protocol-level errors with null IDs must be sent.
+        if response.id.is_none() && response.error.is_none() {
             None
         } else {
             Some(RpcOutcome::Single(response))
@@ -330,6 +352,18 @@ impl McpServer {
         // registry in play) when no [`RegistryFactory`] is configured.
         conn.view = self.resolve_view(caller);
 
+        let tools_cap = Some(ToolCapabilities {});
+        let prompts_cap = if self.prompts.is_empty() {
+            None
+        } else {
+            Some(PromptCapabilities {})
+        };
+        let resources_cap = if self.resources.is_empty() {
+            None
+        } else {
+            Some(ResourceCapabilities {})
+        };
+
         JsonRpcResponse::success(
             id,
             InitializeResult {
@@ -338,10 +372,11 @@ impl McpServer {
                     name: self.name.clone(),
                     version: self.version.clone(),
                 },
+                instructions: self.instructions.clone(),
                 capabilities: Capabilities {
-                    tools: ToolCapabilities {},
-                    resources: ResourceCapabilities {},
-                    prompts: PromptCapabilities {},
+                    tools: tools_cap,
+                    resources: resources_cap,
+                    prompts: prompts_cap,
                 },
             },
         )

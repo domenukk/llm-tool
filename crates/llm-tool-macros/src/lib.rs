@@ -210,17 +210,86 @@ struct ToolAttr {
     has_context_fn: bool,
 }
 
-const ATTR_DESCRIPTION: &str = "description";
-const ATTR_DESCRIPTION_FILE: &str = "description_file";
-const ATTR_RESPONSE_FILE: &str = "response_file";
-const ATTR_RESPONSE: &str = "response";
-const ATTR_PARAMS: &str = "params";
-const ATTR_CONTEXT: &str = "context";
-const ATTR_ENV: &str = "env";
-const TYPE_OPTION: &str = "Option";
-const TYPE_TOOL_CONTEXT: &str = "ToolContext";
-const TYPE_STR: &str = "str";
-const ATTR_LLM_TOOL: &str = "llm_tool";
+pub(crate) const MACRO_LLM_TOOL: &str = "llm_tool";
+pub(crate) const MACRO_LLM_PROMPT: &str = "llm_prompt";
+pub(crate) const MACRO_LLM_RESOURCE: &str = "llm_resource";
+
+pub(crate) const ATTR_DESCRIPTION: &str = "description";
+pub(crate) const ATTR_DESCRIPTION_FILE: &str = "description_file";
+pub(crate) const ATTR_RESPONSE_FILE: &str = "response_file";
+pub(crate) const ATTR_RESPONSE: &str = "response";
+pub(crate) const ATTR_PARAMS: &str = "params";
+pub(crate) const ATTR_CONTEXT: &str = "context";
+pub(crate) const ATTR_ENV: &str = "env";
+pub(crate) const ATTR_DOC: &str = "doc";
+
+pub(crate) const TYPE_OPTION: &str = "Option";
+pub(crate) const TYPE_TOOL_CONTEXT: &str = "ToolContext";
+pub(crate) const TYPE_STR: &str = "str";
+pub(crate) const TYPE_RESULT: &str = "Result";
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) enum ToolAttrKey {
+    Description,
+    DescriptionFile,
+    ResponseFile,
+    Response,
+    Params,
+    Env,
+    Context,
+}
+
+impl ToolAttrKey {
+    pub(crate) const ALL: &'static [Self] = &[
+        Self::Description,
+        Self::DescriptionFile,
+        Self::Response,
+        Self::ResponseFile,
+        Self::Params,
+        Self::Env,
+        Self::Context,
+    ];
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Description => ATTR_DESCRIPTION,
+            Self::DescriptionFile => ATTR_DESCRIPTION_FILE,
+            Self::ResponseFile => ATTR_RESPONSE_FILE,
+            Self::Response => ATTR_RESPONSE,
+            Self::Params => ATTR_PARAMS,
+            Self::Env => ATTR_ENV,
+            Self::Context => ATTR_CONTEXT,
+        }
+    }
+
+    pub(crate) fn expected_keys_error(span: proc_macro2::Span) -> syn::Error {
+        let mut parts: Vec<String> = Self::ALL
+            .iter()
+            .map(|k| format!("`{}`", k.as_str()))
+            .collect();
+        let last = parts.pop().unwrap_or_default();
+        let formatted = if parts.is_empty() {
+            last
+        } else {
+            format!("{}, or {last}", parts.join(", "))
+        };
+        syn::Error::new(span, format!("expected {formatted}"))
+    }
+}
+
+impl TryFrom<&syn::Ident> for ToolAttrKey {
+    type Error = syn::Error;
+
+    fn try_from(ident: &syn::Ident) -> Result<Self, Self::Error> {
+        let s = ident.to_string();
+        for &variant in Self::ALL {
+            if s == variant.as_str() {
+                return Ok(variant);
+            }
+        }
+        Err(Self::expected_keys_error(ident.span()))
+    }
+}
 
 #[derive(Default)]
 struct ToolAttrBuilder {
@@ -243,92 +312,140 @@ struct ToolAttrBuilder {
 }
 
 impl ToolAttrBuilder {
+    fn parse_params_attr(&mut self, input: syn::parse::ParseStream) -> syn::Result<()> {
+        let content;
+        syn::parenthesized!(content in input);
+        while !content.is_empty() {
+            let key: syn::Ident = content.parse()?;
+            let _: syn::Token![=] = content.parse()?;
+            let value: syn::LitStr = content.parse()?;
+            #[cfg(feature = "md-tmpl")]
+            self.inline_params.push((key, value));
+            #[cfg(not(feature = "md-tmpl"))]
+            {
+                drop(key);
+                drop(value);
+            }
+            if !content.is_empty() {
+                let _: syn::Token![,] = content.parse()?;
+            }
+        }
+        #[cfg(not(feature = "md-tmpl"))]
+        {
+            self.has_inline_params = true;
+        }
+        Ok(())
+    }
+
+    fn parse_env_attr(&mut self, input: syn::parse::ParseStream) -> syn::Result<()> {
+        let content;
+        syn::parenthesized!(content in input);
+        while !content.is_empty() {
+            let key: syn::Ident = content.parse()?;
+            let _: syn::Token![=] = content.parse()?;
+            let value: syn::Lit = content.parse()?;
+            match &value {
+                syn::Lit::Str(_) | syn::Lit::Int(_) | syn::Lit::Float(_) | syn::Lit::Bool(_) => {}
+                other => {
+                    return Err(syn::Error::new(
+                        other.span(),
+                        "env values must be string, integer, float, or bool literals",
+                    ));
+                }
+            }
+            #[cfg(feature = "md-tmpl")]
+            self.env_vars.push((key, value));
+            #[cfg(not(feature = "md-tmpl"))]
+            {
+                drop(key);
+                drop(value);
+            }
+            if !content.is_empty() {
+                let _: syn::Token![,] = content.parse()?;
+            }
+        }
+        #[cfg(not(feature = "md-tmpl"))]
+        {
+            self.has_env = true;
+        }
+        Ok(())
+    }
+
     fn parse_single(&mut self, input: syn::parse::ParseStream) -> syn::Result<()> {
         let ident: syn::Ident = input.parse()?;
-        if ident == ATTR_DESCRIPTION {
-            let _: syn::Token![=] = input.parse()?;
-            self.description_inline = Some(input.parse::<syn::LitStr>()?);
-        } else if ident == ATTR_DESCRIPTION_FILE {
-            let _: syn::Token![=] = input.parse()?;
-            self.description_file_path = Some(input.parse::<syn::LitStr>()?);
-        } else if ident == ATTR_RESPONSE_FILE {
-            let _: syn::Token![=] = input.parse()?;
-            self.response_file_path = Some(input.parse::<syn::LitStr>()?);
-        } else if ident == ATTR_RESPONSE {
-            let _: syn::Token![=] = input.parse()?;
-            self.response_inline = Some(input.parse::<syn::LitStr>()?);
-        } else if ident == ATTR_PARAMS {
-            let content;
-            syn::parenthesized!(content in input);
-            while !content.is_empty() {
-                let key: syn::Ident = content.parse()?;
-                let _: syn::Token![=] = content.parse()?;
-                let value: syn::LitStr = content.parse()?;
+        let key = ToolAttrKey::try_from(&ident)?;
+
+        match key {
+            ToolAttrKey::Description => {
+                let _: syn::Token![=] = input.parse()?;
+                if self.description_inline.is_some() {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!("duplicate `{}` attribute", key.as_str()),
+                    ));
+                }
+                self.description_inline = Some(input.parse::<syn::LitStr>()?);
+            }
+            ToolAttrKey::DescriptionFile => {
+                let _: syn::Token![=] = input.parse()?;
+                if self.description_file_path.is_some() {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!("duplicate `{}` attribute", key.as_str()),
+                    ));
+                }
+                self.description_file_path = Some(input.parse::<syn::LitStr>()?);
+            }
+            ToolAttrKey::ResponseFile => {
+                let _: syn::Token![=] = input.parse()?;
+                if self.response_file_path.is_some() {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!("duplicate `{}` attribute", key.as_str()),
+                    ));
+                }
+                self.response_file_path = Some(input.parse::<syn::LitStr>()?);
+            }
+            ToolAttrKey::Response => {
+                let _: syn::Token![=] = input.parse()?;
+                if self.response_inline.is_some() {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!("duplicate `{}` attribute", key.as_str()),
+                    ));
+                }
+                self.response_inline = Some(input.parse::<syn::LitStr>()?);
+            }
+            ToolAttrKey::Params => {
+                self.parse_params_attr(input)?;
+            }
+            ToolAttrKey::Env => {
+                self.parse_env_attr(input)?;
+            }
+            ToolAttrKey::Context => {
+                let _: syn::Token![=] = input.parse()?;
                 #[cfg(feature = "md-tmpl")]
-                self.inline_params.push((key, value));
-                #[cfg(not(feature = "md-tmpl"))]
                 {
-                    drop(key);
-                    drop(value);
-                }
-                if !content.is_empty() {
-                    let _: syn::Token![,] = content.parse()?;
-                }
-            }
-            #[cfg(not(feature = "md-tmpl"))]
-            {
-                self.has_inline_params = true;
-            }
-        } else if ident == ATTR_ENV {
-            let content;
-            syn::parenthesized!(content in input);
-            while !content.is_empty() {
-                let key: syn::Ident = content.parse()?;
-                let _: syn::Token![=] = content.parse()?;
-                let value: syn::Lit = content.parse()?;
-                match &value {
-                    syn::Lit::Str(_)
-                    | syn::Lit::Int(_)
-                    | syn::Lit::Float(_)
-                    | syn::Lit::Bool(_) => {}
-                    other => {
+                    if self.context_fn.is_some() {
                         return Err(syn::Error::new(
-                            other.span(),
-                            "env values must be string, integer, float, or bool literals",
+                            ident.span(),
+                            format!("duplicate `{}` attribute", key.as_str()),
                         ));
                     }
+                    self.context_fn = Some(input.parse::<syn::Path>()?);
                 }
-                #[cfg(feature = "md-tmpl")]
-                self.env_vars.push((key, value));
                 #[cfg(not(feature = "md-tmpl"))]
                 {
-                    drop(key);
-                    drop(value);
+                    let _path: syn::Path = input.parse()?;
+                    if self.has_context_fn {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            format!("duplicate `{}` attribute", key.as_str()),
+                        ));
+                    }
+                    self.has_context_fn = true;
                 }
-                if !content.is_empty() {
-                    let _: syn::Token![,] = content.parse()?;
-                }
             }
-            #[cfg(not(feature = "md-tmpl"))]
-            {
-                self.has_env = true;
-            }
-        } else if ident == ATTR_CONTEXT {
-            let _: syn::Token![=] = input.parse()?;
-            #[cfg(feature = "md-tmpl")]
-            {
-                self.context_fn = Some(input.parse::<syn::Path>()?);
-            }
-            #[cfg(not(feature = "md-tmpl"))]
-            {
-                let _path: syn::Path = input.parse()?;
-                self.has_context_fn = true;
-            }
-        } else {
-            return Err(syn::Error::new(
-                ident.span(),
-                "expected `description`, `description_file`, `response`, `response_file`, `params`, `env`, or `context`",
-            ));
         }
         Ok(())
     }
@@ -346,41 +463,16 @@ impl syn::parse::Parse for ToolAttr {
         }
 
         #[cfg(feature = "md-tmpl")]
-        let (has_inline_params, has_context_fn, has_env) = (
-            !builder.inline_params.is_empty(),
-            builder.context_fn.is_some(),
-            !builder.env_vars.is_empty(),
-        );
+        let has_inline_params = !builder.inline_params.is_empty();
         #[cfg(not(feature = "md-tmpl"))]
-        let (has_inline_params, has_context_fn, has_env) = (
-            builder.has_inline_params,
-            builder.has_context_fn,
-            builder.has_env,
-        );
+        let has_inline_params = builder.has_inline_params;
 
-        validate_tool_attr(
-            builder.description_inline.as_ref(),
-            builder.description_file_path.as_ref(),
-            has_inline_params,
-            has_context_fn,
-            has_env,
-        )?;
-
-        if builder.response_inline.is_some() && builder.response_file_path.is_some() {
-            return Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
-                "cannot specify both `response` and `response_file`",
-            ));
-        }
-
-        // Validate response_file requires md-tmpl feature.
+        #[cfg(feature = "md-tmpl")]
+        let has_context_fn = builder.context_fn.is_some();
         #[cfg(not(feature = "md-tmpl"))]
-        if builder.response_file_path.is_some() || builder.response_inline.is_some() {
-            return Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
-                "the `md-tmpl` feature must be enabled to use `response = \"...\"` or `response_file = \"...\"`",
-            ));
-        }
+        let has_context_fn = builder.has_context_fn;
+
+        validate_tool_attr(&builder)?;
 
         Ok(Self {
             description_inline: builder.description_inline,
@@ -399,56 +491,36 @@ impl syn::parse::Parse for ToolAttr {
     }
 }
 
-/// Validate mutual-exclusion and presence constraints for parsed `#[llm_tool(...)]`
-/// attribute fields.
-fn validate_tool_attr(
-    description_inline: Option<&LitStr>,
-    description_file_path: Option<&LitStr>,
-    has_inline_params: bool,
-    has_context_fn: bool,
-    has_env: bool,
-) -> syn::Result<()> {
-    // Mutual exclusion: description vs description_file.
-    if description_inline.is_some() && description_file_path.is_some() {
+fn validate_tool_attr(builder: &ToolAttrBuilder) -> syn::Result<()> {
+    if builder.description_inline.is_some() && builder.description_file_path.is_some() {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
             "`description` and `description_file` are mutually exclusive",
         ));
     }
 
-    // params/context require a template source (description_file or description).
-    if description_file_path.is_none() && description_inline.is_none() && has_inline_params {
+    if builder.response_file_path.is_some() && builder.response_inline.is_some() {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            "`params(...)` requires `description_file = \"...\"` or `description = \"...\"`",
-        ));
-    }
-    if description_file_path.is_none() && description_inline.is_none() && has_context_fn {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "`context = ...` requires `description_file = \"...\"` or `description = \"...\"`",
+            "`response` and `response_file` are mutually exclusive",
         ));
     }
 
-    // env() requires a template source (description_file or description with frontmatter).
-    if has_env && description_file_path.is_none() && description_inline.is_none() {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "`env(...)` requires `description_file = \"...\"` or `description = \"...\"`",
-        ));
-    }
-
-    // env() requires the md-tmpl feature.
+    #[cfg(feature = "md-tmpl")]
+    let has_inline_params = !builder.inline_params.is_empty();
     #[cfg(not(feature = "md-tmpl"))]
-    if has_env {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "the `md-tmpl` feature must be enabled to use `env(...)`. \
-             Add `features = [\"md-tmpl\"]` to your llm-tool dependency.",
-        ));
-    }
+    let has_inline_params = builder.has_inline_params;
 
-    // params and context are mutually exclusive.
+    #[cfg(feature = "md-tmpl")]
+    let has_context_fn = builder.context_fn.is_some();
+    #[cfg(not(feature = "md-tmpl"))]
+    let has_context_fn = builder.has_context_fn;
+
+    #[cfg(feature = "md-tmpl")]
+    let has_env = !builder.env_vars.is_empty();
+    #[cfg(not(feature = "md-tmpl"))]
+    let has_env = builder.has_env;
+
     if has_inline_params && has_context_fn {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
@@ -457,14 +529,55 @@ fn validate_tool_attr(
         ));
     }
 
-    // Must have at least description or description_file (unless only response_file
-    // is set, in which case doc comments serve as the description).
-    if description_inline.is_none()
-        && description_file_path.is_none()
-        && !has_inline_params
-        && !has_context_fn
+    if has_inline_params
+        && builder.description_file_path.is_none()
+        && builder.description_inline.is_none()
     {
-        // This is fine — doc comments will be used as fallback.
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`params(...)` requires `description_file = \"...\"` or `description = \"...\"`",
+        ));
+    }
+
+    if has_context_fn
+        && builder.description_file_path.is_none()
+        && builder.description_inline.is_none()
+    {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`context = ...` requires `description_file = \"...\"` or `description = \"...\"`",
+        ));
+    }
+
+    if has_env && builder.description_file_path.is_none() && builder.description_inline.is_none() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`env(...)` requires `description_file = \"...\"` or `description = \"...\"`",
+        ));
+    }
+
+    #[cfg(not(feature = "md-tmpl"))]
+    if builder.description_file_path.is_some() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`description_file` requires the `md-tmpl` feature of `llm-tool`",
+        ));
+    }
+
+    #[cfg(not(feature = "md-tmpl"))]
+    if builder.response_file_path.is_some() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`response_file` requires the `md-tmpl` feature of `llm-tool`",
+        ));
+    }
+
+    #[cfg(not(feature = "md-tmpl"))]
+    if builder.response_inline.is_some() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`response` requires the `md-tmpl` feature of `llm-tool`",
+        ));
     }
 
     Ok(())
@@ -478,6 +591,7 @@ struct ParamInfo {
     ty: Box<syn::Type>,
     doc_attrs: Vec<syn::Attribute>,
     is_context: bool,
+    is_mut: bool,
 }
 
 /// Information about the function's return type.
@@ -494,7 +608,7 @@ enum ReturnInfo {
 fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2::TokenStream> {
     let crate_path = quote! { ::llm_tool };
     let fn_name = &func.sig.ident;
-    reject_generic_signature(func, ATTR_LLM_TOOL)?;
+    reject_generic_signature(func, MACRO_LLM_TOOL)?;
     let tool_name_str = fn_name.to_string();
     let struct_name = format_ident!("{}", tool_name_str.to_case(Case::Pascal));
     let params_name = format_ident!("{}Params", struct_name);
@@ -511,7 +625,14 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
     let response_info = resolve_response_template(attr, &struct_name, fn_name)?;
 
     // Extract parameters, separating ToolContext from regular params.
-    let all_params = extract_params(func)?;
+    let all_params = extract_params(func, MACRO_LLM_TOOL)?;
+    let ctx_count = all_params.iter().filter(|p| p.is_context).count();
+    if ctx_count > 1 {
+        return Err(syn::Error::new_spanned(
+            &func.sig,
+            "#[llm_tool] functions can accept at most one ToolContext parameter",
+        ));
+    }
     let ctx_param = all_params.iter().find(|p| p.is_context);
     let params: Vec<&ParamInfo> = all_params.iter().filter(|p| !p.is_context).collect();
 
@@ -530,7 +651,7 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
     }
 
     // Parse return type: either Result<T, E> or bare T.
-    let return_info = parse_return_type(func)?;
+    let return_info = parse_return_type(func, MACRO_LLM_TOOL)?;
 
     let param_names: Vec<_> = params.iter().map(|p| &p.name).collect();
     let param_descriptions: Vec<String> = params
@@ -557,6 +678,17 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
     } else {
         quote! {}
     };
+
+    let mut_tokens: Vec<proc_macro2::TokenStream> = params
+        .iter()
+        .map(|p| {
+            if p.is_mut {
+                quote! { mut }
+            } else {
+                quote! {}
+            }
+        })
+        .collect();
 
     let response_dep_tracking = &response_info.dep_tracking;
     let response_helper_tokens = &response_info.helper_tokens;
@@ -597,7 +729,7 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
                 use #crate_path::__private::SerializeFallback as _;
                 // Destructure params into local bindings matching the original
                 // function signature.
-                let #params_name { #( #param_names, )* } = params;
+                let #params_name { #( #mut_tokens #param_names, )* } = params;
                 // Auto-borrow &str params from their owned String fields.
                 #( #borrow_bindings )*
                 #ctx_binding

@@ -198,6 +198,9 @@ pub struct InitializeResult {
     pub protocol_version: &'static str,
     /// Server name and version.
     pub server_info: ServerInfo,
+    /// Optional instructions describing how to use the server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
     /// Advertised capabilities.
     pub capabilities: Capabilities,
 }
@@ -212,15 +215,18 @@ pub struct ServerInfo {
 }
 
 /// Server capabilities advertised during `initialize`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct Capabilities {
     /// Tool support — presence signals that `tools/list` and `tools/call`
     /// are available.
-    pub tools: ToolCapabilities,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<ToolCapabilities>,
     /// Resource support — presence signals that `resources/list` is available.
-    pub resources: ResourceCapabilities,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceCapabilities>,
     /// Prompt support — presence signals that `prompts/list` is available.
-    pub prompts: PromptCapabilities,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompts: Option<PromptCapabilities>,
 }
 
 /// Tool-specific capabilities (currently empty per MCP spec).

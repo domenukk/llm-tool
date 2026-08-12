@@ -13,6 +13,7 @@ fn tool_macro_compile_tests() {
     t.pass("tests/ui/typed_return.rs");
     t.pass("tests/ui/context_explicit_opt_in.rs");
     t.pass("tests/ui/wrong_return_type.rs");
+    t.pass("tests/ui/mut_params.rs");
     // Compile-fail cases:
     t.compile_fail("tests/ui/missing_doc.rs");
     t.compile_fail("tests/ui/missing_param_doc.rs");

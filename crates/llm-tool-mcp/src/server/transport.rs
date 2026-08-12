@@ -336,6 +336,15 @@ impl McpServer {
     pub async fn listen_unix(&self, path: impl AsRef<std::path::Path>) -> io::Result<()> {
         let path = path.as_ref();
         if path.exists() {
+            if tokio::net::UnixStream::connect(path).await.is_ok() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!(
+                        "another process is already listening on Unix socket {}",
+                        path.display()
+                    ),
+                ));
+            }
             if let Err(e) = std::fs::remove_file(path) {
                 tracing::warn!(path = ?path, error = %e, "failed to remove stale socket file");
             }

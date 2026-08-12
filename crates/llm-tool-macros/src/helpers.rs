@@ -6,8 +6,8 @@ use syn::LitStr;
 use syn::{FnArg, GenericArgument, ItemFn, Pat, PatType, PathArguments, Type};
 
 use crate::{
-    ATTR_CONTEXT, ATTR_LLM_TOOL, ParamInfo, ReturnInfo, TYPE_OPTION, TYPE_STR, TYPE_TOOL_CONTEXT,
-    ToolAttr,
+    ATTR_CONTEXT, ATTR_DOC, MACRO_LLM_TOOL, ParamInfo, ReturnInfo, TYPE_OPTION, TYPE_RESULT,
+    TYPE_STR, TYPE_TOOL_CONTEXT, ToolAttr,
 };
 #[cfg(feature = "md-tmpl")]
 use crate::{desc, response_struct_gen};
@@ -236,8 +236,8 @@ pub(crate) fn resolve_response_template_file(
 
     let env_toks = desc::env_tokens(attr);
     let helper_tokens = quote! {
-        ::llm_tool::__md_tmpl_macros::template!(
-            #source as #response_struct_name => #response_mod_name,
+        ::llm_tool::__md_tmpl_macros::include_template!(
+            #response_path as #response_struct_name => #response_mod_name,
             crate = ::llm_tool::__md_tmpl
             #env_toks
         );
@@ -383,7 +383,7 @@ pub(crate) fn is_str_ref(ty: &syn::Type) -> bool {
 }
 
 pub(crate) fn is_explicit_context_attr(attr: &syn::Attribute) -> syn::Result<bool> {
-    if !attr.path().is_ident(ATTR_LLM_TOOL) {
+    if !attr.path().is_ident(MACRO_LLM_TOOL) {
         return Ok(false);
     }
     let mut is_context = false;
@@ -398,23 +398,23 @@ pub(crate) fn is_explicit_context_attr(attr: &syn::Attribute) -> syn::Result<boo
     Ok(is_context)
 }
 
-pub(crate) fn extract_params(func: &ItemFn) -> syn::Result<Vec<ParamInfo>> {
+pub(crate) fn extract_params(func: &ItemFn, macro_name: &str) -> syn::Result<Vec<ParamInfo>> {
     let mut params = Vec::new();
     for arg in &func.sig.inputs {
         match arg {
             FnArg::Receiver(r) => {
                 return Err(syn::Error::new_spanned(
                     r,
-                    "#[llm_tool] functions must be free functions (no `self`)",
+                    format!("#[{macro_name}] functions must be free functions (no `self`)"),
                 ));
             }
             FnArg::Typed(PatType { pat, ty, attrs, .. }) => {
-                let name = match pat.as_ref() {
-                    Pat::Ident(ident) => ident.ident.clone(),
+                let (name, is_mut) = match pat.as_ref() {
+                    Pat::Ident(ident) => (ident.ident.clone(), ident.mutability.is_some()),
                     other => {
                         return Err(syn::Error::new_spanned(
                             other,
-                            "#[llm_tool] parameters must be simple identifiers",
+                            format!("#[{macro_name}] parameters must be simple identifiers"),
                         ));
                     }
                 };
@@ -435,7 +435,7 @@ pub(crate) fn extract_params(func: &ItemFn) -> syn::Result<Vec<ParamInfo>> {
 
                 let doc_attrs: Vec<syn::Attribute> = attrs
                     .iter()
-                    .filter(|a| a.path().is_ident("doc"))
+                    .filter(|a| a.path().is_ident(ATTR_DOC))
                     .cloned()
                     .collect();
                 params.push(ParamInfo {
@@ -443,6 +443,7 @@ pub(crate) fn extract_params(func: &ItemFn) -> syn::Result<Vec<ParamInfo>> {
                     ty: ty.clone(),
                     doc_attrs,
                     is_context,
+                    is_mut,
                 });
             }
         }
@@ -481,14 +482,14 @@ pub(crate) fn extract_doc_string(attrs: &[syn::Attribute]) -> String {
     let lines: Vec<String> = attrs
         .iter()
         .filter_map(|attr| {
-            if !attr.path().is_ident("doc") {
+            if !attr.path().is_ident(ATTR_DOC) {
                 return None;
             }
             if let syn::Meta::NameValue(nv) = &attr.meta
                 && let syn::Expr::Lit(lit) = &nv.value
                 && let syn::Lit::Str(s) = &lit.lit
             {
-                return Some(s.value());
+                return Some(s.value().replace("\r\n", "\n"));
             }
             None
         })
@@ -503,16 +504,16 @@ pub(crate) fn extract_doc_string(attrs: &[syn::Attribute]) -> String {
 }
 
 /// Parse the return type — either `Result<T, E>` or a bare type `T`.
-pub(crate) fn parse_return_type(func: &ItemFn) -> syn::Result<ReturnInfo> {
+pub(crate) fn parse_return_type(func: &ItemFn, macro_name: &str) -> syn::Result<ReturnInfo> {
     let syn::ReturnType::Type(_, ty) = &func.sig.output else {
         return Err(syn::Error::new_spanned(
             &func.sig,
-            "#[llm_tool] functions must have an explicit return type",
+            format!("#[{macro_name}] functions must have an explicit return type"),
         ));
     };
 
     // Try to parse as Result<T, E>.
-    if let Some(result_types) = try_extract_result_types(ty) {
+    if let Some(result_types) = try_extract_result_types(ty)? {
         return Ok(result_types);
     }
 
@@ -522,37 +523,47 @@ pub(crate) fn parse_return_type(func: &ItemFn) -> syn::Result<ReturnInfo> {
 
 /// Try to extract `T` and `E` from a `Result<T, E>` return type.
 /// Returns `None` if the type is not a `Result`.
-pub(crate) fn try_extract_result_types(ty: &syn::Type) -> Option<ReturnInfo> {
+pub(crate) fn try_extract_result_types(ty: &syn::Type) -> syn::Result<Option<ReturnInfo>> {
     let Type::Path(type_path) = ty else {
-        return None;
+        return Ok(None);
     };
 
-    let last_seg = type_path.path.segments.last()?;
+    let Some(last_seg) = type_path.path.segments.last() else {
+        return Ok(None);
+    };
 
-    if last_seg.ident != "Result" {
-        return None;
+    if last_seg.ident != TYPE_RESULT {
+        return Ok(None);
     }
 
     let PathArguments::AngleBracketed(args) = &last_seg.arguments else {
-        return None;
+        return Ok(None);
     };
 
+    if args.args.len() == 1 {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "1-argument Result aliases (e.g. `anyhow::Result<T>`, `io::Result<T>`) are not supported directly; \
+             please specify both generic arguments: `Result<T, anyhow::Error>` or `Result<T, std::io::Error>`",
+        ));
+    }
+
     if args.args.len() != 2 {
-        return None;
+        return Ok(None);
     }
 
     let GenericArgument::Type(ok_type) = &args.args[0] else {
-        return None;
+        return Ok(None);
     };
 
     let GenericArgument::Type(err_type) = &args.args[1] else {
-        return None;
+        return Ok(None);
     };
 
-    Some(ReturnInfo::ResultType {
+    Ok(Some(ReturnInfo::ResultType {
         ok_type: Box::new(ok_type.clone()),
         err_type: Box::new(err_type.clone()),
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -595,11 +606,19 @@ mod tests {
 
     #[test]
     fn try_extract_result_types_requires_two_args() {
-        assert!(try_extract_result_types(&ty("Result<u32, String>")).is_some());
-        assert!(try_extract_result_types(&ty("std::result::Result<u32, E>")).is_some());
-        // Single-arg aliases (anyhow::Result, io::Result) are not recognized.
-        assert!(try_extract_result_types(&ty("Result<u32>")).is_none());
-        assert!(try_extract_result_types(&ty("String")).is_none());
+        assert!(
+            try_extract_result_types(&ty("Result<u32, String>"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            try_extract_result_types(&ty("std::result::Result<u32, E>"))
+                .unwrap()
+                .is_some()
+        );
+        // Single-arg aliases (anyhow::Result, io::Result) produce a compile error.
+        assert!(try_extract_result_types(&ty("Result<u32>")).is_err());
+        assert!(try_extract_result_types(&ty("String")).unwrap().is_none());
     }
 
     #[test]

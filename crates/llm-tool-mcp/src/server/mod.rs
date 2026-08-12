@@ -82,6 +82,7 @@ pub use transport::Transport;
 pub struct McpServer {
     name: String,
     version: String,
+    instructions: Option<String>,
     registry: Arc<ToolRegistry>,
     context: Arc<ToolContext>,
     /// Pre-serialized `tools/list` result body — built once at construction and
@@ -223,6 +224,13 @@ impl McpServer {
     #[must_use]
     pub fn with_context(mut self, context: ToolContext) -> Self {
         self.context = Arc::new(context);
+        self
+    }
+
+    /// Provide instructions describing how to use the server.
+    #[must_use]
+    pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
+        self.instructions = Some(instructions.into());
         self
     }
 

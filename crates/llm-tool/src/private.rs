@@ -36,9 +36,10 @@ pub mod __private {
     /// `no_std` (where no logger is available).
     #[cfg(feature = "std")]
     pub fn log_description_render_error(tool: &str, err: &dyn core::fmt::Display) {
-        eprintln!(
-            "llm-tool: tool `{tool}` description template failed to render ({err}); \
-             falling back to static description"
+        tracing::warn!(
+            tool,
+            error = %err,
+            "llm-tool: tool description template failed to render; falling back to static description"
         );
     }
 
@@ -108,7 +109,16 @@ pub mod __private {
     impl<T: serde::Serialize> Wrap<Json<T>> {
         /// `Json<T>` → serialize to JSON string.
         pub fn __convert(self) -> Result<ToolOutput, ToolError> {
-            Ok((self.0).into())
+            let json_value = serde_json::to_value(&self.0.0)
+                .map_err(|e| ToolError::new(format!("serialization failed: {e}")))?;
+            let content = json_value.to_string();
+            match json_value {
+                serde_json::Value::Object(map) => Ok(ToolOutput {
+                    content,
+                    metadata: map.into_iter().collect(),
+                }),
+                _ => Ok(ToolOutput::new(content)),
+            }
         }
     }
 

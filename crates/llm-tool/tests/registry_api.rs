@@ -254,3 +254,100 @@ async fn resource_registry_read_matching_and_non_matching() {
     assert_eq!(err.metadata()["error_kind"], "not_registered");
     assert!(err.to_string().contains(uri), "unexpected error: {err}");
 }
+
+// ── Registry Mutation & Shared State ─────────────────────────────────
+
+#[test]
+fn registries_remove_clear_and_is_empty() {
+    let mut tools = ToolRegistry::new().with_tool(Echo).with_tool(Shout);
+    assert_eq!(tools.len(), 2);
+    assert!(tools.remove("echo"));
+    assert_eq!(tools.len(), 1);
+    assert!(!tools.contains("echo"));
+    assert!(tools.contains("shout"));
+    assert!(!tools.remove("missing"));
+    tools.clear();
+    assert!(tools.is_empty());
+
+    let mut prompts = PromptRegistry::new().with_prompt(Greet);
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts.remove("greet"));
+    assert!(prompts.is_empty());
+    prompts.register(Greet);
+    prompts.clear();
+    assert!(prompts.is_empty());
+
+    let mut resources = ResourceRegistry::new().with_resource(Blob);
+    assert_eq!(resources.len(), 1);
+    assert!(resources.remove("blob"));
+    assert!(resources.is_empty());
+    resources.register(Blob);
+    resources.clear();
+    assert!(resources.is_empty());
+}
+
+#[test]
+fn shared_state_direct_methods() {
+    let state = llm_tool::SharedState::new();
+    assert_eq!(
+        state.get_state("key", serde_json::json!("default")),
+        serde_json::json!("default")
+    );
+    state
+        .set_state("key", serde_json::json!("value"))
+        .expect("set_state succeeds");
+    assert_eq!(
+        state.get_state("key", serde_json::json!("default")),
+        serde_json::json!("value")
+    );
+    assert!(state.remove_state("key"));
+    assert!(!state.remove_state("key"));
+    assert_eq!(
+        state.get_state("key", serde_json::json!("default")),
+        serde_json::json!("default")
+    );
+
+    state
+        .set_state("k1", serde_json::json!(100))
+        .expect("set_state succeeds");
+    state
+        .set_state("k2", serde_json::json!(200))
+        .expect("set_state succeeds");
+    state.clear_state();
+    assert_eq!(
+        state.get_state("k1", serde_json::Value::Null),
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        state.get_state("k2", serde_json::Value::Null),
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn tool_error_metadata_preservation() {
+    let err = ToolError::not_found(RegistryItem::Tool, "test")
+        .with_meta("initial_key", serde_json::json!("initial_val"))
+        .with_metadata(&serde_json::json!({"custom_key": "custom_value"}))
+        .expect("with_metadata succeeds");
+    assert_eq!(err.metadata()["error_kind"], "not_registered");
+    assert_eq!(err.metadata()["initial_key"], "initial_val");
+    assert_eq!(err.metadata()["custom_key"], "custom_value");
+}
+
+#[test]
+fn tool_definition_partial_eq() {
+    let reg = ToolRegistry::new().with_tool(Echo);
+    let def1 = reg.definition("echo").unwrap();
+    let def2 = reg.definition("echo").unwrap();
+    assert_eq!(def1, def2);
+}
+
+#[test]
+fn tool_context_clone_and_debug() {
+    let ctx = ToolContext::new().with_conversation_id("conv-123");
+    let cloned = ctx.clone();
+    assert_eq!(ctx.conversation_id(), cloned.conversation_id());
+    let dbg = format!("{ctx:?}");
+    assert!(dbg.contains("conv-123"));
+}

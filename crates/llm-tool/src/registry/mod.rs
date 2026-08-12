@@ -1,6 +1,6 @@
 //! Tool registry: registry and concurrent dispatch of named tools.
 
-use alloc::{boxed::Box, format, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 
 use super::{
     rust_tool::{ErasedTool, RustTool, definition_of},
@@ -185,9 +185,17 @@ impl ToolRegistry {
         let Some(entry) = self.tools.get(name) else {
             return Err(ToolError::not_found(RegistryItem::Tool, name));
         };
-        let args = serde_json::from_str(args_json)
-            .map_err(|e| ToolError::new(format!("Malformed JSON arguments: {e}")))?;
-        entry.erased.call_erased(args, ctx).await
+        entry.erased.call_erased_str(args_json, ctx).await
+    }
+
+    /// Remove a tool by name, returning `true` if it was present.
+    pub fn remove(&mut self, name: &str) -> bool {
+        self.tools.remove(name).is_some()
+    }
+
+    /// Clear all registered tools.
+    pub fn clear(&mut self) {
+        self.tools.clear();
     }
 
     /// Number of registered tools.

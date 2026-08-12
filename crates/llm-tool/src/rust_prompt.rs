@@ -200,6 +200,16 @@ impl PromptRegistry {
             .collect()
     }
 
+    /// Remove a prompt by name, returning `true` if it was present.
+    pub fn remove(&mut self, name: &str) -> bool {
+        self.prompts.remove(name).is_some()
+    }
+
+    /// Clear all registered prompts.
+    pub fn clear(&mut self) {
+        self.prompts.clear();
+    }
+
     /// Number of registered prompts.
     #[must_use]
     pub fn len(&self) -> usize {
