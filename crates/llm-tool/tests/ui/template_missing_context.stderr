@@ -2,4 +2,4 @@ error: template 'tools/dynamic_desc_test.tmpl.md' declares parameters (api_versi
  --> tests/ui/template_missing_context.rs:4:31
   |
 4 | #[llm_tool(description_file = "tools/dynamic_desc_test.tmpl.md")]
-  |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

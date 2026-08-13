@@ -1,11 +1,11 @@
 [package]
 name = "llm-tool"
-version = "0.9.3"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 rust-version = "1.95"
 description = "Framework-agnostic Rust tool definitions for LLM agents"
-license = "Apache-2.0 OR MIT"
-repository = "https://github.com/domenukk/llm-tool"
+license.workspace = true
+repository.workspace = true
 readme = "README.md"
 keywords = ["llm", "tool", "agent", "function-calling"]
 categories = ["api-bindings"]
@@ -31,7 +31,7 @@ md-tmpl = [
 ]
 
 [dependencies]
-llm-tool-macros = { path = "../llm-tool-macros", version = "0.9.3" }
+llm-tool-macros = { path = "../llm-tool-macros", version = "0.9.4" }
 md-tmpl = { version = "0.9.3", optional = true, default-features = false, features = [
   "serde",
 ] }

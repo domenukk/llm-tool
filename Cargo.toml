@@ -2,6 +2,13 @@
 members = ["crates/llm-tool", "crates/llm-tool-macros", "crates/llm-tool-mcp"]
 resolver = "3"
 
+[workspace.package]
+version = "0.9.4"
+edition = "2024"
+rust-version = "1.86"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/domenukk/llm-tool"
+
 [workspace.lints.clippy]
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }

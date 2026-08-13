@@ -439,7 +439,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "llm-tool"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "futures",
  "hashbrown",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "llm-tool-macros"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "convert_case",
  "hashbrown",
@@ -467,11 +467,12 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+ "tempfile",
 ]
 
 [[package]]
 name = "llm-tool-mcp"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "llm-tool",
  "rmcp",

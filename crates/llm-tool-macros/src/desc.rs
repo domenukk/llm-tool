@@ -1,4 +1,19 @@
 #[cfg(feature = "md-tmpl")]
+fn missing_params_context_error(
+    span: proc_macro2::Span,
+    source_label: &str,
+    declared: &[&str],
+) -> syn::Error {
+    syn::Error::new(
+        span,
+        format!(
+            "{source_label} declares parameters ({}) but neither `params(...)` nor `context = ...` was provided",
+            declared.join(", ")
+        ),
+    )
+}
+
+#[cfg(feature = "md-tmpl")]
 use quote::format_ident;
 use quote::quote;
 use syn::{ItemFn, LitStr};
@@ -312,13 +327,10 @@ pub(crate) fn resolve_template_description_impl(
     } else {
         // Template declares variables but neither params nor context provided.
         let declared: Vec<&str> = fm.declarations.iter().map(|d| d.name.as_str()).collect();
-        Err(syn::Error::new(
+        Err(missing_params_context_error(
             template_lit.span(),
-            format!(
-                "template '{rel_path}' declares parameters ({}) but neither \
-                 `params(...)` nor `context = ...` was provided",
-                declared.join(", ")
-            ),
+            &format!("template '{rel_path}'"),
+            &declared,
         ))
     }
 }
@@ -411,13 +423,10 @@ pub(crate) fn resolve_inline_description_impl(
         })
     } else {
         let declared: Vec<&str> = fm.declarations.iter().map(|d| d.name.as_str()).collect();
-        Err(syn::Error::new(
+        Err(missing_params_context_error(
             template_lit.span(),
-            format!(
-                "inline template declares parameters ({}) but neither \
-                 `params(...)` nor `context = ...` was provided",
-                declared.join(", ")
-            ),
+            "inline template",
+            &declared,
         ))
     }
 }
@@ -643,4 +652,72 @@ pub(crate) fn resolve_template_with_params(
         description_method: None,
         dep_tracking,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use syn::{ItemFn, parse_quote};
+
+    use super::*;
+
+    #[test]
+    fn missing_doc_comment_errors() {
+        let func: ItemFn = parse_quote! {
+            fn my_tool(x: i32) -> String { format!("{x}") }
+        };
+        let Err(err) = resolve_description(&func, None) else {
+            panic!("expected error for missing doc comment");
+        };
+        assert!(err.to_string().contains("must have a doc comment"));
+    }
+
+    #[test]
+    #[cfg(feature = "md-tmpl")]
+    fn inline_template_missing_context_errors() {
+        use quote::quote;
+        let func: ItemFn = parse_quote! {
+            fn missing_context(x: i64) -> Result<String, String> { Ok(format!("{x}")) }
+        };
+        let attr: ToolAttr = syn::parse2(quote! {
+            description = "---\nparams:\n  - api_version = str\n---\nRunning on {{ api_version }}"
+        })
+        .expect("parse attr");
+        let Err(err) = resolve_description(&func, Some(&attr)) else {
+            panic!("expected error for missing context");
+        };
+        assert!(
+            err.to_string().contains(
+                "inline template declares parameters (api_version) but neither `params(...)` nor `context = ...` was provided"
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "md-tmpl")]
+    fn template_file_missing_context_errors() {
+        use quote::quote;
+        let tmp = tempfile::NamedTempFile::new().expect("create tempfile");
+        std::fs::write(
+            tmp.path(),
+            "---\nparams:\n  - api_version = str\n---\nRunning on {{ api_version }}",
+        )
+        .expect("write template");
+        let path_str = tmp.path().to_str().expect("path");
+
+        let func: ItemFn = parse_quote! {
+            fn missing_context(x: i64) -> Result<String, String> { Ok(format!("{x}")) }
+        };
+        let attr: ToolAttr = syn::parse2(quote! {
+            description_file = #path_str
+        })
+        .expect("parse attr");
+        let Err(err) = resolve_description(&func, Some(&attr)) else {
+            panic!("expected error for missing context");
+        };
+        assert!(
+            err.to_string().contains(
+                "declares parameters (api_version) but neither `params(...)` nor `context = ...` was provided"
+            )
+        );
+    }
 }
