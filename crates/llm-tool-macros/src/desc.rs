@@ -224,8 +224,7 @@ pub(crate) fn resolve_template_description_impl(
         .as_ref()
         .expect("description_file_path validated");
     let rel_path = template_lit.value();
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-    let full_path = std::path::Path::new(&manifest_dir).join(&rel_path);
+    let full_path = crate::helpers::resolve_manifest_path(&rel_path);
 
     let source = std::fs::read_to_string(&full_path).map_err(|e| {
         syn::Error::new(
@@ -582,8 +581,7 @@ pub(crate) fn resolve_template_with_params(
     // Build context and render at compile time.
     // Use Template::compile with base_dir so {% include %} and env: resolve correctly.
     let base_dir = attr.description_file_path.as_ref().map(|lit| {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-        let full = std::path::PathBuf::from(&manifest_dir).join(lit.value());
+        let full = crate::helpers::resolve_manifest_path(&lit.value());
         full.parent()
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf()

@@ -181,6 +181,18 @@ pub(crate) fn resolve_response_template(
     Ok(ResponseTemplateInfo::default())
 }
 
+/// Resolve a template path relative to `CARGO_MANIFEST_DIR` (or absolute path as-is).
+#[cfg(feature = "md-tmpl")]
+pub(crate) fn resolve_manifest_path(rel_path: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(rel_path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        std::path::Path::new(&manifest_dir).join(rel_path)
+    }
+}
+
 /// Feature-gated implementation of response template resolution from file.
 #[cfg(feature = "md-tmpl")]
 pub(crate) fn resolve_response_template_file(
@@ -190,8 +202,7 @@ pub(crate) fn resolve_response_template_file(
     fn_name: &syn::Ident,
 ) -> syn::Result<ResponseTemplateInfo> {
     let rel_path = response_path.value();
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-    let full_path = std::path::Path::new(&manifest_dir).join(&rel_path);
+    let full_path = resolve_manifest_path(&rel_path);
     let path_str = full_path.to_string_lossy().to_string();
 
     // Validate the template file exists and parses at compile time.
