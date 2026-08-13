@@ -182,6 +182,10 @@ pub(crate) fn resolve_response_template(
 }
 
 /// Resolve a template path relative to `CARGO_MANIFEST_DIR` (or absolute path as-is).
+///
+/// If the relative path does not exist under `CARGO_MANIFEST_DIR` (e.g. inside `trybuild`
+/// runner crates located in `target/tests/trybuild/`), this function walks up parent
+/// directories to find the file in the workspace or subcrates.
 #[cfg(feature = "md-tmpl")]
 pub(crate) fn resolve_manifest_path(rel_path: &str) -> std::path::PathBuf {
     let path = std::path::Path::new(rel_path);
@@ -189,7 +193,29 @@ pub(crate) fn resolve_manifest_path(rel_path: &str) -> std::path::PathBuf {
         path.to_path_buf()
     } else {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-        std::path::Path::new(&manifest_dir).join(rel_path)
+        let candidate = std::path::Path::new(&manifest_dir).join(rel_path);
+        if candidate.exists() {
+            return candidate;
+        }
+
+        let mut dir = std::path::Path::new(&manifest_dir);
+        while let Some(parent) = dir.parent() {
+            let direct = parent.join(rel_path);
+            if direct.exists() {
+                return direct;
+            }
+            if let Ok(entries) = std::fs::read_dir(parent.join("crates")) {
+                for entry in entries.flatten() {
+                    let crate_path = entry.path().join(rel_path);
+                    if crate_path.exists() {
+                        return crate_path;
+                    }
+                }
+            }
+            dir = parent;
+        }
+
+        candidate
     }
 }
 
