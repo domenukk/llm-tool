@@ -977,3 +977,93 @@ async fn initialize_capabilities_omitted_when_registries_empty() {
     assert!(result["capabilities"].get("prompts").is_none());
     assert!(result["capabilities"].get("resources").is_none());
 }
+
+#[tokio::test]
+async fn batch_preserves_id_on_invalid_request_member() {
+    let server = test_server();
+    let outcome = server
+        .handle_message(r#"[{"jsonrpc":"2.0","id":"req-42","method":123}]"#)
+        .await
+        .unwrap();
+    let crate::server::RpcOutcome::Batch(responses) = outcome else {
+        panic!("expected Batch outcome");
+    };
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0].id, Some(serde_json::json!("req-42")));
+    assert_eq!(
+        responses[0].error.as_ref().unwrap().code,
+        crate::protocol::INVALID_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn batch_with_mixed_primitive_and_valid_requests() {
+    let server = test_server();
+    let outcome = server
+        .handle_message(
+            r#"[1, {"jsonrpc":"2.0","id":2,"method":"ping"}, {"jsonrpc":"1.0","id":3,"method":"ping"}]"#,
+        )
+        .await
+        .unwrap();
+    let crate::server::RpcOutcome::Batch(responses) = outcome else {
+        panic!("expected Batch outcome");
+    };
+    assert_eq!(responses.len(), 3);
+    assert_eq!(responses[0].id, None);
+    assert_eq!(
+        responses[0].error.as_ref().unwrap().code,
+        crate::protocol::INVALID_REQUEST
+    );
+    assert_eq!(responses[1].id, Some(serde_json::json!(2)));
+    assert!(responses[1].error.is_none());
+    assert_eq!(responses[2].id, Some(serde_json::json!(3)));
+    assert_eq!(
+        responses[2].error.as_ref().unwrap().code,
+        crate::protocol::INVALID_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn batch_request_malformed_json_array_returns_parse_error() {
+    let server = test_server();
+    let outcome = server.handle_message("[1, 2,").await.unwrap();
+    let crate::server::RpcOutcome::Single(resp) = outcome else {
+        panic!("expected Single error response on malformed batch JSON");
+    };
+    assert_eq!(
+        resp.error.as_ref().unwrap().code,
+        crate::protocol::PARSE_ERROR
+    );
+}
+
+#[tokio::test]
+async fn notification_to_unknown_method_is_dropped_per_jsonrpc_spec() {
+    let server = test_server();
+    // JSON-RPC 2.0 §4.1: notifications (no id) must never produce a wire response,
+    // even if the method does not exist.
+    let single_outcome = server
+        .handle_message(r#"{"jsonrpc":"2.0","method":"nonexistent"}"#)
+        .await;
+    assert!(single_outcome.is_none());
+
+    let batch_outcome = server
+        .handle_message(r#"[{"jsonrpc":"2.0","method":"nonexistent"}]"#)
+        .await;
+    assert!(batch_outcome.is_none());
+}
+
+#[tokio::test]
+async fn logging_set_level_and_completion_complete_succeed() {
+    let server = test_server();
+    let resp1 = server
+        .handle_request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"logging/setLevel","params":{"level":"debug"}}"#,
+        )
+        .await;
+    assert!(resp1.error.is_none());
+
+    let resp2 = server
+        .handle_request(r#"{"jsonrpc":"2.0","id":2,"method":"completion/complete","params":{}}"#)
+        .await;
+    assert!(resp2.error.is_none());
+}

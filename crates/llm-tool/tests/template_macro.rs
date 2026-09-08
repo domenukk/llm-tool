@@ -9,8 +9,8 @@ fn template_compile_fail_tests() {
 
     // trybuild generates a test package under <target_dir>/tests/trybuild/llm-tool/
     // Copy the test fixture so `tools/dynamic_desc_test.tmpl.md` is found relative to CARGO_MANIFEST_DIR in that crate.
-    let target_dir = std::env::var("CARGO_TARGET_DIR")
-        .map_or_else(|_| manifest_dir.join("target"), PathBuf::from);
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| manifest_dir.join("target"), PathBuf::from);
     let dest_dir = target_dir.join("tests/trybuild/llm-tool/tools");
     std::fs::create_dir_all(&dest_dir).expect("Failed to create trybuild tools dir");
     std::fs::copy(&fixture_src, dest_dir.join("dynamic_desc_test.tmpl.md"))

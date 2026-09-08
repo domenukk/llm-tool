@@ -8,7 +8,7 @@ use syn::{
 
 use crate::{
     MACRO_LLM_RESOURCE, ParamInfo, ReturnInfo, build_param_types_and_borrows, build_serde_defaults,
-    extract_doc_string, extract_params, parse_return_type, reject_generic_signature,
+    extract_params, parse_return_type, reject_generic_signature,
 };
 
 pub const ATTR_URI: &str = "uri";
@@ -22,19 +22,35 @@ pub(crate) enum ResourceAttrKey {
     Uri,
     Name,
     Description,
+    DescriptionFile,
     MimeType,
+    Params,
+    Env,
+    Context,
 }
 
 impl ResourceAttrKey {
-    pub(crate) const ALL: &'static [Self] =
-        &[Self::Uri, Self::Name, Self::Description, Self::MimeType];
+    pub(crate) const ALL: &'static [Self] = &[
+        Self::Uri,
+        Self::Name,
+        Self::Description,
+        Self::DescriptionFile,
+        Self::MimeType,
+        Self::Params,
+        Self::Env,
+        Self::Context,
+    ];
 
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Uri => ATTR_URI,
             Self::Name => ATTR_NAME,
             Self::Description => crate::ATTR_DESCRIPTION,
+            Self::DescriptionFile => crate::ATTR_DESCRIPTION_FILE,
             Self::MimeType => ATTR_MIME_TYPE,
+            Self::Params => crate::ATTR_PARAMS,
+            Self::Env => crate::ATTR_ENV,
+            Self::Context => crate::ATTR_CONTEXT,
         }
     }
 
@@ -43,7 +59,11 @@ impl ResourceAttrKey {
             Self::Uri => &[ATTR_URI, ATTR_URI_TEMPLATE],
             Self::Name => &[ATTR_NAME],
             Self::Description => &[crate::ATTR_DESCRIPTION],
+            Self::DescriptionFile => &[crate::ATTR_DESCRIPTION_FILE],
             Self::MimeType => &[ATTR_MIME_TYPE, ATTR_MIME],
+            Self::Params => &[crate::ATTR_PARAMS],
+            Self::Env => &[crate::ATTR_ENV],
+            Self::Context => &[crate::ATTR_CONTEXT],
         }
     }
 }
@@ -73,25 +93,25 @@ impl TryFrom<&syn::Ident> for ResourceAttrKey {
 pub struct ResourceAttr {
     pub uri: LitStr,
     pub name: Option<LitStr>,
-    pub description: Option<LitStr>,
     pub mime_type: Option<LitStr>,
+    pub tool_attr: crate::ToolAttr,
 }
 
 impl Parse for ResourceAttr {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut uri = None;
         let mut name = None;
-        let mut description = None;
         let mut mime_type = None;
+        let mut tool_builder = crate::ToolAttrBuilder::default();
 
         while !input.is_empty() {
             let ident: Ident = input.parse()?;
             let key = ResourceAttrKey::try_from(&ident)?;
-            input.parse::<Token![=]>()?;
-            let val: LitStr = input.parse()?;
 
             match key {
                 ResourceAttrKey::Uri => {
+                    input.parse::<Token![=]>()?;
+                    let val: LitStr = input.parse()?;
                     if uri.is_some() {
                         return Err(syn::Error::new_spanned(
                             ident,
@@ -101,6 +121,8 @@ impl Parse for ResourceAttr {
                     uri = Some(val);
                 }
                 ResourceAttrKey::Name => {
+                    input.parse::<Token![=]>()?;
+                    let val: LitStr = input.parse()?;
                     if name.is_some() {
                         return Err(syn::Error::new_spanned(
                             ident,
@@ -109,16 +131,9 @@ impl Parse for ResourceAttr {
                     }
                     name = Some(val);
                 }
-                ResourceAttrKey::Description => {
-                    if description.is_some() {
-                        return Err(syn::Error::new_spanned(
-                            ident,
-                            format!("duplicate `{}` attribute", key.as_str()),
-                        ));
-                    }
-                    description = Some(val);
-                }
                 ResourceAttrKey::MimeType => {
+                    input.parse::<Token![=]>()?;
+                    let val: LitStr = input.parse()?;
                     if mime_type.is_some() {
                         return Err(syn::Error::new_spanned(
                             ident,
@@ -126,6 +141,25 @@ impl Parse for ResourceAttr {
                         ));
                     }
                     mime_type = Some(val);
+                }
+                ResourceAttrKey::Description => {
+                    tool_builder.parse_by_key(&ident, crate::ToolAttrKey::Description, input)?;
+                }
+                ResourceAttrKey::DescriptionFile => {
+                    tool_builder.parse_by_key(
+                        &ident,
+                        crate::ToolAttrKey::DescriptionFile,
+                        input,
+                    )?;
+                }
+                ResourceAttrKey::Params => {
+                    tool_builder.parse_by_key(&ident, crate::ToolAttrKey::Params, input)?;
+                }
+                ResourceAttrKey::Env => {
+                    tool_builder.parse_by_key(&ident, crate::ToolAttrKey::Env, input)?;
+                }
+                ResourceAttrKey::Context => {
+                    tool_builder.parse_by_key(&ident, crate::ToolAttrKey::Context, input)?;
                 }
             }
 
@@ -140,11 +174,12 @@ impl Parse for ResourceAttr {
                 "`uri` is required in #[llm_resource(uri = \"...\")]",
             )
         })?;
+        let tool_attr = tool_builder.build()?;
         Ok(Self {
             uri,
             name,
-            description,
             mime_type,
+            tool_attr,
         })
     }
 }
@@ -154,46 +189,9 @@ fn build_resource_body_tokens(
     return_info: &ReturnInfo,
     crate_path: &TokenStream,
 ) -> TokenStream {
-    let is_async = func.sig.asyncness.is_some();
-    let body_stmts = &func.block.stmts;
-
-    match return_info {
-        ReturnInfo::ResultType { ok_type, err_type } => {
-            let inner = if is_async {
-                quote! {
-                    let __r: ::core::result::Result<#ok_type, #err_type> = async move {
-                        #( #body_stmts )*
-                    }.await;
-                }
-            } else {
-                quote! {
-                    let __r: ::core::result::Result<#ok_type, #err_type> = (|| { #( #body_stmts )* })();
-                }
-            };
-            quote! {
-                #inner
-                match __r {
-                    ::core::result::Result::Ok(__v) => #crate_path::__private::Wrap(__v).__convert_resource(__uri, Self::MIME_TYPE),
-                    ::core::result::Result::Err(__e) => ::core::result::Result::Err(::core::convert::Into::into(__e)),
-                }
-            }
-        }
-        ReturnInfo::BareType => {
-            let inner = if is_async {
-                quote! {
-                    let __v = async move { #( #body_stmts )* }.await;
-                }
-            } else {
-                quote! {
-                    let __v = (|| { #( #body_stmts )* })();
-                }
-            };
-            quote! {
-                #inner
-                #crate_path::__private::Wrap(__v).__convert_resource(__uri, Self::MIME_TYPE)
-            }
-        }
-    }
+    let ok_expr =
+        quote! { #crate_path::__private::Wrap(__v).__convert_resource(__uri, Self::MIME_TYPE) };
+    crate::helpers::build_wrapped_body(func, return_info, &ok_expr)
 }
 
 pub fn resource_impl(func: &ItemFn, attr: &ResourceAttr) -> syn::Result<TokenStream> {
@@ -207,10 +205,12 @@ pub fn resource_impl(func: &ItemFn, attr: &ResourceAttr) -> syn::Result<TokenStr
     let struct_name = format_ident!("{}", fn_name.to_string().to_case(Case::Pascal));
     let params_name = format_ident!("{}Params", struct_name);
 
-    let description = attr
-        .description
-        .as_ref()
-        .map_or_else(|| extract_doc_string(&func.attrs), syn::LitStr::value);
+    let crate::DescriptionInfo {
+        static_description,
+        helper_tokens,
+        description_method,
+        dep_tracking,
+    } = crate::resolve_description(func, Some(&attr.tool_attr))?;
 
     let uri_str = attr.uri.value();
     let mime_expr = if let Some(m) = &attr.mime_type {
@@ -253,6 +253,9 @@ pub fn resource_impl(func: &ItemFn, attr: &ResourceAttr) -> syn::Result<TokenStr
         .collect();
 
     Ok(quote! {
+        #dep_tracking
+        #helper_tokens
+
         #[doc = #params_doc]
         #[derive(::serde::Deserialize)]
         #vis struct #params_name {
@@ -269,8 +272,10 @@ pub fn resource_impl(func: &ItemFn, attr: &ResourceAttr) -> syn::Result<TokenStr
             type Params = #params_name;
             const URI_TEMPLATE: &'static str = #uri_str;
             const NAME: &'static str = #tool_name_str;
-            const DESCRIPTION: &'static str = #description;
+            const DESCRIPTION: &'static str = #static_description;
             const MIME_TYPE: ::core::option::Option<&'static str> = #mime_expr;
+
+            #description_method
 
             async fn read(&self, __uri: &str, __params: Self::Params) -> ::core::result::Result<#crate_path::ResourceOutput, #crate_path::ToolError> {
                 let #params_name { #( #mut_tokens #param_names, )* } = __params;

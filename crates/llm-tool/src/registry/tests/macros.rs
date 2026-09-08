@@ -187,8 +187,7 @@ fn optional_primitives(
     /// Optional integer limit.
     max: Option<i64>,
 ) -> Result<String, ToolError> {
-    let _ = (tag, max);
-    Ok(String::new())
+    Ok(format!("{tag:?}:{max:?}"))
 }
 
 /// `sanitize_schema_types` must collapse the nullable form `schemars`

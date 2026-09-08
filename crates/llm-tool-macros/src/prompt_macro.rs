@@ -18,46 +18,8 @@ fn build_prompt_body_tokens(
     return_info: &ReturnInfo,
     crate_path: &TokenStream,
 ) -> TokenStream {
-    let is_async = func.sig.asyncness.is_some();
-    let body_stmts = &func.block.stmts;
-
-    match return_info {
-        ReturnInfo::ResultType { ok_type, err_type } => {
-            let inner = if is_async {
-                quote! {
-                    let __r: ::core::result::Result<#ok_type, #err_type> = async move {
-                        #( #body_stmts )*
-                    }.await;
-                }
-            } else {
-                quote! {
-                    let __r: ::core::result::Result<#ok_type, #err_type> = (|| { #( #body_stmts )* })();
-                }
-            };
-            quote! {
-                #inner
-                match __r {
-                    ::core::result::Result::Ok(__v) => #crate_path::__private::Wrap(__v).__convert_prompt(),
-                    ::core::result::Result::Err(__e) => ::core::result::Result::Err(::core::convert::Into::into(__e)),
-                }
-            }
-        }
-        ReturnInfo::BareType => {
-            let inner = if is_async {
-                quote! {
-                    let __v = async move { #( #body_stmts )* }.await;
-                }
-            } else {
-                quote! {
-                    let __v = (|| { #( #body_stmts )* })();
-                }
-            };
-            quote! {
-                #inner
-                #crate_path::__private::Wrap(__v).__convert_prompt()
-            }
-        }
-    }
+    let ok_expr = quote! { #crate_path::__private::Wrap(__v).__convert_prompt() };
+    crate::helpers::build_wrapped_body(func, return_info, &ok_expr)
 }
 
 pub fn prompt_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<TokenStream> {

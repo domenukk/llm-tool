@@ -336,3 +336,75 @@ fn resource_output_blob_variant() {
         ResourceOutputContent::Text { .. } => panic!("expected a blob content block"),
     }
 }
+
+#[test]
+fn shared_state_remove_and_clear_state() {
+    let state = SharedState::new();
+    state.set_state("k1", serde_json::json!(10)).unwrap();
+    state.set_state("k2", serde_json::json!(20)).unwrap();
+
+    assert!(state.remove_state("k1"));
+    assert!(!state.remove_state("k1"));
+    assert_eq!(
+        state.get_state("k1", serde_json::Value::Null),
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        state.get_state("k2", serde_json::Value::Null),
+        serde_json::json!(20)
+    );
+
+    state.clear_state();
+    assert_eq!(
+        state.get_state("k2", serde_json::Value::Null),
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn shared_state_methods_on_poisoned_lock() {
+    let state = SharedState::new();
+    poison(&state.0);
+
+    assert_eq!(
+        state.get_state("k", serde_json::json!("fallback")),
+        serde_json::json!("fallback")
+    );
+    assert!(state.set_state("k", serde_json::json!(1)).is_err());
+    assert!(!state.remove_state("k"));
+    state.clear_state();
+}
+
+#[test]
+fn tool_context_debug_fmt_on_poisoned_extensions_lock() {
+    let ctx = ToolContext::new().with_conversation_id("conv-123");
+    poison(&ctx.extensions);
+    let debug_str = format!("{ctx:?}");
+    assert!(debug_str.contains("extensions_count: 0"));
+    assert!(debug_str.contains("conv-123"));
+}
+
+#[test]
+fn shared_state_and_extensions_concurrent_read_write_stress() {
+    let ctx = ToolContext::new();
+    let mut handles = Vec::new();
+    for i in 0..8usize {
+        let ctx_clone = ctx.clone();
+        handles.push(std::thread::spawn(move || {
+            for j in 0..50usize {
+                let key = format!("key_{i}_{j}");
+                ctx_clone.set_state(&key, serde_json::json!(j)).unwrap();
+                let val = ctx_clone.get_state(&key, serde_json::Value::Null);
+                assert_eq!(val, serde_json::json!(j));
+                ctx_clone.set_ext(i * 1000 + j).unwrap();
+                assert!(ctx_clone.get_ext::<usize>().is_some());
+                if j % 5 == 0 {
+                    assert!(ctx_clone.state.remove_state(&key));
+                }
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+}

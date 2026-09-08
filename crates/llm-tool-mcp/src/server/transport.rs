@@ -252,33 +252,82 @@ impl McpServer {
         reader: impl tokio::io::AsyncBufRead + Unpin,
         mut writer: impl tokio::io::AsyncWrite + Unpin,
     ) -> io::Result<()> {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        use tokio::io::AsyncBufReadExt;
 
         let mut lines = reader.lines();
         // Reused across messages so response serialization amortizes to zero
         // allocations on the hot path.
         let mut out_buf: Vec<u8> = Vec::new();
-        // Per-connection caller identity, negotiated at `initialize`.
+        // Per-connection caller identity and active request registry.
         let mut conn = Connection::default();
-        while let Some(line) = lines.next_line().await? {
-            if line.trim().is_empty() {
-                continue;
+        let mut in_flight_tasks: tokio::task::JoinSet<Option<super::RpcOutcome>> =
+            tokio::task::JoinSet::new();
+
+        loop {
+            tokio::select! {
+                line_res = lines.next_line() => {
+                    let Some(line) = line_res? else {
+                        break;
+                    };
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+
+                    debug!(request = %line, "mcp request");
+
+                    let probe = probe_line(&line);
+                    // Process `initialize` synchronously after draining prior tasks so
+                    // per-connection identity / registry view is established before any
+                    // subsequent requests dispatch.
+                    if is_initialize_line(&line, probe.as_ref()) {
+                        while let Some(res) = in_flight_tasks.join_next().await {
+                            match res {
+                                Ok(Some(outcome)) => {
+                                    write_outcome_async(&mut writer, &mut out_buf, &outcome).await?;
+                                }
+                                Ok(None) => debug!("dropping notification response"),
+                                Err(e) => error!(error = %e, "request handler task panicked"),
+                            }
+                        }
+                        if let Some(outcome) = self.handle_message_conn(&line, &mut conn).await {
+                            write_outcome_async(&mut writer, &mut out_buf, &outcome).await?;
+                        }
+                    } else if probe.as_ref().is_some_and(|p| p.id.is_none() && p.method.is_some()) {
+                        // Notifications produce no wire response. Handling them inline in the
+                        // read loop immediately triggers cancellation or lifecycle updates without
+                        // JoinSet scheduling overhead.
+                        let outcome = self.handle_message_conn(&line, &mut conn).await;
+                        if let Some(unexpected) = outcome {
+                            write_outcome_async(&mut writer, &mut out_buf, &unexpected).await?;
+                        }
+                    } else {
+                        let server = self.clone();
+                        let mut conn_clone = conn.clone();
+                        in_flight_tasks.spawn(async move {
+                            server.handle_message_conn(&line, &mut conn_clone).await
+                        });
+                    }
+                }
+                Some(res) = in_flight_tasks.join_next(), if !in_flight_tasks.is_empty() => {
+                    match res {
+                        Ok(Some(outcome)) => {
+                            write_outcome_async(&mut writer, &mut out_buf, &outcome).await?;
+                        }
+                        Ok(None) => debug!("dropping notification response"),
+                        Err(e) => error!(error = %e, "request handler task panicked"),
+                    }
+                }
             }
+        }
 
-            debug!(request = %line, "mcp request");
-
-            let Some(outcome) = self.handle_message_conn(&line, &mut conn).await else {
-                debug!("dropping notification response");
-                continue;
-            };
-
-            out_buf.clear();
-            outcome.write_json(&mut out_buf);
-            debug!(response = %String::from_utf8_lossy(&out_buf), "mcp response");
-            out_buf.push(b'\n');
-
-            writer.write_all(&out_buf).await?;
-            writer.flush().await?;
+        while let Some(res) = in_flight_tasks.join_next().await {
+            match res {
+                Ok(Some(outcome)) => {
+                    write_outcome_async(&mut writer, &mut out_buf, &outcome).await?;
+                }
+                Ok(None) => debug!("dropping notification response"),
+                Err(e) => error!(error = %e, "request handler task panicked"),
+            }
         }
 
         info!("input stream closed — shutting down");
@@ -375,5 +424,71 @@ impl McpServer {
                 info!("MCP Unix connection closed");
             });
         }
+    }
+}
+
+async fn write_outcome_async(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    out_buf: &mut Vec<u8>,
+    outcome: &super::RpcOutcome,
+) -> io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    out_buf.clear();
+    outcome.write_json(out_buf);
+    debug!(response = %String::from_utf8_lossy(out_buf), "mcp response");
+    out_buf.push(b'\n');
+    writer.write_all(out_buf).await?;
+    writer.flush().await
+}
+
+const BATCH_START_CHAR: char = '[';
+
+#[derive(serde::Deserialize)]
+struct MethodProbe<'a> {
+    id: Option<serde_json::Value>,
+    #[serde(borrow)]
+    method: Option<&'a str>,
+}
+
+fn probe_line(line: &str) -> Option<MethodProbe<'_>> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with(BATCH_START_CHAR) {
+        return None;
+    }
+    match serde_json::from_str::<MethodProbe>(line) {
+        Ok(probe) => Some(probe),
+        Err(e) => {
+            debug!(error = %e, "probe_line: line is not a single request object");
+            None
+        }
+    }
+}
+
+fn is_initialize_line(line: &str, probe: Option<&MethodProbe<'_>>) -> bool {
+    if !line.contains(crate::protocol::METHOD_INITIALIZE) {
+        return false;
+    }
+    if let Some(p) = probe {
+        return p.method == Some(crate::protocol::METHOD_INITIALIZE);
+    }
+    let trimmed = line.trim_start();
+    if trimmed.starts_with(BATCH_START_CHAR) {
+        #[derive(serde::Deserialize)]
+        struct BatchMethodProbe<'a> {
+            #[serde(borrow)]
+            method: Option<&'a str>,
+        }
+        match serde_json::from_str::<Vec<BatchMethodProbe>>(line) {
+            Ok(arr) => arr
+                .iter()
+                .any(|p| p.method == Some(crate::protocol::METHOD_INITIALIZE)),
+            Err(e) => {
+                debug!(error = %e, "is_initialize_line: batch probe failed");
+                false
+            }
+        }
+    } else {
+        false
     }
 }

@@ -73,14 +73,20 @@ impl SharedState {
     pub fn remove_state(&self, key: &str) -> bool {
         match write_lock(&self.0) {
             Ok(mut guard) => guard.remove(key).is_some(),
-            Err(_) => false,
+            Err(e) => {
+                tracing::warn!(key, error = %e, "SharedState::remove_state: lock poisoned");
+                false
+            }
         }
     }
 
     /// Clear all entries from the shared state.
     pub fn clear_state(&self) {
-        if let Ok(mut guard) = write_lock(&self.0) {
-            guard.clear();
+        match write_lock(&self.0) {
+            Ok(mut guard) => guard.clear(),
+            Err(e) => {
+                tracing::warn!(error = %e, "SharedState::clear_state: lock poisoned");
+            }
         }
     }
 }
@@ -106,6 +112,7 @@ impl core::fmt::Debug for SharedState {
 /// and shared across concurrent tool invocations. Reads acquire a shared
 /// lock; only writes take an exclusive lock.
 ///
+/// - **[`get_state`](Self::get_state)** acquires a **read** lock and is
 ///   best-effort — a missing value is indistinguishable from a default, so
 ///   returning `default` keeps the tool running without surfacing
 ///   infrastructure errors to the model.
@@ -159,7 +166,10 @@ impl core::fmt::Debug for ToolContext {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let count = match read_lock(&self.extensions) {
             Ok(g) => g.len(),
-            Err(_) => 0,
+            Err(e) => {
+                tracing::warn!(error = %e, "ToolContext::fmt: extensions lock poisoned");
+                0
+            }
         };
         f.debug_struct("ToolContext")
             .field("conversation_id", &self.conversation_id)
@@ -1111,6 +1121,9 @@ pub struct ResourceDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
 }
+
+/// Backwards-compatible type alias for [`ResourceDefinition`].
+pub type ResourceTemplateDefinition = ResourceDefinition;
 
 /// A content block inside a resource read output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -8,7 +8,10 @@ use std::{
 
 use llm_tool::{PromptRegistry, ResourceRegistry, ToolContext, ToolRegistry};
 
-use super::{CallerView, McpServer, RegistryFactory, build_tools_list_value};
+use super::{
+    CallerView, McpServer, RegistryFactory, build_prompts_list_value,
+    build_resource_templates_list_value, build_resources_list_value, build_tools_list_value,
+};
 
 /// Builder for [`McpServer`] that registers prompts and resources up front.
 ///
@@ -131,6 +134,10 @@ impl McpServerBuilder {
         };
         let registry = Arc::new(base_registry);
         let cached_tools_list = Arc::new(build_tools_list_value(&registry));
+        let cached_prompts_list = Arc::new(build_prompts_list_value(&self.prompts));
+        let cached_resources_list = Arc::new(build_resources_list_value(&self.resources));
+        let cached_resource_templates_list =
+            Arc::new(build_resource_templates_list_value(&self.resources));
 
         // Seed the cache so the default caller reuses the same registry + list
         // Arcs already built above, avoiding a redundant rebuild on first use.
@@ -152,6 +159,9 @@ impl McpServerBuilder {
             registry,
             context: Arc::new(self.context),
             cached_tools_list,
+            cached_prompts_list,
+            cached_resources_list,
+            cached_resource_templates_list,
             prompts: Arc::new(self.prompts),
             resources: Arc::new(self.resources),
             per_connection_identity: self.per_connection_identity,

@@ -16,4 +16,4 @@ Search results for "{{ query }}" ({{ total }} found):
 
 - {{ r.title }} (score: {{ r.score }})
 
-  > {% /for %}
+> {% /for %}

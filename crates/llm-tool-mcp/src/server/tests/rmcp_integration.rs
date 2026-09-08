@@ -156,3 +156,221 @@ async fn rmcp_client_unix_test() {
     // NOLINT: test cleanup — close errors are non-fatal
     let _ = client.close().await;
 }
+
+#[tokio::test]
+async fn rmcp_client_concurrent_pipelined_tool_calls_test() {
+    struct SlowAddTool;
+    impl RustTool for SlowAddTool {
+        type Params = AddParams;
+        const NAME: &'static str = "slow_add";
+        const DESCRIPTION: &'static str = "Adds numbers slowly";
+
+        async fn call(
+            &self,
+            params: Self::Params,
+            _ctx: &ToolContext,
+        ) -> Result<ToolOutput, ToolError> {
+            tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+            Ok(ToolOutput::new(format!("{}", params.a + params.b)))
+        }
+    }
+
+    let registry = ToolRegistry::new()
+        .with_tool(AddTool)
+        .with_tool(SlowAddTool);
+    let server = McpServer::new("concurrent-rmcp-srv", "0.1.0", registry);
+
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let (server_r, server_w) = tokio::io::split(server_io);
+
+    tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(server_r);
+        // NOLINT: test background task — server result unused; test controls lifecycle
+        let _ = server.run_async(&mut reader, server_w).await;
+    });
+
+    let mut client = rmcp::service::serve_client((), client_io)
+        .await
+        .expect("rmcp client handshake failed");
+
+    let start = std::time::Instant::now();
+
+    let slow_fut = async {
+        let res = client
+            .call_tool(
+                rmcp::model::CallToolRequestParams::new("slow_add").with_arguments(
+                    serde_json::json!({"a": 100, "b": 200})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("slow_add call failed");
+        (res, start.elapsed())
+    };
+
+    let fast_fut = async {
+        // Give slow_add 15ms head start so it is guaranteed in-flight first
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        let res = client
+            .call_tool(
+                rmcp::model::CallToolRequestParams::new("add").with_arguments(
+                    serde_json::json!({"a": 7, "b": 8})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("fast add call failed");
+        (res, start.elapsed())
+    };
+
+    let ((slow_res, slow_dur), (fast_res, fast_dur)) = tokio::join!(slow_fut, fast_fut);
+
+    // Fast tool call must finish well before the 180ms slow tool call
+    assert!(
+        fast_dur < slow_dur,
+        "fast call ({fast_dur:?}) should complete before slow call ({slow_dur:?})"
+    );
+    assert!(
+        fast_dur < std::time::Duration::from_millis(120),
+        "fast call ({fast_dur:?}) should not be blocked by 180ms slow call"
+    );
+
+    let fast_text = match &fast_res.content[0] {
+        rmcp::model::ContentBlock::Text(t) => &t.text,
+        other => panic!("expected text content, got {other:?}"),
+    };
+    assert_eq!(fast_text, "15");
+
+    let slow_text = match &slow_res.content[0] {
+        rmcp::model::ContentBlock::Text(t) => &t.text,
+        other => panic!("expected text content, got {other:?}"),
+    };
+    assert_eq!(slow_text, "300");
+
+    // NOLINT: test cleanup — close errors are non-fatal
+    let _ = client.close().await;
+}
+
+#[test]
+fn rpc_error_code_enum_and_request_id_strong_types() {
+    use crate::protocol::{RequestId, RpcErrorCode};
+
+    let code = RpcErrorCode::RequestCancelled;
+    assert_eq!(code.as_i64(), -32800);
+    assert_eq!(
+        RpcErrorCode::from_i64(-32800),
+        RpcErrorCode::RequestCancelled
+    );
+    assert_eq!(RpcErrorCode::from_i64(-32099), RpcErrorCode::Custom(-32099));
+    assert_eq!(serde_json::to_string(&code).unwrap(), "-32800");
+    let deserialized: RpcErrorCode = serde_json::from_str("-32800").unwrap();
+    assert_eq!(deserialized, RpcErrorCode::RequestCancelled);
+
+    let num_id = RequestId::from_json_value(&serde_json::json!(42)).unwrap();
+    assert_eq!(num_id, RequestId::Number(42));
+    let str_id = RequestId::from_json_value(&serde_json::json!("req-abc")).unwrap();
+    assert_eq!(str_id, RequestId::String("req-abc".to_string()));
+    assert!(RequestId::from_json_value(&serde_json::Value::Null).is_none());
+}
+
+#[tokio::test]
+async fn rmcp_client_concurrent_pipelined_tool_call_with_initialize_arg_test() {
+    struct SlowAddTool;
+    impl RustTool for SlowAddTool {
+        type Params = AddParams;
+        const NAME: &'static str = "slow_add";
+        const DESCRIPTION: &'static str = "Adds numbers slowly";
+
+        async fn call(
+            &self,
+            params: Self::Params,
+            _ctx: &ToolContext,
+        ) -> Result<ToolOutput, ToolError> {
+            tokio::time::sleep(std::time::Duration::from_millis(180)).await;
+            Ok(ToolOutput::new(format!("{}", params.a + params.b)))
+        }
+    }
+
+    let registry = ToolRegistry::new()
+        .with_tool(AddTool)
+        .with_tool(SlowAddTool);
+    let server = McpServer::new("concurrent-arg-srv", "0.1.0", registry);
+
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let (server_r, server_w) = tokio::io::split(server_io);
+
+    tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(server_r);
+        // NOLINT: test background task — server result unused; test controls lifecycle
+        let _ = server.run_async(&mut reader, server_w).await;
+    });
+
+    let mut client = rmcp::service::serve_client((), client_io)
+        .await
+        .expect("rmcp client handshake failed");
+
+    let start = std::time::Instant::now();
+
+    let slow_fut = async {
+        let res = client
+            .call_tool(
+                rmcp::model::CallToolRequestParams::new("slow_add").with_arguments(
+                    serde_json::json!({"a": 100, "b": 200})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("slow_add call failed");
+        (res, start.elapsed())
+    };
+
+    let fast_fut = async {
+        // Give slow_add 15ms head start so it is guaranteed in-flight first
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        let res = client
+            .call_tool(
+                rmcp::model::CallToolRequestParams::new("add").with_arguments(
+                    // Intentionally include "initialize" in the argument to ensure it doesn't trigger false initialize detection
+                    serde_json::json!({"a": 20, "b": 30, "extra": "please initialize"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("fast add call failed");
+        (res, start.elapsed())
+    };
+
+    let ((slow_res, slow_dur), (fast_res, fast_dur)) = tokio::join!(slow_fut, fast_fut);
+
+    assert!(
+        fast_dur < slow_dur,
+        "fast call ({fast_dur:?}) should complete before slow call ({slow_dur:?})"
+    );
+    assert!(
+        fast_dur < std::time::Duration::from_millis(120),
+        "fast call with 'initialize' arg ({fast_dur:?}) should not be blocked by 180ms slow call"
+    );
+
+    let fast_text = match &fast_res.content[0] {
+        rmcp::model::ContentBlock::Text(t) => &t.text,
+        other => panic!("expected text content, got {other:?}"),
+    };
+    assert_eq!(fast_text, "50");
+
+    let slow_text = match &slow_res.content[0] {
+        rmcp::model::ContentBlock::Text(t) => &t.text,
+        other => panic!("expected text content, got {other:?}"),
+    };
+    assert_eq!(slow_text, "300");
+
+    // NOLINT: test cleanup — close errors are non-fatal
+    let _ = client.close().await;
+}

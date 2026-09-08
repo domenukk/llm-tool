@@ -55,11 +55,12 @@ pub(crate) fn build_serde_defaults(params: &[&ParamInfo]) -> Vec<proc_macro2::To
 /// When a `response_template` is specified, the return value is instead
 /// rendered through the template and returned as `ToolOutput` with the
 /// struct attached as metadata.
-pub(crate) fn build_body_tokens(
+/// Wrap a sync or async function body returning either a `Result<T, E>` or a bare
+/// value `T`, binding the success value to `__v` and evaluating `ok_expr`.
+pub(crate) fn build_wrapped_body(
     func: &ItemFn,
     return_info: &ReturnInfo,
-    crate_path: &proc_macro2::TokenStream,
-    response_info: &ResponseTemplateInfo,
+    ok_expr: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     let is_async = func.sig.asyncness.is_some();
     let body_stmts = &func.block.stmts;
@@ -77,11 +78,10 @@ pub(crate) fn build_body_tokens(
                     let __r: ::core::result::Result<#ok_type, #err_type> = (|| { #( #body_stmts )* })();
                 }
             };
-            let ok_branch = build_ok_branch(crate_path, response_info);
             quote! {
                 #inner
                 match __r {
-                    ::core::result::Result::Ok(__v) => { #ok_branch },
+                    ::core::result::Result::Ok(__v) => { #ok_expr },
                     ::core::result::Result::Err(__e) => ::core::result::Result::Err(::core::convert::Into::into(__e)),
                 }
             }
@@ -96,13 +96,22 @@ pub(crate) fn build_body_tokens(
                     let __v = (|| { #( #body_stmts )* })();
                 }
             };
-            let ok_branch = build_ok_branch(crate_path, response_info);
             quote! {
                 #inner
-                #ok_branch
+                #ok_expr
             }
         }
     }
+}
+
+pub(crate) fn build_body_tokens(
+    func: &ItemFn,
+    return_info: &ReturnInfo,
+    crate_path: &proc_macro2::TokenStream,
+    response_info: &ResponseTemplateInfo,
+) -> proc_macro2::TokenStream {
+    let ok_branch = build_ok_branch(crate_path, response_info);
+    build_wrapped_body(func, return_info, &ok_branch)
 }
 
 /// Build the Ok-branch conversion: either the standard `Wrap(v).__convert()`
@@ -204,11 +213,15 @@ pub(crate) fn resolve_manifest_path(rel_path: &str) -> std::path::PathBuf {
             if direct.exists() {
                 return direct;
             }
-            if let Ok(entries) = std::fs::read_dir(parent.join("crates")) {
-                for entry in entries.flatten() {
-                    let crate_path = entry.path().join(rel_path);
-                    if crate_path.exists() {
-                        return crate_path;
+            let crates_dir = parent.join("crates");
+            if crates_dir.is_dir() {
+                // NOLINT: directory check done above; ignore transient read errors
+                if let Ok(entries) = std::fs::read_dir(&crates_dir) {
+                    for entry in entries.flatten() {
+                        let crate_path = entry.path().join(rel_path);
+                        if crate_path.exists() {
+                            return crate_path;
+                        }
                     }
                 }
             }
@@ -368,16 +381,31 @@ pub(crate) fn resolve_response_template_inline(
     })
 }
 
-/// Check whether `ty` is `Option<T>` (or `std::option::Option<T>`).
+/// Check whether `ty` is `Option<T>` (or `std::option::Option<T>` / `core::option::Option<T>`).
 pub(crate) fn is_option_type(ty: &syn::Type) -> bool {
     let Type::Path(type_path) = ty else {
         return false;
     };
-    let Some(last_seg) = type_path.path.segments.last() else {
+    let segments = &type_path.path.segments;
+    let Some(last_seg) = segments.last() else {
         return false;
     };
     if last_seg.ident != TYPE_OPTION {
         return false;
+    }
+    if segments.len() > 1 {
+        let prefixes: Vec<_> = segments
+            .iter()
+            .take(segments.len() - 1)
+            .map(|s| s.ident.to_string())
+            .collect();
+        let prefix_str = prefixes.join("::");
+        if !matches!(
+            prefix_str.as_str(),
+            "std::option" | "core::option" | "alloc::option"
+        ) {
+            return false;
+        }
     }
     matches!(&last_seg.arguments, PathArguments::AngleBracketed(args)
         if args.args.len() == 1
@@ -387,18 +415,32 @@ pub(crate) fn is_option_type(ty: &syn::Type) -> bool {
 /// Check whether `ty` is `ToolContext`, `&ToolContext`, or a qualified path
 /// ending in `ToolContext`.
 pub(crate) fn is_tool_context_type(ty: &syn::Type) -> bool {
-    let inner = match ty {
-        Type::Reference(r) => r.elem.as_ref(),
-        other => other,
-    };
+    let mut inner = ty;
+    while let Type::Reference(r) = inner {
+        inner = r.elem.as_ref();
+    }
     let Type::Path(type_path) = inner else {
         return false;
     };
-    type_path
-        .path
-        .segments
-        .last()
-        .is_some_and(|seg| seg.ident == TYPE_TOOL_CONTEXT)
+    let segments = &type_path.path.segments;
+    let Some(last_seg) = segments.last() else {
+        return false;
+    };
+    if last_seg.ident != TYPE_TOOL_CONTEXT {
+        return false;
+    }
+    if segments.len() > 1 {
+        let prefixes: Vec<_> = segments
+            .iter()
+            .take(segments.len() - 1)
+            .map(|s| s.ident.to_string())
+            .collect();
+        let prefix_str = prefixes.join("::");
+        if !matches!(prefix_str.as_str(), "llm_tool" | "crate" | "super" | "self") {
+            return false;
+        }
+    }
+    true
 }
 
 /// Check whether `ty` is `&str`.

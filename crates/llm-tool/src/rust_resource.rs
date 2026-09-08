@@ -54,6 +54,159 @@ pub fn definition_of_resource<T: RustResource>(resource: &T) -> ResourceDefiniti
     }
 }
 
+/// Opening delimiter for URI template variable placeholders.
+const TEMPLATE_VAR_START: char = '{';
+/// Closing delimiter for URI template variable placeholders.
+const TEMPLATE_VAR_END: char = '}';
+/// Empty string slice.
+const EMPTY_STR: &str = "";
+
+/// A single segment of a pre-compiled URI template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplateSegment<'a> {
+    /// Literal substring that must match identically.
+    Literal(&'a str),
+    /// Named placeholder variable (e.g. `date` from `{date}`).
+    Variable(&'a str),
+}
+
+/// Pre-compiled representation of a URI template pattern.
+///
+/// Parses `{variable}` placeholders once at registration time so that
+/// [`matches`](Self::matches) and [`extract_borrowed`](Self::extract_borrowed)
+/// run in pure stack memory without re-scanning the template string or
+/// allocating heap `String`s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledUriTemplate<'a> {
+    raw: &'a str,
+    segments: Vec<TemplateSegment<'a>>,
+    var_count: usize,
+}
+
+impl<'a> CompiledUriTemplate<'a> {
+    /// Compile a URI template string into its constituent segments.
+    #[must_use]
+    pub fn new(template: &'a str) -> Self {
+        if !template.contains(TEMPLATE_VAR_START) {
+            return Self {
+                raw: template,
+                segments: alloc::vec![TemplateSegment::Literal(template)],
+                var_count: 0,
+            };
+        }
+
+        let mut segments = Vec::new();
+        let mut rem = template;
+        let mut var_count = 0;
+
+        while let Some(start_idx) = rem.find(TEMPLATE_VAR_START) {
+            if start_idx > 0 {
+                segments.push(TemplateSegment::Literal(&rem[..start_idx]));
+            }
+            let after_start = &rem[start_idx + 1..];
+            if let Some(end_idx) = after_start.find(TEMPLATE_VAR_END) {
+                let var_name = &after_start[..end_idx];
+                segments.push(TemplateSegment::Variable(var_name));
+                var_count += 1;
+                rem = &after_start[end_idx + 1..];
+            } else {
+                segments.push(TemplateSegment::Literal(&rem[start_idx..]));
+                rem = EMPTY_STR;
+                break;
+            }
+        }
+        if !rem.is_empty() {
+            segments.push(TemplateSegment::Literal(rem));
+        }
+
+        Self {
+            raw: template,
+            segments,
+            var_count,
+        }
+    }
+
+    /// Return the original unparsed template string.
+    #[must_use]
+    pub const fn raw(&self) -> &'a str {
+        self.raw
+    }
+
+    /// Return the parsed template segments.
+    #[must_use]
+    pub fn segments(&self) -> &[TemplateSegment<'a>] {
+        &self.segments
+    }
+
+    /// Return the number of placeholder variables in this template.
+    #[must_use]
+    pub const fn var_count(&self) -> usize {
+        self.var_count
+    }
+
+    /// Check whether `uri` matches this template pattern without allocating heap strings.
+    #[must_use]
+    pub fn matches(&self, uri: &str) -> bool {
+        if self.var_count == 0 {
+            return self.raw == uri;
+        }
+        self.match_with_callback(uri, |_, _| {}).is_some()
+    }
+
+    /// Extract borrowed `(variable_name, value)` pairs from `uri`.
+    ///
+    /// Returns `None` if `uri` does not match this template.
+    #[must_use]
+    pub fn extract_borrowed<'u>(&self, uri: &'u str) -> Option<Vec<(&'a str, &'u str)>> {
+        if self.var_count == 0 {
+            return if self.raw == uri {
+                Some(Vec::new())
+            } else {
+                None
+            };
+        }
+        let mut vars = Vec::with_capacity(self.var_count);
+        self.match_with_callback(uri, |k, v| vars.push((k, v)))?;
+        Some(vars)
+    }
+
+    fn match_with_callback<'u>(
+        &self,
+        uri: &'u str,
+        mut on_var: impl FnMut(&'a str, &'u str),
+    ) -> Option<()> {
+        let mut u_rem = uri;
+        for (i, segment) in self.segments.iter().enumerate() {
+            match *segment {
+                TemplateSegment::Literal(lit) => {
+                    if !u_rem.starts_with(lit) {
+                        return None;
+                    }
+                    u_rem = &u_rem[lit.len()..];
+                }
+                TemplateSegment::Variable(var_name) => {
+                    let val_str = match self.segments.get(i + 1) {
+                        None => {
+                            let val = u_rem;
+                            u_rem = EMPTY_STR;
+                            val
+                        }
+                        Some(TemplateSegment::Literal(next_lit)) => {
+                            let val_end = u_rem.find(next_lit)?;
+                            let val = &u_rem[..val_end];
+                            u_rem = &u_rem[val_end..];
+                            val
+                        }
+                        Some(TemplateSegment::Variable(_)) => EMPTY_STR,
+                    };
+                    on_var(var_name, val_str);
+                }
+            }
+        }
+        if u_rem.is_empty() { Some(()) } else { None }
+    }
+}
+
 /// Helper to match an incoming URI against a URI template pattern with `{variable}` placeholders.
 ///
 /// Returns `Some(map)` if the URI matches the pattern, mapping each `{variable}` name
@@ -63,42 +216,15 @@ pub fn match_uri_template(
     template: &str,
     uri: &str,
 ) -> Option<alloc::collections::BTreeMap<String, String>> {
+    let compiled = CompiledUriTemplate::new(template);
     let mut map = alloc::collections::BTreeMap::new();
-    let mut t_rem = template;
-    let mut u_rem = uri;
-
-    while let Some(start_idx) = t_rem.find('{') {
-        let prefix = &t_rem[..start_idx];
-        if !u_rem.starts_with(prefix) {
-            return None;
-        }
-        u_rem = &u_rem[prefix.len()..];
-        t_rem = &t_rem[start_idx + 1..];
-
-        let end_idx = t_rem.find('}')?;
-        let var_name = &t_rem[..end_idx];
-        t_rem = &t_rem[end_idx + 1..];
-
-        let val_str = if t_rem.is_empty() {
-            let val = u_rem;
-            u_rem = "";
-            val
-        } else {
-            let next_brace = t_rem.find('{').unwrap_or(t_rem.len());
-            let delimiter = &t_rem[..next_brace];
-            let val_end = u_rem.find(delimiter)?;
-            let val = &u_rem[..val_end];
-            u_rem = &u_rem[val_end..];
-            val
-        };
-
-        map.insert(var_name.to_string(), val_str.to_string());
-    }
-
-    if t_rem == u_rem { Some(map) } else { None }
+    compiled.match_with_callback(uri, |k, v| {
+        map.insert(k.to_string(), v.to_string());
+    })?;
+    Some(map)
 }
 
-/// Type-erased future returned by [`ErasedResource::read_erased`].
+/// Type-erased future returned by [`ErasedResource::read_with_vars`].
 pub(crate) type BoxResourceFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ResourceOutput, ToolError>> + Send + 'a>>;
 
@@ -107,21 +233,24 @@ pub(crate) type BoxResourceFuture<'a> =
 /// This is an internal implementation detail of [`ResourceRegistry`]; callers
 /// interact with resources through the registry rather than this trait.
 pub(crate) trait ErasedResource: Send + Sync {
-    /// Check if the incoming URI matches this resource's pattern, extract
-    /// variables, and execute `read`.
-    ///
-    /// Returns `None` if `uri` does not match this resource's pattern.
-    fn read_erased<'a>(&'a self, uri: &'a str) -> Option<BoxResourceFuture<'a>>;
+    /// Execute `read` given pre-extracted borrowed `(key, value)` URI variables.
+    fn read_with_vars<'a>(
+        &'a self,
+        uri: &'a str,
+        vars: Vec<(&'static str, &'a str)>,
+    ) -> BoxResourceFuture<'a>;
 }
 
 impl<T: RustResource> ErasedResource for T {
-    fn read_erased<'a>(&'a self, uri: &'a str) -> Option<BoxResourceFuture<'a>> {
-        let params_map = match_uri_template(T::URI_TEMPLATE, uri)?;
-        Some(Box::pin(async move {
+    fn read_with_vars<'a>(
+        &'a self,
+        uri: &'a str,
+        vars: Vec<(&'static str, &'a str)>,
+    ) -> BoxResourceFuture<'a> {
+        Box::pin(async move {
             let deserializer = serde::de::value::MapDeserializer::new(
-                params_map
-                    .into_iter()
-                    .map(|(k, v)| (k, serde::de::value::StringDeserializer::new(v))),
+                vars.into_iter()
+                    .map(|(k, v)| (k, serde::de::value::BorrowedStrDeserializer::new(v))),
             );
             let params: T::Params = serde::de::Deserialize::deserialize(deserializer).map_err(
                 |e: serde::de::value::Error| {
@@ -131,14 +260,16 @@ impl<T: RustResource> ErasedResource for T {
                 },
             )?;
             self.read(uri, params).await
-        }))
+        })
     }
 }
 
-/// A registered resource: its cached definition plus the type-erased handler.
+/// A registered resource: its cached definition, pre-compiled URI template,
+/// and type-erased handler.
 struct RegisteredResource {
     name: &'static str,
     definition: ResourceDefinition,
+    template: CompiledUriTemplate<'static>,
     erased: Box<dyn ErasedResource>,
 }
 
@@ -210,6 +341,7 @@ impl ResourceRegistry {
         self.resources.push(RegisteredResource {
             name: R::NAME,
             definition: definition_of_resource(&resource),
+            template: CompiledUriTemplate::new(R::URI_TEMPLATE),
             erased: Box::new(resource),
         });
         self
@@ -278,7 +410,7 @@ impl ResourceRegistry {
     pub fn matches(&self, uri: &str) -> bool {
         self.resources
             .iter()
-            .any(|entry| entry.erased.read_erased(uri).is_some())
+            .any(|entry| entry.template.matches(uri))
     }
 
     /// Borrow the cached [`ResourceDefinition`] for a registered resource by name.
@@ -311,8 +443,8 @@ impl ResourceRegistry {
     /// read error if URI-variable deserialization or reading fails.
     pub async fn read(&self, uri: &str) -> Result<ResourceOutput, ToolError> {
         for resource in &self.resources {
-            if let Some(fut) = resource.erased.read_erased(uri) {
-                return fut.await;
+            if let Some(vars) = resource.template.extract_borrowed(uri) {
+                return resource.erased.read_with_vars(uri, vars).await;
             }
         }
         Err(ToolError::not_found(RegistryItem::Resource, uri))
@@ -428,5 +560,97 @@ mod tests {
     #[test]
     fn longer_uri_than_literal_template_returns_none() {
         assert!(match_uri_template("a://b", "a://bc").is_none());
+    }
+
+    #[test]
+    fn adjacent_template_variables_match() {
+        let m = match_uri_template("x://{a}{b}", "x://hello").expect("should match");
+        assert_eq!(m.get("a").map(String::as_str), Some(""));
+        assert_eq!(m.get("b").map(String::as_str), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn erased_resource_deserialization_failure_on_non_string_param() {
+        use super::*;
+
+        struct IntResource;
+        #[derive(serde::Deserialize)]
+        struct IntParams {
+            count: u64,
+        }
+        impl RustResource for IntResource {
+            const NAME: &'static str = "int_res";
+            const URI_TEMPLATE: &'static str = "res://{count}";
+            const DESCRIPTION: &'static str = "Resource with integer param";
+            const MIME_TYPE: Option<&'static str> = None;
+            type Params = IntParams;
+            async fn read(
+                &self,
+                uri: &str,
+                params: Self::Params,
+            ) -> Result<ResourceOutput, ToolError> {
+                Ok(ResourceOutput::text(uri, None, format!("{}", params.count)))
+            }
+        }
+
+        let reg = ResourceRegistry::new().with_resource(IntResource);
+        let err = reg.read("res://42").await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize resource parameters from URI variables")
+        );
+    }
+
+    #[test]
+    fn compiled_uri_template_segments_and_accessors() {
+        use super::{CompiledUriTemplate, TemplateSegment};
+
+        let static_tmpl = CompiledUriTemplate::new("config://app");
+        assert_eq!(static_tmpl.raw(), "config://app");
+        assert_eq!(static_tmpl.var_count(), 0);
+        assert_eq!(
+            static_tmpl.segments(),
+            &[TemplateSegment::Literal("config://app")]
+        );
+        assert!(static_tmpl.matches("config://app"));
+        assert!(!static_tmpl.matches("config://other"));
+        assert_eq!(
+            static_tmpl.extract_borrowed("config://app"),
+            Some(alloc::vec::Vec::new())
+        );
+
+        let dyn_tmpl = CompiledUriTemplate::new("file:///logs/{date}/{app}.log");
+        assert_eq!(dyn_tmpl.raw(), "file:///logs/{date}/{app}.log");
+        assert_eq!(dyn_tmpl.var_count(), 2);
+        assert_eq!(
+            dyn_tmpl.segments(),
+            &[
+                TemplateSegment::Literal("file:///logs/"),
+                TemplateSegment::Variable("date"),
+                TemplateSegment::Literal("/"),
+                TemplateSegment::Variable("app"),
+                TemplateSegment::Literal(".log"),
+            ]
+        );
+    }
+
+    #[test]
+    fn compiled_uri_template_extract_borrowed_zero_copy() {
+        use super::CompiledUriTemplate;
+
+        let tmpl = CompiledUriTemplate::new("res://{host}:{port}/{path}");
+        let uri = "res://localhost:8080/api/v1";
+        let extracted = tmpl.extract_borrowed(uri).expect("should match");
+        assert_eq!(
+            extracted,
+            alloc::vec![("host", "localhost"), ("port", "8080"), ("path", "api/v1"),]
+        );
+        // Verify that extracted values point directly into the input `uri` slice (zero copy)
+        let uri_start = uri.as_ptr() as usize;
+        let uri_end = uri_start + uri.len();
+        for (_, val) in extracted {
+            let val_ptr = val.as_ptr() as usize;
+            assert!(val_ptr >= uri_start && val_ptr + val.len() <= uri_end);
+        }
     }
 }

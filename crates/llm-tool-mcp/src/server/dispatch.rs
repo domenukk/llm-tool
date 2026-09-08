@@ -3,7 +3,7 @@
 use std::fmt;
 
 use llm_tool::{ToolContext, ToolRegistry};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::{Connection, McpServer};
 use crate::protocol::{
@@ -25,8 +25,64 @@ impl McpServer {
     /// Safe to call from within an existing tokio runtime.
     #[cfg(test)]
     pub(crate) async fn handle_request(&self, line: &str) -> JsonRpcResponse {
-        self.handle_request_conn(line, &mut Connection::default())
-            .await
+        self.handle_request_conn(line, &Connection::default()).await
+    }
+
+    /// Validate a JSON value as a JSON-RPC 2.0 request and dispatch it.
+    ///
+    /// Returns `(is_notification, response)`, where `is_notification` is `true`
+    /// if and only if the request was a syntactically valid JSON-RPC 2.0 notification
+    /// (`"jsonrpc": "2.0"` with no `"id"` field). Per JSON-RPC 2.0 §4.1, notifications
+    /// must never produce a wire response, even if the method call itself fails.
+    async fn dispatch_request_value(
+        &self,
+        val: serde_json::Value,
+        conn: &Connection,
+    ) -> (bool, JsonRpcResponse) {
+        let Some(obj) = val.as_object() else {
+            return (
+                false,
+                JsonRpcResponse::error(
+                    None,
+                    protocol::INVALID_REQUEST,
+                    "expected JSON-RPC request object",
+                ),
+            );
+        };
+
+        let id = obj.get("id").cloned();
+        let request: JsonRpcRequest = match serde_json::from_value(val) {
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    false,
+                    JsonRpcResponse::error(
+                        id,
+                        protocol::INVALID_REQUEST,
+                        format!("invalid JSON-RPC request: {e}"),
+                    ),
+                );
+            }
+        };
+
+        // JSON-RPC 2.0 §4: the "jsonrpc" field MUST be exactly "2.0".
+        if request.version != JSONRPC_VERSION {
+            return (
+                false,
+                JsonRpcResponse::error(
+                    request.id,
+                    protocol::INVALID_REQUEST,
+                    format!(
+                        "invalid jsonrpc version: expected \"2.0\", got \"{}\"",
+                        request.version
+                    ),
+                ),
+            );
+        }
+
+        let is_notification = request.id.is_none();
+        let response = self.dispatch_method(request, conn).await;
+        (is_notification, response)
     }
 
     /// Connection-aware variant of [`handle_request`](Self::handle_request).
@@ -35,7 +91,8 @@ impl McpServer {
     /// negotiated for this connection's `initialize` handshake; both are threaded
     /// into dispatch so per-connection identity and per-caller tool sets (when
     /// enabled) apply to `tools/list` and `tools/call`.
-    async fn handle_request_conn(&self, line: &str, conn: &mut Connection) -> JsonRpcResponse {
+    #[cfg(test)]
+    async fn handle_request_conn(&self, line: &str, conn: &Connection) -> JsonRpcResponse {
         // Detect batch requests (JSON arrays) — redirect to handle_message.
         if let Some(first_non_ws) = line.trim_start().as_bytes().first() {
             if *first_non_ws == b'[' {
@@ -58,39 +115,8 @@ impl McpServer {
             }
         };
 
-        let Some(obj) = val.as_object() else {
-            return JsonRpcResponse::error(
-                None,
-                protocol::INVALID_REQUEST,
-                "expected JSON-RPC request object",
-            );
-        };
-
-        let id = obj.get("id").cloned();
-        let request: JsonRpcRequest = match serde_json::from_value(val) {
-            Ok(r) => r,
-            Err(e) => {
-                return JsonRpcResponse::error(
-                    id,
-                    protocol::INVALID_REQUEST,
-                    format!("invalid JSON-RPC request: {e}"),
-                );
-            }
-        };
-
-        // JSON-RPC 2.0 §4: the "jsonrpc" field MUST be exactly "2.0".
-        if request.version != JSONRPC_VERSION {
-            return JsonRpcResponse::error(
-                request.id,
-                protocol::INVALID_REQUEST,
-                format!(
-                    "invalid jsonrpc version: expected \"2.0\", got \"{}\"",
-                    request.version
-                ),
-            );
-        }
-
-        self.dispatch_method(request, conn).await
+        let (_is_notification, response) = self.dispatch_request_value(val, conn).await;
+        response
     }
 
     /// Handle one JSON-RPC *message* and return the response to send back.
@@ -142,10 +168,19 @@ impl McpServer {
             return self.dispatch_batch(trimmed, conn).await;
         }
 
-        let response = self.handle_request_conn(trimmed, conn).await;
-        // JSON-RPC 2.0 §4.1: notifications (requests without an ID that succeeded)
-        // must not produce a response. Protocol-level errors with null IDs must be sent.
-        if response.id.is_none() && response.error.is_none() {
+        let val: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(r) => r,
+            Err(e) => {
+                return Some(RpcOutcome::Single(JsonRpcResponse::error(
+                    None,
+                    protocol::PARSE_ERROR,
+                    format!("invalid JSON: {e}"),
+                )));
+            }
+        };
+
+        let (is_notification, response) = self.dispatch_request_value(val, conn).await;
+        if is_notification {
             None
         } else {
             Some(RpcOutcome::Single(response))
@@ -154,7 +189,7 @@ impl McpServer {
 
     /// Handle a JSON-RPC 2.0 batch request array, collecting one response per
     /// non-notification member.
-    async fn dispatch_batch(&self, line: &str, conn: &mut Connection) -> Option<RpcOutcome> {
+    async fn dispatch_batch(&self, line: &str, conn: &Connection) -> Option<RpcOutcome> {
         let val: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
@@ -166,7 +201,7 @@ impl McpServer {
             }
         };
 
-        let Some(arr) = val.as_array() else {
+        let serde_json::Value::Array(arr) = val else {
             return Some(RpcOutcome::Single(JsonRpcResponse::error(
                 None,
                 protocol::INVALID_REQUEST,
@@ -184,33 +219,8 @@ impl McpServer {
 
         let mut responses = Vec::with_capacity(arr.len());
         for item in arr {
-            let resp_opt = match serde_json::from_value::<JsonRpcRequest>(item.clone()) {
-                Ok(request) => {
-                    if request.version == JSONRPC_VERSION {
-                        let resp = self.dispatch_method(request, conn).await;
-                        if resp.id.is_none() { None } else { Some(resp) }
-                    } else {
-                        Some(JsonRpcResponse::error(
-                            request.id,
-                            protocol::INVALID_REQUEST,
-                            format!(
-                                "invalid jsonrpc version: expected \"2.0\", got \"{}\"",
-                                request.version
-                            ),
-                        ))
-                    }
-                }
-                Err(e) => {
-                    let id = item.as_object().and_then(|o| o.get("id").cloned());
-                    Some(JsonRpcResponse::error(
-                        id,
-                        protocol::INVALID_REQUEST,
-                        format!("invalid request object in batch: {e}"),
-                    ))
-                }
-            };
-
-            if let Some(resp) = resp_opt {
+            let (is_notification, resp) = self.dispatch_request_value(item, conn).await;
+            if !is_notification {
                 responses.push(resp);
             }
         }
@@ -223,11 +233,7 @@ impl McpServer {
     }
 
     /// Dispatch a validated JSON-RPC request to the appropriate method handler.
-    async fn dispatch_method(
-        &self,
-        request: JsonRpcRequest,
-        conn: &mut Connection,
-    ) -> JsonRpcResponse {
+    async fn dispatch_method(&self, request: JsonRpcRequest, conn: &Connection) -> JsonRpcResponse {
         let id = request.id.clone();
 
         match request.method.as_str() {
@@ -242,51 +248,80 @@ impl McpServer {
             | protocol::METHOD_INITIALIZED => {
                 JsonRpcResponse::success(id, protocol::EmptyResult {})
             }
-            // Cancellation notifications — acknowledge silently.
+            // Active cancellation notifications — abort in-flight request if found.
             protocol::METHOD_NOTIFICATIONS_CANCELLED => {
-                debug!("received cancellation notification");
+                if let Some(params) = request.params {
+                    match serde_json::from_value::<protocol::CancelledNotificationParams>(params) {
+                        Ok(cancelled_params) => {
+                            let cancelled = conn.cancel_request(&cancelled_params.request_id);
+                            debug!(
+                                request_id = ?cancelled_params.request_id,
+                                reason = ?cancelled_params.reason,
+                                cancelled,
+                                "processed cancellation notification"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "invalid params for notifications/cancelled");
+                        }
+                    }
+                } else {
+                    debug!("received cancellation notification without params");
+                }
                 JsonRpcResponse::success(id, protocol::EmptyResult {})
             }
             protocol::METHOD_TOOLS_LIST => self.handle_tools_list(id, conn),
             protocol::METHOD_TOOLS_CALL => {
-                let ctx = conn.ctx.as_ref().unwrap_or(&self.context);
-                let registry = conn
-                    .view
+                let ctx_owned = conn.get_ctx();
+                let ctx = ctx_owned.as_ref().unwrap_or(&self.context);
+                let view_owned = conn.get_view();
+                let registry = view_owned
                     .as_ref()
                     .map_or_else(|| self.registry.as_ref(), |v| v.registry.as_ref());
-                self.handle_tools_call(id, request.params, ctx, registry)
-                    .await
+                let id_clone = id.clone();
+                Self::execute_cancellable(
+                    id,
+                    conn,
+                    self.handle_tools_call(id_clone, request.params, ctx, registry),
+                )
+                .await
             }
-            protocol::METHOD_RESOURCES_LIST => {
-                let list = protocol::ResourcesListResult {
-                    resources: self
-                        .resources
-                        .definitions()
-                        .into_iter()
-                        .map(|def| protocol::Resource {
-                            uri: def.uri_template,
-                            name: def.name,
-                            description: def.description,
-                            mime_type: def.mime_type,
-                        })
-                        .collect(),
-                };
-                JsonRpcResponse::success(id, list)
+            protocol::METHOD_RESOURCES_LIST => JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION,
+                id,
+                result: Some((*self.cached_resources_list).clone()),
+                error: None,
+            },
+            protocol::METHOD_RESOURCES_TEMPLATES_LIST => JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION,
+                id,
+                result: Some((*self.cached_resource_templates_list).clone()),
+                error: None,
+            },
+            protocol::METHOD_RESOURCES_READ => {
+                let id_clone = id.clone();
+                Self::execute_cancellable(
+                    id,
+                    conn,
+                    self.handle_resources_read(id_clone, request.params),
+                )
+                .await
             }
-            protocol::METHOD_RESOURCES_TEMPLATES_LIST => {
-                let list = protocol::ResourceTemplatesListResult {
-                    resource_templates: self.resources.definitions(),
-                };
-                JsonRpcResponse::success(id, list)
+            protocol::METHOD_PROMPTS_LIST => JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION,
+                id,
+                result: Some((*self.cached_prompts_list).clone()),
+                error: None,
+            },
+            protocol::METHOD_PROMPTS_GET => {
+                let id_clone = id.clone();
+                Self::execute_cancellable(
+                    id,
+                    conn,
+                    self.handle_prompts_get(id_clone, request.params),
+                )
+                .await
             }
-            protocol::METHOD_RESOURCES_READ => self.handle_resources_read(id, request.params).await,
-            protocol::METHOD_PROMPTS_LIST => {
-                let list = protocol::PromptsListResult {
-                    prompts: self.prompts.definitions(),
-                };
-                JsonRpcResponse::success(id, list)
-            }
-            protocol::METHOD_PROMPTS_GET => self.handle_prompts_get(id, request.params).await,
             protocol::METHOD_COMPLETION_COMPLETE => {
                 JsonRpcResponse::success(id, protocol::CompletionCompleteResult::default())
             }
@@ -302,6 +337,41 @@ impl McpServer {
         }
     }
 
+    /// Execute an async request handler while listening for client cancellation
+    /// (`notifications/cancelled`) targeting `id`.
+    async fn execute_cancellable<F>(
+        id: Option<serde_json::Value>,
+        conn: &Connection,
+        fut: F,
+    ) -> JsonRpcResponse
+    where
+        F: std::future::Future<Output = JsonRpcResponse>,
+    {
+        let typed_id = id.as_ref().and_then(protocol::RequestId::from_json_value);
+        let cancel_rx = typed_id
+            .as_ref()
+            .map(|req_id| conn.register_in_flight(req_id));
+        let resp = if let Some(rx) = cancel_rx {
+            tokio::select! {
+                res = fut => res,
+                _ = rx => {
+                    debug!(?id, "request cancelled by client notification");
+                    JsonRpcResponse::error(
+                        id.clone(),
+                        protocol::REQUEST_CANCELLED,
+                        "request cancelled by client",
+                    )
+                }
+            }
+        } else {
+            fut.await
+        };
+        if let Some(ref req_id) = typed_id {
+            conn.remove_in_flight(req_id);
+        }
+        resp
+    }
+
     // ── Method handlers ─────────────────────────────────────────────
 
     /// MCP protocol version supported by this server.
@@ -311,7 +381,7 @@ impl McpServer {
         &self,
         id: Option<serde_json::Value>,
         params: Option<&serde_json::Value>,
-        conn: &mut Connection,
+        conn: &Connection,
     ) -> JsonRpcResponse {
         info!(server = %self.name, version = %self.version, "MCP initialize");
 
@@ -337,7 +407,7 @@ impl McpServer {
                     .filter(|n| !n.is_empty())
                 {
                     info!(caller = %name, "adopting per-connection caller identity");
-                    conn.ctx = Some(self.context.with_caller(name));
+                    conn.set_ctx(Some(self.context.with_caller(name)));
                     caller = Some(name);
                 } else {
                     debug!(
@@ -350,7 +420,7 @@ impl McpServer {
 
         // Resolve this caller's registry view. A no-op (leaves the shared
         // registry in play) when no [`RegistryFactory`] is configured.
-        conn.view = self.resolve_view(caller);
+        conn.set_view(self.resolve_view(caller));
 
         let tools_cap = Some(ToolCapabilities {});
         let prompts_cap = if self.prompts.is_empty() {
@@ -388,7 +458,8 @@ impl McpServer {
         conn: &Connection,
     ) -> JsonRpcResponse {
         // Per-caller registry view when negotiated; otherwise the shared list.
-        let (count, tools_list) = conn.view.as_ref().map_or_else(
+        let view_owned = conn.get_view();
+        let (count, tools_list) = view_owned.as_ref().map_or_else(
             || (self.registry.len(), &self.cached_tools_list),
             |v| (v.registry.len(), &v.tools_list),
         );

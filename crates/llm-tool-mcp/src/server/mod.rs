@@ -89,6 +89,12 @@ pub struct McpServer {
     /// wrapped in `Arc` so `tools/list` clones a pointer plus one JSON value,
     /// never re-serializing the schema tree.
     cached_tools_list: Arc<serde_json::Value>,
+    /// Pre-serialized `prompts/list` result body.
+    cached_prompts_list: Arc<serde_json::Value>,
+    /// Pre-serialized `resources/list` result body.
+    cached_resources_list: Arc<serde_json::Value>,
+    /// Pre-serialized `resources/templates/list` result body.
+    cached_resource_templates_list: Arc<serde_json::Value>,
     prompts: Arc<PromptRegistry>,
     resources: Arc<ResourceRegistry>,
     /// When `true`, each connection derives its own caller identity from the
@@ -153,7 +159,7 @@ where
 /// A caller-specific view: the registry to dispatch against plus its
 /// pre-serialized `tools/list` body. Cheap to clone (two `Arc`s).
 #[derive(Clone)]
-struct CallerView {
+pub(crate) struct CallerView {
     registry: Arc<ToolRegistry>,
     tools_list: Arc<serde_json::Value>,
 }
@@ -168,14 +174,18 @@ struct CallerView {
 ///
 /// Defaults to "nothing negotiated yet": dispatch then falls back to the
 /// server's shared identity, registry, and cached `tools/list`.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Connection {
     /// Caller identity adopted from this connection's `initialize` handshake
     /// (when per-connection identity is enabled); `None` uses the shared one.
-    ctx: Option<ToolContext>,
+    ctx: Arc<Mutex<Option<ToolContext>>>,
     /// Caller-specific registry view (when a [`RegistryFactory`] is set);
     /// `None` uses the server's shared registry + cached `tools/list`.
-    view: Option<CallerView>,
+    view: Arc<Mutex<Option<CallerView>>>,
+    /// Active in-flight requests on this connection keyed by strongly-typed
+    /// [`RequestId`](crate::protocol::RequestId). Used to cancel running
+    /// requests upon receiving `notifications/cancelled`.
+    in_flight: Arc<Mutex<HashMap<crate::protocol::RequestId, tokio::sync::oneshot::Sender<()>>>>,
 }
 
 impl Connection {
@@ -186,6 +196,89 @@ impl Connection {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn get_ctx(&self) -> Option<ToolContext> {
+        match self.ctx.lock() {
+            Ok(guard) => guard.clone(),
+            Err(e) => {
+                warn!(error = %e, "Connection::get_ctx: mutex poisoned");
+                None
+            }
+        }
+    }
+
+    pub(crate) fn set_ctx(&self, ctx: Option<ToolContext>) {
+        match self.ctx.lock() {
+            Ok(mut guard) => *guard = ctx,
+            Err(e) => {
+                warn!(error = %e, "Connection::set_ctx: mutex poisoned");
+            }
+        }
+    }
+
+    pub(crate) fn get_view(&self) -> Option<CallerView> {
+        match self.view.lock() {
+            Ok(guard) => guard.clone(),
+            Err(e) => {
+                warn!(error = %e, "Connection::get_view: mutex poisoned");
+                None
+            }
+        }
+    }
+
+    pub(crate) fn set_view(&self, view: Option<CallerView>) {
+        match self.view.lock() {
+            Ok(mut guard) => *guard = view,
+            Err(e) => {
+                warn!(error = %e, "Connection::set_view: mutex poisoned");
+            }
+        }
+    }
+
+    pub(crate) fn register_in_flight(
+        &self,
+        id: &crate::protocol::RequestId,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        match self.in_flight.lock() {
+            Ok(mut guard) => {
+                guard.insert(id.clone(), tx);
+            }
+            Err(e) => {
+                warn!(error = %e, "Connection::register_in_flight: mutex poisoned");
+            }
+        }
+        rx
+    }
+
+    pub(crate) fn remove_in_flight(&self, id: &crate::protocol::RequestId) {
+        match self.in_flight.lock() {
+            Ok(mut guard) => {
+                guard.remove(id);
+            }
+            Err(e) => {
+                warn!(error = %e, "Connection::remove_in_flight: mutex poisoned");
+            }
+        }
+    }
+
+    pub(crate) fn cancel_request(&self, id: &crate::protocol::RequestId) -> bool {
+        let tx_opt = match self.in_flight.lock() {
+            Ok(mut guard) => guard.remove(id),
+            Err(e) => {
+                warn!(error = %e, "Connection::cancel_request: mutex poisoned");
+                None
+            }
+        };
+        if let Some(tx) = tx_opt {
+            match tx.send(()) {
+                Ok(()) => true,
+                Err(()) => false,
+            }
+        } else {
+            false
+        }
     }
 }
 
@@ -353,6 +446,39 @@ fn definition_to_mcp_schema(def: &ToolDefinition) -> McpToolSchema {
         description: def.description.clone(),
         input_schema: def.parameter_schema.clone(),
     }
+}
+
+/// Build and pre-serialize the cached `prompts/list` response body.
+fn build_prompts_list_value(prompts: &PromptRegistry) -> serde_json::Value {
+    let list = crate::protocol::PromptsListResult {
+        prompts: prompts.definitions(),
+    };
+    serde_json::to_value(list).expect("prompts/list schema must be JSON-serializable")
+}
+
+/// Build and pre-serialize the cached `resources/list` response body.
+fn build_resources_list_value(resources: &ResourceRegistry) -> serde_json::Value {
+    let list = crate::protocol::ResourcesListResult {
+        resources: resources
+            .definitions()
+            .into_iter()
+            .map(|def| crate::protocol::Resource {
+                uri: def.uri_template,
+                name: def.name,
+                description: def.description,
+                mime_type: def.mime_type,
+            })
+            .collect(),
+    };
+    serde_json::to_value(list).expect("resources/list schema must be JSON-serializable")
+}
+
+/// Build and pre-serialize the cached `resources/templates/list` response body.
+fn build_resource_templates_list_value(resources: &ResourceRegistry) -> serde_json::Value {
+    let list = crate::protocol::ResourceTemplatesListResult {
+        resource_templates: resources.definitions(),
+    };
+    serde_json::to_value(list).expect("resources/templates/list schema must be JSON-serializable")
 }
 
 #[cfg(test)]

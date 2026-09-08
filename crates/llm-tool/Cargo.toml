@@ -31,11 +31,11 @@ md-tmpl = [
 ]
 
 [dependencies]
-llm-tool-macros = { path = "../llm-tool-macros", version = "0.9.4" }
-md-tmpl = { version = "0.9.3", optional = true, default-features = false, features = [
+llm-tool-macros = { path = "../llm-tool-macros", version = "0.10.0" }
+md-tmpl = { version = "0.10.0", optional = true, default-features = false, features = [
   "serde",
 ] }
-md-tmpl-macros = { version = "0.9.3", optional = true, default-features = false, features = [
+md-tmpl-macros = { version = "0.10.0", optional = true, default-features = false, features = [
   "serde",
 ] }
 hashbrown = { version = "0.17", default-features = false, features = [

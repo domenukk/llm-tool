@@ -60,7 +60,7 @@ async fn test_no_std_paths() {
             StaticTmplTool::DESCRIPTION.replace("\r\n", "\n"),
             "Fetch the current weather for any city worldwide.
 
-Returns a JSON object containing temperature, humidity,
+Returns structured weather data containing temperature, humidity,
 wind speed, and a human-readable conditions summary.
 Supports both metric and imperial unit systems."
         );

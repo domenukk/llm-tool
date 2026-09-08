@@ -10,22 +10,193 @@ use serde::{Deserialize, Serialize};
 /// The only valid JSON-RPC protocol version.
 pub const JSONRPC_VERSION: &str = "2.0";
 
-// ── Standard JSON-RPC 2.0 error codes ───────────────────────────────
+// ── Strongly-typed JSON-RPC 2.0 / MCP error codes ───────────────────
 
-/// Malformed JSON.
-pub const PARSE_ERROR: i64 = -32700;
+/// Strongly-typed JSON-RPC 2.0 / MCP error code.
+///
+/// Serializes transparently as an integer on the wire (`-32700`, `-32800`, etc.)
+/// while providing exhaustive pattern matching for standard protocol error codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RpcErrorCode {
+    /// Malformed JSON (`-32700`).
+    ParseError,
+    /// Valid JSON but not a valid JSON-RPC request (`-32600`).
+    InvalidRequest,
+    /// The requested method does not exist (`-32601`).
+    MethodNotFound,
+    /// Invalid method parameters (`-32602`).
+    InvalidParams,
+    /// Internal server error (`-32603`).
+    InternalError,
+    /// Request cancelled by client notification (`-32800`).
+    RequestCancelled,
+    /// Custom or application-specific error code.
+    Custom(i64),
+}
 
-/// Valid JSON but not a valid JSON-RPC request.
-pub const INVALID_REQUEST: i64 = -32600;
+impl RpcErrorCode {
+    const CODE_PARSE_ERROR: i64 = -32700;
+    const CODE_INVALID_REQUEST: i64 = -32600;
+    const CODE_METHOD_NOT_FOUND: i64 = -32601;
+    const CODE_INVALID_PARAMS: i64 = -32602;
+    const CODE_INTERNAL_ERROR: i64 = -32603;
+    const CODE_REQUEST_CANCELLED: i64 = -32800;
 
-/// The requested method does not exist.
-pub const METHOD_NOT_FOUND: i64 = -32601;
+    /// Return the underlying `i64` JSON-RPC wire code.
+    #[must_use]
+    pub const fn as_i64(self) -> i64 {
+        match self {
+            Self::ParseError => Self::CODE_PARSE_ERROR,
+            Self::InvalidRequest => Self::CODE_INVALID_REQUEST,
+            Self::MethodNotFound => Self::CODE_METHOD_NOT_FOUND,
+            Self::InvalidParams => Self::CODE_INVALID_PARAMS,
+            Self::InternalError => Self::CODE_INTERNAL_ERROR,
+            Self::RequestCancelled => Self::CODE_REQUEST_CANCELLED,
+            Self::Custom(code) => code,
+        }
+    }
 
-/// Invalid method parameters.
-pub const INVALID_PARAMS: i64 = -32602;
+    /// Construct an [`RpcErrorCode`] from its wire integer representation.
+    #[must_use]
+    pub const fn from_i64(code: i64) -> Self {
+        match code {
+            Self::CODE_PARSE_ERROR => Self::ParseError,
+            Self::CODE_INVALID_REQUEST => Self::InvalidRequest,
+            Self::CODE_METHOD_NOT_FOUND => Self::MethodNotFound,
+            Self::CODE_INVALID_PARAMS => Self::InvalidParams,
+            Self::CODE_INTERNAL_ERROR => Self::InternalError,
+            Self::CODE_REQUEST_CANCELLED => Self::RequestCancelled,
+            other => Self::Custom(other),
+        }
+    }
+}
 
-/// Internal server error.
-pub const INTERNAL_ERROR: i64 = -32603;
+impl Serialize for RpcErrorCode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_i64(self.as_i64())
+    }
+}
+
+impl<'de> Deserialize<'de> for RpcErrorCode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let code = i64::deserialize(deserializer)?;
+        Ok(Self::from_i64(code))
+    }
+}
+
+impl core::fmt::Display for RpcErrorCode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.as_i64())
+    }
+}
+
+impl PartialEq<i64> for RpcErrorCode {
+    fn eq(&self, other: &i64) -> bool {
+        self.as_i64() == *other
+    }
+}
+
+impl From<RpcErrorCode> for i64 {
+    fn from(code: RpcErrorCode) -> Self {
+        code.as_i64()
+    }
+}
+
+impl From<i64> for RpcErrorCode {
+    fn from(code: i64) -> Self {
+        Self::from_i64(code)
+    }
+}
+
+/// Malformed JSON (`-32700`).
+pub const PARSE_ERROR: RpcErrorCode = RpcErrorCode::ParseError;
+
+/// Valid JSON but not a valid JSON-RPC request (`-32600`).
+pub const INVALID_REQUEST: RpcErrorCode = RpcErrorCode::InvalidRequest;
+
+/// The requested method does not exist (`-32601`).
+pub const METHOD_NOT_FOUND: RpcErrorCode = RpcErrorCode::MethodNotFound;
+
+/// Invalid method parameters (`-32602`).
+pub const INVALID_PARAMS: RpcErrorCode = RpcErrorCode::InvalidParams;
+
+/// Internal server error (`-32603`).
+pub const INTERNAL_ERROR: RpcErrorCode = RpcErrorCode::InternalError;
+
+/// Request cancelled by client notification (`notifications/cancelled`).
+pub const REQUEST_CANCELLED: RpcErrorCode = RpcErrorCode::RequestCancelled;
+
+// ── Strongly-typed RequestId ────────────────────────────────────────
+
+/// Strongly-typed JSON-RPC 2.0 request identifier for zero-allocation
+/// hash-map indexing of in-flight requests.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RequestId {
+    /// Numeric request ID (e.g. `1`, `42`).
+    Number(i64),
+    /// String request ID (e.g. `"req-1"`).
+    String(String),
+}
+
+impl RequestId {
+    /// Extract a strongly-typed [`RequestId`] from a JSON value if it is a
+    /// valid JSON-RPC 2.0 identifier (`Number` or `String`).
+    #[must_use]
+    pub fn from_json_value(val: &serde_json::Value) -> Option<Self> {
+        match val {
+            serde_json::Value::Number(n) => n.as_i64().map(Self::Number),
+            serde_json::Value::String(s) => Some(Self::String(s.clone())),
+            _ => None,
+        }
+    }
+}
+
+/// Error returned when converting a non-identifier JSON value into a [`RequestId`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidRequestIdError {
+    /// Description of the invalid JSON type encountered.
+    pub actual_type: &'static str,
+}
+
+impl core::fmt::Display for InvalidRequestIdError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "invalid JSON-RPC request id: expected integer or string, got {}",
+            self.actual_type
+        )
+    }
+}
+
+impl std::error::Error for InvalidRequestIdError {}
+
+impl TryFrom<&serde_json::Value> for RequestId {
+    type Error = InvalidRequestIdError;
+
+    fn try_from(val: &serde_json::Value) -> Result<Self, Self::Error> {
+        match val {
+            serde_json::Value::Number(n) => {
+                n.as_i64().map(Self::Number).ok_or(InvalidRequestIdError {
+                    actual_type: "non-i64 number",
+                })
+            }
+            serde_json::Value::String(s) => Ok(Self::String(s.clone())),
+            serde_json::Value::Null => Err(InvalidRequestIdError {
+                actual_type: "null",
+            }),
+            serde_json::Value::Bool(_) => Err(InvalidRequestIdError {
+                actual_type: "boolean",
+            }),
+            serde_json::Value::Array(_) => Err(InvalidRequestIdError {
+                actual_type: "array",
+            }),
+            serde_json::Value::Object(_) => Err(InvalidRequestIdError {
+                actual_type: "object",
+            }),
+        }
+    }
+}
 
 // ── MCP JSON-RPC method names ───────────────────────────────────────
 //
@@ -125,7 +296,7 @@ pub struct JsonRpcResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JsonRpcError {
     /// Numeric error code.
-    pub code: i64,
+    pub code: RpcErrorCode,
     /// Human-readable description.
     pub message: String,
     /// Optional additional data about the error.
@@ -143,7 +314,7 @@ impl JsonRpcResponse {
     #[must_use]
     pub fn success(id: Option<serde_json::Value>, result: impl Serialize) -> Self {
         Self {
-            jsonrpc: "2.0",
+            jsonrpc: JSONRPC_VERSION,
             id,
             result: Some(
                 serde_json::to_value(result).expect("MCP result type must be JSON-serializable"),
@@ -154,13 +325,17 @@ impl JsonRpcResponse {
 
     /// Build an error response.
     #[must_use]
-    pub fn error(id: Option<serde_json::Value>, code: i64, message: impl Into<String>) -> Self {
+    pub fn error(
+        id: Option<serde_json::Value>,
+        code: impl Into<RpcErrorCode>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
-            jsonrpc: "2.0",
+            jsonrpc: JSONRPC_VERSION,
             id,
             result: None,
             error: Some(JsonRpcError {
-                code,
+                code: code.into(),
                 message: message.into(),
                 data: None,
             }),
@@ -171,21 +346,32 @@ impl JsonRpcResponse {
     #[must_use]
     pub fn error_with_data(
         id: Option<serde_json::Value>,
-        code: i64,
+        code: impl Into<RpcErrorCode>,
         message: impl Into<String>,
         data: serde_json::Value,
     ) -> Self {
         Self {
-            jsonrpc: "2.0",
+            jsonrpc: JSONRPC_VERSION,
             id,
             result: None,
             error: Some(JsonRpcError {
-                code,
+                code: code.into(),
                 message: message.into(),
                 data: Some(data),
             }),
         }
     }
+}
+
+/// Parameters for `notifications/cancelled`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelledNotificationParams {
+    /// The strongly-typed ID of the request to cancel.
+    pub request_id: RequestId,
+    /// Optional human-readable reason for cancellation.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 // ── MCP-specific types ──────────────────────────────────────────────

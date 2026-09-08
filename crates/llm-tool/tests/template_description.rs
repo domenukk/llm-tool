@@ -753,3 +753,32 @@ fn description_render_failure_does_not_break_registry() {
         defs[0].description
     );
 }
+
+#[llm_tool::llm_resource(
+    uri = "res://weather/{city}",
+    description_file = "tools/parameterized_desc.tmpl.md",
+    params(api_version = "v2", env_name = "production")
+)]
+fn weather_resource(city: String) -> String {
+    format!("Resource weather for {city}")
+}
+
+#[test]
+fn resource_template_description_file_and_params() {
+    use llm_tool::RustResource;
+
+    let res = WeatherResource;
+    let desc = res.description();
+    assert!(desc.contains("v2"), "expected api_version in desc: {desc}");
+    assert!(
+        desc.contains("production"),
+        "expected env_name in desc: {desc}"
+    );
+
+    let reg = llm_tool::ResourceRegistry::new().with_resource(WeatherResource);
+    let def = reg
+        .definition("weather_resource")
+        .expect("resource registered");
+    assert!(def.description.contains("v2"));
+    assert!(def.description.contains("production"));
+}

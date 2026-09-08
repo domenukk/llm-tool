@@ -185,7 +185,11 @@ pub(crate) fn resolve_inline_description(
                 "the `md-tmpl` feature must be enabled to use dynamic inline descriptions",
             ));
         }
-        let desc = attr.description_inline.as_ref().unwrap().value();
+        let desc = attr
+            .description_inline
+            .as_ref()
+            .ok_or_else(|| syn::Error::new(span, "missing inline description"))?
+            .value();
         Ok(DescriptionInfo {
             static_description: desc,
             helper_tokens: quote! {},
@@ -410,7 +414,10 @@ pub(crate) fn resolve_inline_description_impl(
                 #env_toks
             );
         };
-        let context_fn = attr.context_fn.as_ref().unwrap();
+        let context_fn = attr
+            .context_fn
+            .as_ref()
+            .ok_or_else(|| syn::Error::new(template_lit.span(), "missing context_fn"))?;
 
         let description_method =
             build_context_description_method(&desc_mod_name, context_fn, fn_name, &body_str);

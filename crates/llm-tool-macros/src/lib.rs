@@ -267,7 +267,7 @@ impl ToolAttrKey {
             .iter()
             .map(|k| format!("`{}`", k.as_str()))
             .collect();
-        let last = parts.pop().unwrap_or_default();
+        let last = parts.pop().expect("ToolAttrKey::ALL is non-empty");
         let formatted = if parts.is_empty() {
             last
         } else {
@@ -292,7 +292,7 @@ impl TryFrom<&syn::Ident> for ToolAttrKey {
 }
 
 #[derive(Default)]
-struct ToolAttrBuilder {
+pub(crate) struct ToolAttrBuilder {
     description_inline: Option<syn::LitStr>,
     description_file_path: Option<syn::LitStr>,
     response_file_path: Option<syn::LitStr>,
@@ -374,7 +374,15 @@ impl ToolAttrBuilder {
     fn parse_single(&mut self, input: syn::parse::ParseStream) -> syn::Result<()> {
         let ident: syn::Ident = input.parse()?;
         let key = ToolAttrKey::try_from(&ident)?;
+        self.parse_by_key(&ident, key, input)
+    }
 
+    pub(crate) fn parse_by_key(
+        &mut self,
+        ident: &syn::Ident,
+        key: ToolAttrKey,
+        input: syn::parse::ParseStream,
+    ) -> syn::Result<()> {
         match key {
             ToolAttrKey::Description => {
                 let _: syn::Token![=] = input.parse()?;
@@ -449,6 +457,35 @@ impl ToolAttrBuilder {
         }
         Ok(())
     }
+
+    pub(crate) fn build(self) -> syn::Result<ToolAttr> {
+        #[cfg(feature = "md-tmpl")]
+        let has_inline_params = !self.inline_params.is_empty();
+        #[cfg(not(feature = "md-tmpl"))]
+        let has_inline_params = self.has_inline_params;
+
+        #[cfg(feature = "md-tmpl")]
+        let has_context_fn = self.context_fn.is_some();
+        #[cfg(not(feature = "md-tmpl"))]
+        let has_context_fn = self.has_context_fn;
+
+        validate_tool_attr(&self)?;
+
+        Ok(ToolAttr {
+            description_inline: self.description_inline,
+            description_file_path: self.description_file_path,
+            response_file_path: self.response_file_path,
+            response_inline: self.response_inline,
+            #[cfg(feature = "md-tmpl")]
+            inline_params: self.inline_params,
+            #[cfg(feature = "md-tmpl")]
+            env_vars: self.env_vars,
+            #[cfg(feature = "md-tmpl")]
+            context_fn: self.context_fn,
+            has_inline_params,
+            has_context_fn,
+        })
+    }
 }
 
 impl syn::parse::Parse for ToolAttr {
@@ -462,32 +499,7 @@ impl syn::parse::Parse for ToolAttr {
             }
         }
 
-        #[cfg(feature = "md-tmpl")]
-        let has_inline_params = !builder.inline_params.is_empty();
-        #[cfg(not(feature = "md-tmpl"))]
-        let has_inline_params = builder.has_inline_params;
-
-        #[cfg(feature = "md-tmpl")]
-        let has_context_fn = builder.context_fn.is_some();
-        #[cfg(not(feature = "md-tmpl"))]
-        let has_context_fn = builder.has_context_fn;
-
-        validate_tool_attr(&builder)?;
-
-        Ok(Self {
-            description_inline: builder.description_inline,
-            description_file_path: builder.description_file_path,
-            response_file_path: builder.response_file_path,
-            response_inline: builder.response_inline,
-            #[cfg(feature = "md-tmpl")]
-            inline_params: builder.inline_params,
-            #[cfg(feature = "md-tmpl")]
-            env_vars: builder.env_vars,
-            #[cfg(feature = "md-tmpl")]
-            context_fn: builder.context_fn,
-            has_inline_params,
-            has_context_fn,
-        })
+        builder.build()
     }
 }
 
