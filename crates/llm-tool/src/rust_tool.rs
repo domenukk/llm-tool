@@ -3,10 +3,12 @@
 use alloc::{borrow::Cow, boxed::Box, format, string::ToString};
 use core::{future::Future, pin::Pin};
 
-use super::types::{ToolContext, ToolDefinition, ToolError, ToolOutput};
+use super::types::{ToolContext, ToolDefinition, ToolEffect, ToolError, ToolOutput};
 
 /// Convenience type for tools that take no parameters.
-#[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct EmptyParams {}
 
 /// A custom tool implemented entirely in Rust with strongly-typed parameters.
@@ -64,6 +66,29 @@ pub trait RustTool: Send + Sync {
     /// Human-readable description shown to the model.
     const DESCRIPTION: &'static str;
 
+    /// Execution effect of the tool.
+    const EFFECT: ToolEffect = if Self::IDEMPOTENT {
+        ToolEffect::ReadOnly
+    } else {
+        ToolEffect::Mutating
+    };
+
+    /// Whether the tool is idempotent / read-only safe for concurrent wave execution.
+    const IDEMPOTENT: bool = false;
+
+    /// Whether the tool output should be sanitized.
+    const SANITIZE_OUTPUT: bool = false;
+
+    /// Return the execution effect of the tool.
+    fn effect(&self) -> ToolEffect {
+        Self::EFFECT
+    }
+
+    /// Return whether the tool is idempotent (read-only).
+    fn is_idempotent(&self) -> bool {
+        matches!(self.effect(), ToolEffect::ReadOnly)
+    }
+
     /// Return the tool description used in [`ToolDefinition`].
     ///
     /// The default returns [`Self::DESCRIPTION`] (the static string from a
@@ -114,11 +139,12 @@ pub fn definition_of<T: RustTool>(tool: &T) -> Result<ToolDefinition, ToolError>
         ))
     })?;
     sanitize_schema_types(&mut parameter_schema);
-    Ok(ToolDefinition {
-        name: T::NAME.to_string(),
-        description: tool.description().into_owned(),
+    Ok(ToolDefinition::with_effect(
+        T::NAME,
+        tool.description().into_owned(),
         parameter_schema,
-    })
+        tool.effect(),
+    ))
 }
 
 /// Recursively sanitize JSON Schema `"type"` fields for Go genai compatibility.
@@ -159,8 +185,12 @@ fn sanitize_schema_types(value: &mut serde_json::Value) {
     }
 }
 
-/// Type-erased future returned by [`ErasedTool::call_erased`].
-type BoxToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolOutput, ToolError>> + Send + 'a>>;
+/// Type-erased future returned when dispatching a boxed tool.
+///
+/// Produced by the crate-internal type-erasure layer that lets heterogeneous
+/// [`RustTool`] implementations share one registry.
+pub type BoxToolFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ToolOutput, ToolError>> + Send + 'a>>;
 
 /// Type-erased wrapper enabling heterogeneous tool storage.
 ///

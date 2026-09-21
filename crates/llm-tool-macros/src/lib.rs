@@ -208,6 +208,27 @@ struct ToolAttr {
     context_fn: Option<syn::Path>,
     has_inline_params: bool,
     has_context_fn: bool,
+    idempotent: bool,
+    effect: MacroToolEffect,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) enum MacroToolEffect {
+    ReadOnly,
+    Mutating,
+    Destructive,
+}
+
+fn parse_effect_str(s: &str, span: proc_macro2::Span) -> syn::Result<MacroToolEffect> {
+    match s {
+        "read_only" | "ReadOnly" => Ok(MacroToolEffect::ReadOnly),
+        "mutating" | "Mutating" => Ok(MacroToolEffect::Mutating),
+        "destructive" | "Destructive" => Ok(MacroToolEffect::Destructive),
+        _ => Err(syn::Error::new(
+            span,
+            "expected `read_only`, `mutating`, or `destructive`",
+        )),
+    }
 }
 
 pub(crate) const MACRO_LLM_TOOL: &str = "llm_tool";
@@ -221,6 +242,8 @@ pub(crate) const ATTR_RESPONSE: &str = "response";
 pub(crate) const ATTR_PARAMS: &str = "params";
 pub(crate) const ATTR_CONTEXT: &str = "context";
 pub(crate) const ATTR_ENV: &str = "env";
+pub(crate) const ATTR_IDEMPOTENT: &str = "idempotent";
+pub(crate) const ATTR_EFFECT: &str = "effect";
 pub(crate) const ATTR_DOC: &str = "doc";
 
 pub(crate) const TYPE_OPTION: &str = "Option";
@@ -237,6 +260,8 @@ pub(crate) enum ToolAttrKey {
     Params,
     Env,
     Context,
+    Idempotent,
+    Effect,
 }
 
 impl ToolAttrKey {
@@ -248,6 +273,8 @@ impl ToolAttrKey {
         Self::Params,
         Self::Env,
         Self::Context,
+        Self::Idempotent,
+        Self::Effect,
     ];
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -259,6 +286,8 @@ impl ToolAttrKey {
             Self::Params => ATTR_PARAMS,
             Self::Env => ATTR_ENV,
             Self::Context => ATTR_CONTEXT,
+            Self::Idempotent => ATTR_IDEMPOTENT,
+            Self::Effect => ATTR_EFFECT,
         }
     }
 
@@ -297,6 +326,8 @@ pub(crate) struct ToolAttrBuilder {
     description_file_path: Option<syn::LitStr>,
     response_file_path: Option<syn::LitStr>,
     response_inline: Option<syn::LitStr>,
+    idempotent: Option<syn::LitBool>,
+    effect: Option<(MacroToolEffect, proc_macro2::Span)>,
     #[cfg(feature = "md-tmpl")]
     inline_params: Vec<(syn::Ident, syn::LitStr)>,
     #[cfg(feature = "md-tmpl")]
@@ -377,6 +408,84 @@ impl ToolAttrBuilder {
         self.parse_by_key(&ident, key, input)
     }
 
+    fn parse_lit_str_attr(
+        field: &mut Option<syn::LitStr>,
+        ident: &syn::Ident,
+        key: ToolAttrKey,
+        input: syn::parse::ParseStream,
+    ) -> syn::Result<()> {
+        let _: syn::Token![=] = input.parse()?;
+        if field.is_some() {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!("duplicate `{}` attribute", key.as_str()),
+            ));
+        }
+        *field = Some(input.parse::<syn::LitStr>()?);
+        Ok(())
+    }
+
+    fn parse_context_attr(
+        &mut self,
+        ident: &syn::Ident,
+        key: ToolAttrKey,
+        input: syn::parse::ParseStream,
+    ) -> syn::Result<()> {
+        let _: syn::Token![=] = input.parse()?;
+        #[cfg(feature = "md-tmpl")]
+        {
+            if self.context_fn.is_some() {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    format!("duplicate `{}` attribute", key.as_str()),
+                ));
+            }
+            self.context_fn = Some(input.parse::<syn::Path>()?);
+        }
+        #[cfg(not(feature = "md-tmpl"))]
+        {
+            let _path: syn::Path = input.parse()?;
+            if self.has_context_fn {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    format!("duplicate `{}` attribute", key.as_str()),
+                ));
+            }
+            self.has_context_fn = true;
+        }
+        Ok(())
+    }
+
+    fn parse_effect_attr(
+        &mut self,
+        ident: &syn::Ident,
+        key: ToolAttrKey,
+        input: syn::parse::ParseStream,
+    ) -> syn::Result<()> {
+        let _: syn::Token![=] = input.parse()?;
+        if self.effect.is_some() {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!("duplicate `{}` attribute", key.as_str()),
+            ));
+        }
+        let span = input.span();
+        let eff = if input.peek(syn::Ident) {
+            let id: syn::Ident = input.parse()?;
+            parse_effect_str(id.to_string().as_str(), id.span())?
+        } else if input.peek(syn::LitStr) {
+            let lit: syn::LitStr = input.parse()?;
+            parse_effect_str(lit.value().as_str(), lit.span())?
+        } else {
+            return Err(syn::Error::new(
+                span,
+                "expected identifier or string literal (`read_only`, `mutating`, or `destructive`)",
+            ));
+        };
+        self.effect = Some((eff, span));
+        Ok(())
+    }
+
     pub(crate) fn parse_by_key(
         &mut self,
         ident: &syn::Ident,
@@ -385,44 +494,16 @@ impl ToolAttrBuilder {
     ) -> syn::Result<()> {
         match key {
             ToolAttrKey::Description => {
-                let _: syn::Token![=] = input.parse()?;
-                if self.description_inline.is_some() {
-                    return Err(syn::Error::new(
-                        ident.span(),
-                        format!("duplicate `{}` attribute", key.as_str()),
-                    ));
-                }
-                self.description_inline = Some(input.parse::<syn::LitStr>()?);
+                Self::parse_lit_str_attr(&mut self.description_inline, ident, key, input)?;
             }
             ToolAttrKey::DescriptionFile => {
-                let _: syn::Token![=] = input.parse()?;
-                if self.description_file_path.is_some() {
-                    return Err(syn::Error::new(
-                        ident.span(),
-                        format!("duplicate `{}` attribute", key.as_str()),
-                    ));
-                }
-                self.description_file_path = Some(input.parse::<syn::LitStr>()?);
+                Self::parse_lit_str_attr(&mut self.description_file_path, ident, key, input)?;
             }
             ToolAttrKey::ResponseFile => {
-                let _: syn::Token![=] = input.parse()?;
-                if self.response_file_path.is_some() {
-                    return Err(syn::Error::new(
-                        ident.span(),
-                        format!("duplicate `{}` attribute", key.as_str()),
-                    ));
-                }
-                self.response_file_path = Some(input.parse::<syn::LitStr>()?);
+                Self::parse_lit_str_attr(&mut self.response_file_path, ident, key, input)?;
             }
             ToolAttrKey::Response => {
-                let _: syn::Token![=] = input.parse()?;
-                if self.response_inline.is_some() {
-                    return Err(syn::Error::new(
-                        ident.span(),
-                        format!("duplicate `{}` attribute", key.as_str()),
-                    ));
-                }
-                self.response_inline = Some(input.parse::<syn::LitStr>()?);
+                Self::parse_lit_str_attr(&mut self.response_inline, ident, key, input)?;
             }
             ToolAttrKey::Params => {
                 self.parse_params_attr(input)?;
@@ -431,28 +512,20 @@ impl ToolAttrBuilder {
                 self.parse_env_attr(input)?;
             }
             ToolAttrKey::Context => {
+                self.parse_context_attr(ident, key, input)?;
+            }
+            ToolAttrKey::Idempotent => {
                 let _: syn::Token![=] = input.parse()?;
-                #[cfg(feature = "md-tmpl")]
-                {
-                    if self.context_fn.is_some() {
-                        return Err(syn::Error::new(
-                            ident.span(),
-                            format!("duplicate `{}` attribute", key.as_str()),
-                        ));
-                    }
-                    self.context_fn = Some(input.parse::<syn::Path>()?);
+                if self.idempotent.is_some() {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!("duplicate `{}` attribute", key.as_str()),
+                    ));
                 }
-                #[cfg(not(feature = "md-tmpl"))]
-                {
-                    let _path: syn::Path = input.parse()?;
-                    if self.has_context_fn {
-                        return Err(syn::Error::new(
-                            ident.span(),
-                            format!("duplicate `{}` attribute", key.as_str()),
-                        ));
-                    }
-                    self.has_context_fn = true;
-                }
+                self.idempotent = Some(input.parse::<syn::LitBool>()?);
+            }
+            ToolAttrKey::Effect => {
+                self.parse_effect_attr(ident, key, input)?;
             }
         }
         Ok(())
@@ -471,6 +544,19 @@ impl ToolAttrBuilder {
 
         validate_tool_attr(&self)?;
 
+        let effect = match (self.effect, self.idempotent) {
+            (Some((eff, _)), _) => eff,
+            (None, Some(idemp)) => {
+                if idemp.value() {
+                    MacroToolEffect::ReadOnly
+                } else {
+                    MacroToolEffect::Mutating
+                }
+            }
+            (None, None) => MacroToolEffect::Mutating,
+        };
+        let idempotent = matches!(effect, MacroToolEffect::ReadOnly);
+
         Ok(ToolAttr {
             description_inline: self.description_inline,
             description_file_path: self.description_file_path,
@@ -484,6 +570,8 @@ impl ToolAttrBuilder {
             context_fn: self.context_fn,
             has_inline_params,
             has_context_fn,
+            idempotent,
+            effect,
         })
     }
 }
@@ -592,6 +680,17 @@ fn validate_tool_attr(builder: &ToolAttrBuilder) -> syn::Result<()> {
         ));
     }
 
+    if let (Some(idemp), Some((eff, span))) = (&builder.idempotent, &builder.effect) {
+        let idemp_val = idemp.value();
+        let eff_is_read_only = matches!(eff, MacroToolEffect::ReadOnly);
+        if idemp_val != eff_is_read_only {
+            return Err(syn::Error::new(
+                *span,
+                "conflicting `idempotent` and `effect` attributes: `idempotent = true` requires `effect = read_only`",
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -617,6 +716,43 @@ enum ReturnInfo {
     BareType,
 }
 
+fn validate_params(all_params: &[ParamInfo], sig: &syn::Signature) -> syn::Result<()> {
+    let ctx_count = all_params.iter().filter(|p| p.is_context).count();
+    if ctx_count > 1 {
+        return Err(syn::Error::new_spanned(
+            sig,
+            "#[llm_tool] functions can accept at most one ToolContext parameter",
+        ));
+    }
+    for param in all_params.iter().filter(|p| !p.is_context) {
+        if param.doc_attrs.is_empty() {
+            return Err(syn::Error::new_spanned(
+                &param.name,
+                format!(
+                    "#[llm_tool] parameter `{}` must have a doc comment \
+                      (used as the parameter description in the JSON schema)",
+                    param.name
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_effect_tokens(
+    attr: Option<&ToolAttr>,
+    crate_path: &proc_macro2::TokenStream,
+) -> (proc_macro2::TokenStream, bool) {
+    let effect_val = attr.map_or(MacroToolEffect::Mutating, |a| a.effect);
+    let effect_tokens = match effect_val {
+        MacroToolEffect::ReadOnly => quote!(#crate_path::ToolEffect::ReadOnly),
+        MacroToolEffect::Destructive => quote!(#crate_path::ToolEffect::Destructive),
+        MacroToolEffect::Mutating => quote!(#crate_path::ToolEffect::Mutating),
+    };
+    let idempotent_bool = attr.is_some_and(|a| a.idempotent);
+    (effect_tokens, idempotent_bool)
+}
+
 fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2::TokenStream> {
     let crate_path = quote! { ::llm_tool };
     let fn_name = &func.sig.ident;
@@ -638,29 +774,9 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
 
     // Extract parameters, separating ToolContext from regular params.
     let all_params = extract_params(func, MACRO_LLM_TOOL)?;
-    let ctx_count = all_params.iter().filter(|p| p.is_context).count();
-    if ctx_count > 1 {
-        return Err(syn::Error::new_spanned(
-            &func.sig,
-            "#[llm_tool] functions can accept at most one ToolContext parameter",
-        ));
-    }
+    validate_params(&all_params, &func.sig)?;
     let ctx_param = all_params.iter().find(|p| p.is_context);
     let params: Vec<&ParamInfo> = all_params.iter().filter(|p| !p.is_context).collect();
-
-    // Enforce doc comments on every non-ToolContext parameter.
-    for param in &params {
-        if param.doc_attrs.is_empty() {
-            return Err(syn::Error::new_spanned(
-                &param.name,
-                format!(
-                    "#[llm_tool] parameter `{}` must have a doc comment \
-                      (used as the parameter description in the JSON schema)",
-                    param.name
-                ),
-            ));
-        }
-    }
 
     // Parse return type: either Result<T, E> or bare T.
     let return_info = parse_return_type(func, MACRO_LLM_TOOL)?;
@@ -704,6 +820,7 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
 
     let response_dep_tracking = &response_info.dep_tracking;
     let response_helper_tokens = &response_info.helper_tokens;
+    let (effect_tokens, idempotent_bool) = resolve_effect_tokens(attr, &crate_path);
 
     Ok(quote! {
         #dep_tracking
@@ -728,6 +845,8 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
             type Params = #params_name;
             const NAME: &'static str = #tool_name_str;
             const DESCRIPTION: &'static str = #static_description;
+            const IDEMPOTENT: bool = #idempotent_bool;
+            const EFFECT: #crate_path::ToolEffect = #effect_tokens;
 
             #description_method
 

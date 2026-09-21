@@ -357,11 +357,11 @@ fn registry_accessor() {
 
 #[test]
 fn definition_to_mcp_schema_has_correct_keys() {
-    let def = ToolDefinition {
-        name: "my_tool".into(),
-        description: "Does stuff.".into(),
-        parameter_schema: serde_json::json!({"type": "object"}),
-    };
+    let def = ToolDefinition::new(
+        "my_tool",
+        "Does stuff.",
+        serde_json::json!({"type": "object"}),
+    );
     let schema = definition_to_mcp_schema(&def);
     assert_eq!(schema.name, "my_tool");
     assert_eq!(schema.description, "Does stuff.");

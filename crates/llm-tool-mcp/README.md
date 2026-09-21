@@ -3,8 +3,8 @@
 MCP ([Model Context Protocol](https://modelcontextprotocol.io/)) stdio server
 for [`llm-tool`](https://crates.io/crates/llm-tool) registries.
 
-Register your tools in a `ToolRegistry`, hand it to `McpServer`, and get a
-fully compliant MCP server — no boilerplate.
+Register your tools in a `ToolRegistry`, hand it to `McpServer`, and get a fully
+compliant MCP server — no boilerplate.
 
 ## Quick start
 
@@ -64,8 +64,8 @@ out-of-the-box. Two flavors are available:
 
 - **Blocking convenience** — `run_stdio`, `run_tcp`, `run_unix`, and the
   transport-dispatching `serve(Transport)`. These build a Tokio runtime
-  internally, so a simple binary's `main` needs no `async`. They block until
-  the transport finishes.
+  internally, so a simple binary's `main` needs no `async`. They block until the
+  transport finishes.
 - **Async first-class** — `run_async`, `listen_tcp`, `listen_unix`. Use these
   when you already have a Tokio runtime (as most real applications do) so the
   server shares it instead of spawning a second one.
@@ -124,7 +124,8 @@ not as JSON-RPC errors.
 
 ## Async & custom transports
 
-If running inside an existing Tokio application or network server, use `run_async`:
+If running inside an existing Tokio application or network server, use
+`run_async`:
 
 ```rust
 # use llm_tool::ToolRegistry;

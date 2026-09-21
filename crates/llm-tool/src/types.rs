@@ -15,7 +15,7 @@ use core::any::{Any, TypeId};
 
 use serde::{Deserialize, Serialize};
 
-use crate::compat::{HashMap, RwLock, read_lock, write_lock};
+use crate::compat::{HashMap, OnceLock, RwLock, read_lock, write_lock};
 
 /// A cheaply-cloneable handle to a tool's shared key-value state store.
 ///
@@ -105,47 +105,9 @@ impl core::fmt::Debug for SharedState {
 
 /// Context passed to Rust tools during dispatch.
 ///
-/// Provides access to the current conversation ID and a shared key-value state
-/// store that persists across tool calls within the same agent turn.
-///
-/// The state is backed by `Arc<RwLock<HashMap>>` so it can be cheaply cloned
-/// and shared across concurrent tool invocations. Reads acquire a shared
-/// lock; only writes take an exclusive lock.
-///
-/// - **[`get_state`](Self::get_state)** acquires a **read** lock and is
-///   best-effort — a missing value is indistinguishable from a default, so
-///   returning `default` keeps the tool running without surfacing
-///   infrastructure errors to the model.
-///
-/// - **[`set_state`](Self::set_state)** acquires a **write** lock and returns
-///   `Err` when the lock is poisoned. Writes that silently vanish can cause
-///   subtle logic bugs, so callers must handle the failure explicitly.
-/// # Typed extensions
-///
-/// In addition to the string-keyed JSON state, `ToolContext` supports
-/// **typed extensions** via [`set_ext`](Self::set_ext) /
-/// [`get_ext`](Self::get_ext). These use `std::any::Any` under the hood
-/// and are keyed by `TypeId`, so callers store and retrieve strongly-typed
-/// values (typically `Arc<T>`) without serialization.
-///
-/// ```rust
-/// use std::sync::Arc;
-///
-/// use llm_tool::ToolContext;
-///
-/// struct MyState {
-///     session_dir: String,
-/// }
-///
-/// let ctx = ToolContext::new();
-/// ctx.set_ext(Arc::new(MyState {
-///     session_dir: "/tmp".into(),
-/// }))
-/// .unwrap();
-///
-/// let state: Arc<MyState> = ctx.get_ext::<Arc<MyState>>().unwrap();
-/// assert_eq!(state.session_dir, "/tmp");
-/// ```
+/// Provides access to the current conversation ID, a shared key-value state
+/// store ([`SharedState`]) that persists across tool calls within the same
+/// agent turn, and typed extensions via [`set_ext`](Self::set_ext) / [`get_ext`](Self::get_ext).
 pub struct ToolContext {
     conversation_id: Option<String>,
     state: SharedState,
@@ -610,6 +572,39 @@ impl ToolOutput {
     pub const fn metadata(&self) -> &HashMap<String, serde_json::Value> {
         &self.metadata
     }
+
+    /// Truncate the output text content according to the given [`TruncationPolicy`].
+    #[must_use]
+    pub fn truncated(mut self, policy: &TruncationPolicy) -> Self {
+        truncation::truncate_output(&mut self, policy);
+        self
+    }
+
+    /// Truncate the output text content according to the given [`TruncationPolicy`],
+    /// returning a detailed [`TruncationOutcome`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpillError`] if an [`OutputSpillSink`] is configured and fails.
+    pub fn truncate_detailed(
+        &mut self,
+        policy: &TruncationPolicy,
+    ) -> Result<TruncationOutcome<'static>, SpillError> {
+        truncation::truncate_output_detailed(self, policy)
+    }
+
+    /// Truncate the output text content with caller context according to [`TruncationPolicy`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpillError`] if an [`OutputSpillSink`] is configured and fails.
+    pub fn truncate_detailed_with_context(
+        &mut self,
+        policy: &TruncationPolicy,
+        ctx: &SpillContext<'_>,
+    ) -> Result<TruncationOutcome<'static>, SpillError> {
+        truncation::truncate_output_detailed_with_context(self, policy, ctx)
+    }
 }
 
 impl core::fmt::Display for ToolOutput {
@@ -802,6 +797,10 @@ impl ToolError {
     /// [`ERROR_KIND_KEY`](Self::ERROR_KIND_KEY) value used by
     /// [`not_found`](Self::not_found) to mark a registry-lookup miss.
     pub const KIND_NOT_REGISTERED: &'static str = "not_registered";
+    /// [`ERROR_KIND_KEY`](Self::ERROR_KIND_KEY) value used by
+    /// [`destructive_in_parallel_batch`](Self::destructive_in_parallel_batch) when a
+    /// destructive tool is rejected during parallel batch execution.
+    pub const KIND_DESTRUCTIVE_BATCH: &'static str = "destructive_in_parallel_batch";
 
     /// Construct an error for a registry lookup that found no entry named
     /// `name` of the given [`RegistryItem`].
@@ -828,6 +827,19 @@ impl ToolError {
         Self::new(format!("no {kind} named '{name}' is registered")).with_meta(
             Self::ERROR_KIND_KEY,
             serde_json::json!(Self::KIND_NOT_REGISTERED),
+        )
+    }
+
+    /// Construct a typed error when a tool with [`ToolEffect::Destructive`] is rejected
+    /// in unconfirmed parallel batch dispatch.
+    #[must_use]
+    pub fn destructive_in_parallel_batch(tool_name: &str) -> Self {
+        Self::new(format!(
+            "Tool '{tool_name}' has Destructive effect and cannot be executed in Parallel batch mode without explicit confirmation"
+        ))
+        .with_meta(
+            Self::ERROR_KIND_KEY,
+            serde_json::json!(Self::KIND_DESTRUCTIVE_BATCH),
         )
     }
 
@@ -902,6 +914,16 @@ impl ToolError {
             .and_then(serde_json::Value::as_str)
             == Some(Self::KIND_NOT_REGISTERED)
     }
+
+    /// Whether this error denotes a [`ToolEffect::Destructive`] tool rejected
+    /// during parallel batch dispatch.
+    #[must_use]
+    pub fn is_destructive_batch_rejected(&self) -> bool {
+        self.metadata
+            .get(Self::ERROR_KIND_KEY)
+            .and_then(serde_json::Value::as_str)
+            == Some(Self::KIND_DESTRUCTIVE_BATCH)
+    }
 }
 
 impl core::fmt::Display for ToolError {
@@ -953,12 +975,39 @@ impl From<core::convert::Infallible> for ToolError {
     }
 }
 
+/// Effect classification for a tool.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolEffect {
+    /// Read-only, side-effect free invocation. Safe for concurrent wave execution.
+    ReadOnly,
+    /// Mutates system state (default). Safe for normal execution.
+    #[default]
+    Mutating,
+    /// Destructive operation (e.g. deleting files, wiping data, dropping resources).
+    /// Requires explicit confirmation before parallel batch dispatch.
+    Destructive,
+}
+
+impl ToolEffect {
+    /// Returns `true` if the tool effect is read-only / idempotent.
+    #[must_use]
+    pub const fn is_read_only(self) -> bool {
+        matches!(self, Self::ReadOnly)
+    }
+
+    /// Returns `true` if the tool effect is destructive.
+    #[must_use]
+    pub const fn is_destructive(self) -> bool {
+        matches!(self, Self::Destructive)
+    }
+}
+
 /// Describes a custom tool that can be registered with an agent.
-///
-/// This struct holds the metadata the SDK needs to expose the tool to the
-/// model. The actual handler function is registered separately via
-/// [`ToolRegistry::register`](super::ToolRegistry::register).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[derive(Debug, Serialize)]
 pub struct ToolDefinition {
     /// Unique tool name (e.g. `"flash_device"`).
     pub name: String,
@@ -966,223 +1015,149 @@ pub struct ToolDefinition {
     pub description: String,
     /// JSON Schema describing the tool's parameters.
     pub parameter_schema: serde_json::Value,
+    /// Execution effect classification of the tool.
+    pub effect: ToolEffect,
+    /// Pre-serialized compact JSON Schema string cached lazily on first access.
+    #[serde(skip)]
+    parameter_schema_json: OnceLock<Arc<str>>,
 }
 
-// ── Prompt types ────────────────────────────────────────────────────
-
-/// Describes a prompt template available in the registry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PromptDefinition {
-    /// Prompt name.
-    pub name: String,
-    /// Human-readable description.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub description: String,
-    /// Arguments accepted by this prompt.
-    #[serde(default, skip_serializing_if = "alloc::vec::Vec::is_empty")]
-    pub arguments: alloc::vec::Vec<PromptArgumentDefinition>,
+impl Clone for ToolDefinition {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            parameter_schema: self.parameter_schema.clone(),
+            effect: self.effect,
+            parameter_schema_json: OnceLock::new(),
+        }
+    }
 }
 
-/// An argument accepted by a prompt template.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PromptArgumentDefinition {
-    /// Argument name.
-    pub name: String,
-    /// Argument description.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub description: String,
-    /// Whether this argument is required.
-    #[serde(default)]
-    pub required: bool,
+impl PartialEq for ToolDefinition {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.description == other.description
+            && self.parameter_schema == other.parameter_schema
+            && self.effect == other.effect
+    }
 }
 
-/// The role of a message in a prompt output (`user`, `assistant`, or `system`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PromptRole {
-    /// User message.
-    User,
-    /// Assistant message.
-    Assistant,
-    /// System message.
-    System,
+impl Eq for ToolDefinition {}
+
+impl<'de> Deserialize<'de> for ToolDefinition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawDef {
+            name: String,
+            description: String,
+            parameter_schema: serde_json::Value,
+            #[serde(default)]
+            effect: Option<ToolEffect>,
+            #[serde(default)]
+            idempotent: Option<bool>,
+        }
+
+        let raw = RawDef::deserialize(deserializer)?;
+        let effect = match (raw.effect, raw.idempotent) {
+            (Some(eff), _) => eff,
+            (None, Some(true)) => ToolEffect::ReadOnly,
+            (None, Some(false) | None) => ToolEffect::Mutating,
+        };
+
+        Ok(Self {
+            name: raw.name,
+            description: raw.description,
+            parameter_schema: raw.parameter_schema,
+            effect,
+            parameter_schema_json: OnceLock::new(),
+        })
+    }
 }
 
-impl PromptRole {
-    /// The string slice representation of the role (`"user"`, `"assistant"`, or `"system"`).
+impl ToolDefinition {
+    /// Construct a [`ToolDefinition`] with default [`ToolEffect::Mutating`].
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Assistant => "assistant",
-            Self::System => "system",
-        }
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameter_schema: serde_json::Value,
+    ) -> Self {
+        Self::with_effect(name, description, parameter_schema, ToolEffect::Mutating)
     }
-}
 
-impl core::fmt::Display for PromptRole {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// A rendered message inside a prompt output.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PromptOutputMessage {
-    /// Message role.
-    pub role: PromptRole,
-    /// Text content.
-    pub content: String,
-}
-
-impl PromptOutputMessage {
-    /// Create a user role message.
-    pub fn user(content: impl Into<String>) -> Self {
+    /// Construct a [`ToolDefinition`] with an explicit [`ToolEffect`].
+    #[must_use]
+    pub fn with_effect(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameter_schema: serde_json::Value,
+        effect: ToolEffect,
+    ) -> Self {
         Self {
-            role: PromptRole::User,
-            content: content.into(),
+            name: name.into(),
+            description: description.into(),
+            parameter_schema,
+            effect,
+            parameter_schema_json: OnceLock::new(),
         }
     }
 
-    /// Create an assistant role message.
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: PromptRole::Assistant,
-            content: content.into(),
-        }
+    /// Update `parameter_schema` and invalidate any cached JSON serialization.
+    pub fn set_parameter_schema(&mut self, parameter_schema: serde_json::Value) {
+        self.parameter_schema = parameter_schema;
+        self.parameter_schema_json = OnceLock::new();
     }
 
-    /// Create a system role message.
-    pub fn system(content: impl Into<String>) -> Self {
-        Self {
-            role: PromptRole::System,
-            content: content.into(),
-        }
-    }
-}
-
-/// The output returned by rendering a prompt template.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PromptOutput {
-    /// Rendered messages.
-    pub messages: alloc::vec::Vec<PromptOutputMessage>,
-}
-
-impl PromptOutput {
-    /// Create a new prompt output with a single user message.
-    pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            messages: alloc::vec![PromptOutputMessage::user(content)],
-        }
+    /// Borrow `parameter_schema` mutably and invalidate any cached JSON serialization.
+    pub fn parameter_schema_mut(&mut self) -> &mut serde_json::Value {
+        self.parameter_schema_json = OnceLock::new();
+        &mut self.parameter_schema
     }
 
-    /// Create a new prompt output with a single assistant message.
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            messages: alloc::vec![PromptOutputMessage::assistant(content)],
-        }
+    /// Return the pre-serialized JSON schema string (`&str`), lazily derived
+    /// from `parameter_schema`.
+    #[must_use]
+    pub fn parameter_schema_json(&self) -> &str {
+        self.parameter_schema_json_arc()
     }
 
-    /// Create a new prompt output with a single system message.
-    pub fn system(content: impl Into<String>) -> Self {
-        Self {
-            messages: alloc::vec![PromptOutputMessage::system(content)],
-        }
+    /// Return the pre-serialized JSON schema string (`&Arc<str>`), lazily derived
+    /// from `parameter_schema`.
+    #[must_use]
+    pub fn parameter_schema_json_arc(&self) -> &Arc<str> {
+        self.parameter_schema_json.get_or_init(|| {
+            match serde_json::to_string(&self.parameter_schema) {
+                Ok(s) => Arc::from(s),
+                Err(err) => {
+                    tracing::warn!(error = %err, tool = %self.name, "Failed to serialize parameter_schema to JSON");
+                    Arc::from("{}")
+                }
+            }
+        })
+    }
+
+    /// Whether repeated invocations with identical arguments are side-effect free / idempotent.
+    ///
+    /// Preserved for backward compatibility.
+    #[must_use]
+    pub const fn is_idempotent(&self) -> bool {
+        matches!(self.effect, ToolEffect::ReadOnly)
     }
 }
 
-impl From<String> for PromptOutput {
-    fn from(content: String) -> Self {
-        Self::user(content)
-    }
-}
+pub mod prompt;
+pub mod quarantine;
+pub mod resource;
+pub mod truncation;
 
-impl From<&str> for PromptOutput {
-    fn from(content: &str) -> Self {
-        Self::user(content)
-    }
-}
-
-// ── Resource types ──────────────────────────────────────────────────
-
-/// Describes a resource or resource template available in the registry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ResourceDefinition {
-    /// Resource URI (e.g. `file:///path` or `config://app`) or template pattern.
-    #[serde(rename = "uriTemplate")]
-    pub uri_template: String,
-    /// Human-readable name.
-    pub name: String,
-    /// Optional description.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub description: String,
-    /// Optional MIME type.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mime_type: Option<String>,
-}
-
-/// Backwards-compatible type alias for [`ResourceDefinition`].
-pub type ResourceTemplateDefinition = ResourceDefinition;
-
-/// A content block inside a resource read output.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ResourceOutputContent {
-    /// UTF-8 text content.
-    #[serde(rename_all = "camelCase")]
-    Text {
-        /// Resource URI.
-        uri: String,
-        /// Optional MIME type.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        mime_type: Option<String>,
-        /// Text string.
-        text: String,
-    },
-    /// Base64 binary content.
-    #[serde(rename_all = "camelCase")]
-    Blob {
-        /// Resource URI.
-        uri: String,
-        /// Optional MIME type.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        mime_type: Option<String>,
-        /// Base64 blob data.
-        blob: String,
-    },
-}
-
-/// The output returned by reading a resource.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResourceOutput {
-    /// Returned content blocks.
-    pub contents: alloc::vec::Vec<ResourceOutputContent>,
-}
-
-impl ResourceOutput {
-    /// Create a text resource output.
-    pub fn text(uri: impl Into<String>, mime_type: Option<&str>, text: impl Into<String>) -> Self {
-        Self {
-            contents: alloc::vec![ResourceOutputContent::Text {
-                uri: uri.into(),
-                mime_type: mime_type.map(ToString::to_string),
-                text: text.into(),
-            }],
-        }
-    }
-
-    /// Create a binary blob resource output.
-    pub fn blob(uri: impl Into<String>, mime_type: Option<&str>, blob: impl Into<String>) -> Self {
-        Self {
-            contents: alloc::vec![ResourceOutputContent::Blob {
-                uri: uri.into(),
-                mime_type: mime_type.map(ToString::to_string),
-                blob: blob.into(),
-            }],
-        }
-    }
-}
+pub use prompt::*;
+pub use quarantine::*;
+pub use resource::*;
+pub use truncation::*;
 
 #[cfg(all(test, feature = "std"))]
 mod tests;

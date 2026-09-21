@@ -1,3 +1,6 @@
+# Read workspace version from root Cargo.toml
+version := `grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/'`
+
 # Default recipe: format, lint, and test
 default: fmt lint test
 
@@ -16,7 +19,7 @@ fmt-toml:
 
 # Format Markdown files with prettier
 fmt-markdown:
-    npx -y prettier@latest --write '**/*.md'
+    npx -y prettier@latest --prose-wrap always --write '**/*.md'
 
 # Format the justfile itself
 fmt-just:
@@ -73,3 +76,24 @@ check: lint test doc check-no-std
 
 # Run the same checks as GitHub Actions CI
 ci: fmt-rust lint-rust test doc
+
+# ── Publish ───────────────────────────────────────────────────────────
+
+# Bump version across workspace Cargo.toml and all crates/*/Cargo.toml manifests
+bump new_version:
+    sed -i 's/^version = "{{ version }}"/version = "{{ new_version }}"/' Cargo.toml
+    sed -i 's/llm-tool = { version = "{{ version }}"/llm-tool = { version = "{{ new_version }}"/' crates/*/Cargo.toml
+    sed -i 's/llm-tool-macros = { version = "{{ version }}"/llm-tool-macros = { version = "{{ new_version }}"/' crates/*/Cargo.toml
+    cargo update -w
+
+# Publish all workspace crates in dependency order (macros → llm-tool → llm-tool-mcp)
+publish: lint test publish-rust
+
+publish-rust:
+    cargo publish -p llm-tool-macros
+    @echo "Waiting for crates.io index..."
+    sleep 30
+    cargo publish -p llm-tool
+    @echo "Waiting for crates.io index..."
+    sleep 30
+    cargo publish -p llm-tool-mcp

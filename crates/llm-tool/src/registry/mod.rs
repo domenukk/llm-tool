@@ -1,12 +1,23 @@
 //! Tool registry: registry and concurrent dispatch of named tools.
 
-use alloc::{boxed::Box, vec::Vec};
+mod batch;
+
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
+
+pub use batch::{
+    AllowDestructiveBatch, BatchExecutionMode, BatchToolCall, BatchToolCallOutcome,
+    BatchToolCallStr,
+};
 
 use super::{
     rust_tool::{ErasedTool, RustTool, definition_of},
     types::{RegistryItem, ToolContext, ToolDefinition, ToolError, ToolOutput},
 };
-use crate::compat::HashMap;
+use crate::{
+    compat::{HashMap, RwLock, read_lock_recover, write_lock_recover},
+    rust_tool::BoxToolFuture,
+    types::ToolEffect,
+};
 
 /// Entry holding a cached [`ToolDefinition`] alongside the type-erased tool.
 ///
@@ -24,6 +35,7 @@ struct RegisteredTool {
 /// schemas for fast lookup and execution.
 pub struct ToolRegistry {
     tools: HashMap<&'static str, RegisteredTool>,
+    cached_definitions: RwLock<Option<Arc<[ToolDefinition]>>>,
 }
 
 impl core::fmt::Debug for ToolRegistry {
@@ -36,7 +48,7 @@ impl core::fmt::Debug for ToolRegistry {
         f.debug_struct("ToolRegistry")
             .field("tool_count", &self.tools.len())
             .field("tool_names", &names)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -52,7 +64,13 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            cached_definitions: RwLock::new(None),
         }
+    }
+
+    fn invalidate_cache(&self) {
+        let mut guard = write_lock_recover(&self.cached_definitions);
+        *guard = None;
     }
 
     /// Register a [`RustTool`]. Returns `&mut Self` for chaining.
@@ -95,49 +113,39 @@ impl ToolRegistry {
                 erased: Box::new(tool),
             },
         );
+        self.invalidate_cache();
         Ok(self)
     }
 
     /// Register a [`RustTool`], consuming and returning `Self` for owned chaining.
-    ///
-    /// This is the owned counterpart of [`register`](Self::register), enabling
-    /// patterns like:
-    /// ```
-    /// use llm_tool::{RustTool, ToolContext, ToolError, ToolOutput, ToolRegistry};
-    /// use schemars::JsonSchema;
-    /// use serde::Deserialize;
-    ///
-    /// #[derive(Deserialize, JsonSchema)]
-    /// struct NoParams {}
-    ///
-    /// struct ToolA;
-    /// impl RustTool for ToolA {
-    ///     type Params = NoParams;
-    ///     const NAME: &'static str = "tool_a";
-    ///     const DESCRIPTION: &'static str = "Tool A";
-    ///     async fn call(&self, _: NoParams, _: &ToolContext) -> Result<ToolOutput, ToolError> {
-    ///         Ok("a".into())
-    ///     }
-    /// }
-    ///
-    /// struct ToolB;
-    /// impl RustTool for ToolB {
-    ///     type Params = NoParams;
-    ///     const NAME: &'static str = "tool_b";
-    ///     const DESCRIPTION: &'static str = "Tool B";
-    ///     async fn call(&self, _: NoParams, _: &ToolContext) -> Result<ToolOutput, ToolError> {
-    ///         Ok("b".into())
-    ///     }
-    /// }
-    ///
-    /// let registry = ToolRegistry::new().with_tool(ToolA).with_tool(ToolB);
-    ///
-    /// assert_eq!(registry.definitions().len(), 2);
-    /// ```
     #[must_use]
     pub fn with_tool<T: RustTool + 'static>(mut self, tool: T) -> Self {
         self.register(tool);
         self
+    }
+
+    /// Return a shared, deterministically sorted slice of all [`ToolDefinition`]s,
+    /// computed once and cached until the registry is mutated.
+    #[must_use]
+    pub fn definitions_slice(&self) -> Arc<[ToolDefinition]> {
+        {
+            let guard = read_lock_recover(&self.cached_definitions);
+            if let Some(ref slice) = *guard {
+                return Arc::clone(slice);
+            }
+        }
+        let mut defs: Vec<ToolDefinition> = self
+            .tools
+            .values()
+            .map(|entry| entry.definition.clone())
+            .collect();
+        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        let arc_slice: Arc<[ToolDefinition]> = Arc::from(defs);
+        {
+            let mut guard = write_lock_recover(&self.cached_definitions);
+            *guard = Some(Arc::clone(&arc_slice));
+        }
+        arc_slice
     }
 
     /// Collect [`ToolDefinition`]s for all registered tools.
@@ -145,10 +153,43 @@ impl ToolRegistry {
     /// Returns clones of the cached definitions computed at registration time.
     #[must_use]
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
-            .values()
-            .map(|entry| entry.definition.clone())
-            .collect()
+        self.definitions_slice().to_vec()
+    }
+
+    /// Dispatch a tool call by name with raw JSON arguments and a context,
+    /// returning a boxed future.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError::not_found`] if no tool named `name` is registered.
+    pub fn dispatch_boxed<'a>(
+        &'a self,
+        name: &str,
+        args: serde_json::Value,
+        ctx: &'a ToolContext,
+    ) -> Result<BoxToolFuture<'a>, ToolError> {
+        let Some(entry) = self.tools.get(name) else {
+            return Err(ToolError::not_found(RegistryItem::Tool, name));
+        };
+        Ok(entry.erased.call_erased(args, ctx))
+    }
+
+    /// Dispatch a tool call by name with a raw JSON arguments string,
+    /// returning a boxed future without intermediate DOM allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError::not_found`] if no tool named `name` is registered.
+    pub fn dispatch_boxed_str<'a>(
+        &'a self,
+        name: &str,
+        args_json: &'a str,
+        ctx: &'a ToolContext,
+    ) -> Result<BoxToolFuture<'a>, ToolError> {
+        let Some(entry) = self.tools.get(name) else {
+            return Err(ToolError::not_found(RegistryItem::Tool, name));
+        };
+        Ok(entry.erased.call_erased_str(args_json, ctx))
     }
 
     /// Dispatch a tool call by name with raw JSON arguments and a context.
@@ -164,10 +205,7 @@ impl ToolRegistry {
         args: serde_json::Value,
         ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        let Some(entry) = self.tools.get(name) else {
-            return Err(ToolError::not_found(RegistryItem::Tool, name));
-        };
-        entry.erased.call_erased(args, ctx).await
+        self.dispatch_boxed(name, args, ctx)?.await
     }
 
     /// Dispatch a tool call by name with a raw JSON string argument.
@@ -182,20 +220,29 @@ impl ToolRegistry {
         args_json: &str,
         ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        let Some(entry) = self.tools.get(name) else {
-            return Err(ToolError::not_found(RegistryItem::Tool, name));
-        };
-        entry.erased.call_erased_str(args_json, ctx).await
+        self.dispatch_boxed_str(name, args_json, ctx)?.await
+    }
+
+    /// Return `true` if the registered tool has [`ToolEffect::Destructive`].
+    #[must_use]
+    pub fn is_destructive(&self, name: &str) -> bool {
+        self.definition(name)
+            .is_some_and(|def| matches!(def.effect, ToolEffect::Destructive))
     }
 
     /// Remove a tool by name, returning `true` if it was present.
     pub fn remove(&mut self, name: &str) -> bool {
-        self.tools.remove(name).is_some()
+        let removed = self.tools.remove(name).is_some();
+        if removed {
+            self.invalidate_cache();
+        }
+        removed
     }
 
     /// Clear all registered tools.
     pub fn clear(&mut self) {
         self.tools.clear();
+        self.invalidate_cache();
     }
 
     /// Number of registered tools.

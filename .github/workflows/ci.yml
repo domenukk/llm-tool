@@ -25,11 +25,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Test (default features)
-        run: cargo test
+      - name: Hygiene checks
+        run: python3 scripts/lint_hygiene.py
 
-      - name: Test (md-tmpl)
-        run: cargo test --features md-tmpl
+      - name: Test (default features)
+        run: cargo test --workspace
+
+      - name: Test (all features)
+        run: cargo test --workspace --all-features
 
   clippy:
     name: Clippy
@@ -44,10 +47,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy (default features)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Clippy (md-tmpl)
-        run: cargo clippy --all-targets --features md-tmpl -- -D warnings
+      - name: Clippy (all features)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   fmt:
     name: Formatting
@@ -60,11 +63,13 @@ jobs:
           components: rustfmt
 
       - name: Check formatting
-        run: cargo +nightly fmt -- --check
+        run: cargo +nightly fmt --all -- --check
 
   doc:
     name: Documentation
     runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
 
@@ -73,8 +78,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build docs (default)
-        run: cargo doc --no-deps
+        run: cargo doc --workspace --no-deps
 
-      - name: Build docs (md-tmpl)
-        run: cargo doc --no-deps --features md-tmpl
+      - name: Build docs (all features)
+        run: cargo doc --workspace --all-features --no-deps
 

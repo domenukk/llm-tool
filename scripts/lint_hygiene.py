@@ -43,6 +43,7 @@ class Check:
     message: str
     exclude: re.Pattern[str] | None = None  # lines matching this are skipped
     exclude_path: re.Pattern[str] | None = None  # file paths matching this are skipped
+    no_nolint: bool = False
     hits: list[str] = field(default_factory=list)
     suppressed: list[str] = field(default_factory=list)
 
@@ -138,6 +139,14 @@ CHECKS: list[Check] = [
         dirs=RUST_DIRS,
         exts=RUST_EXTS,
         message="Will panic at runtime. Implement or return an error.",
+    ),
+    Check(
+        name="Template source: single-line \\n-escaped frontmatter",
+        pattern=re.compile(r"""['"`]---\\n"""),
+        dirs=RUST_DIRS,
+        exts=RUST_EXTS,
+        message="NEVER use single-line \\n-escaped frontmatter strings; always use proper multiline strings.",
+        no_nolint=True,
     ),
 ]
 

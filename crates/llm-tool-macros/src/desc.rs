@@ -686,7 +686,11 @@ mod tests {
             fn missing_context(x: i64) -> Result<String, String> { Ok(format!("{x}")) }
         };
         let attr: ToolAttr = syn::parse2(quote! {
-            description = "---\nparams:\n  - api_version = str\n---\nRunning on {{ api_version }}"
+            description = "---
+params:
+  - api_version = str
+---
+Running on {{ api_version }}"
         })
         .expect("parse attr");
         let Err(err) = resolve_description(&func, Some(&attr)) else {
@@ -706,7 +710,11 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().expect("create tempfile");
         std::fs::write(
             tmp.path(),
-            "---\nparams:\n  - api_version = str\n---\nRunning on {{ api_version }}",
+            "---
+params:
+  - api_version = str
+---
+Running on {{ api_version }}",
         )
         .expect("write template");
         let path_str = tmp.path().to_str().expect("path");

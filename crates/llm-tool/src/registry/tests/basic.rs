@@ -5,9 +5,7 @@ fn tool_definition_serde_roundtrip() {
     let def = definition_of(&SampleTool).expect("schema");
     let json = serde_json::to_string(&def).expect("serialize");
     let parsed: ToolDefinition = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(parsed.name, def.name);
-    assert_eq!(parsed.description, def.description);
-    assert_eq!(parsed.parameter_schema, def.parameter_schema);
+    assert_eq!(parsed, def);
 }
 
 struct EmptyParamTool;
@@ -629,4 +627,187 @@ async fn dispatch_returns_meaningful_error_for_wrong_type() {
             .contains("Failed to deserialize tool parameters"),
         "Error should mention deserialization failure, got: {err}"
     );
+}
+
+// ── Cache invalidation tests ────────────────────────────────────────
+
+#[test]
+fn cache_invalidation_on_register_remove_clear() {
+    let mut reg = ToolRegistry::new();
+    assert_eq!(reg.definitions_slice().len(), 0);
+
+    reg.register(SampleTool);
+    let slice1 = reg.definitions_slice();
+    assert_eq!(slice1.len(), 1);
+    assert_eq!(slice1[0].name, "sample");
+
+    // Same slice returned from cache
+    let slice1_cached = reg.definitions_slice();
+    assert!(std::sync::Arc::ptr_eq(&slice1, &slice1_cached));
+
+    // register invalidates cache
+    reg.register(EmptyParamTool);
+    let slice2 = reg.definitions_slice();
+    assert_eq!(slice2.len(), 2);
+    assert!(!std::sync::Arc::ptr_eq(&slice1, &slice2));
+
+    // remove invalidates cache
+    assert!(reg.remove("sample"));
+    let slice3 = reg.definitions_slice();
+    assert_eq!(slice3.len(), 1);
+    assert_eq!(slice3[0].name, "empty");
+
+    // clear invalidates cache
+    reg.clear();
+    let slice4 = reg.definitions_slice();
+    assert_eq!(slice4.len(), 0);
+}
+
+#[test]
+fn cached_definitions_poison_recovery() {
+    let mut reg = ToolRegistry::new();
+    reg.register(SampleTool);
+    let slice = reg.definitions_slice();
+    assert_eq!(slice.len(), 1);
+
+    // Intentionally poison the cached_definitions lock in another thread
+    let clone_lock = std::sync::Arc::new(crate::compat::RwLock::new(Some(slice)));
+    let thread_lock = std::sync::Arc::clone(&clone_lock);
+    let handle = std::thread::spawn(move || {
+        let guard = crate::compat::write_lock(&thread_lock).expect("lock acquisition");
+        std::hint::black_box(&guard);
+        panic!("intentional poison for lock recovery test");
+    });
+    let join_result = handle.join();
+    assert!(join_result.is_err());
+
+    // Recovering read and write locks succeeds without panic
+    let recovered_read = crate::compat::read_lock_recover(&clone_lock);
+    assert!(recovered_read.is_some());
+    drop(recovered_read);
+
+    let mut recovered_write = crate::compat::write_lock_recover(&clone_lock);
+    *recovered_write = None;
+    drop(recovered_write);
+}
+
+// ── Batch dispatch & ToolEffect tests ───────────────────────────────
+
+struct DestructiveTool;
+
+impl RustTool for DestructiveTool {
+    type Params = EmptyParams;
+    const NAME: &'static str = "wipe_data";
+    const DESCRIPTION: &'static str = "Destructive data wiper";
+    const EFFECT: ToolEffect = ToolEffect::Destructive;
+
+    // NOLINT: required for backward-compatible async trait impl in tests
+    #[allow(unknown_lints)]
+    // NOLINT: forward-compat guard for clippy::unused_async_trait_impl
+    #[expect(clippy::unused_async_trait_impl)]
+    async fn call(
+        &self,
+        _params: Self::Params,
+        _ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok("wiped".into())
+    }
+}
+
+#[tokio::test]
+async fn batch_dispatch_parallel_and_sequential_modes() {
+    let mut reg = ToolRegistry::new();
+    reg.register(SampleTool);
+    reg.register(EmptyParamTool);
+    reg.register(DestructiveTool);
+
+    let ctx = test_ctx();
+
+    // 1. Parallel execution with non-destructive calls
+    let calls = vec![
+        BatchToolCall {
+            id: "call_1".into(),
+            name: "sample".into(),
+            arguments: serde_json::json!({ "path": "path1" }),
+        },
+        BatchToolCall {
+            id: "call_2".into(),
+            name: "empty".into(),
+            arguments: serde_json::json!({}),
+        },
+    ];
+
+    let outcomes = reg
+        .dispatch_batch(&calls, BatchExecutionMode::Parallel, &ctx)
+        .await;
+    assert_eq!(outcomes.len(), 2);
+    assert_eq!(outcomes[0].id, "call_1");
+    assert_eq!(outcomes[0].result.as_ref().unwrap().content(), "path1");
+    assert_eq!(outcomes[1].id, "call_2");
+    assert_eq!(outcomes[1].result.as_ref().unwrap().content(), "ok");
+
+    // 2. Parallel execution rejecting destructive tool without confirmation
+    let destructive_calls = vec![BatchToolCall {
+        id: "call_wipe".into(),
+        name: "wipe_data".into(),
+        arguments: serde_json::json!({}),
+    }];
+
+    let err_outcomes = reg
+        .dispatch_batch(&destructive_calls, BatchExecutionMode::Parallel, &ctx)
+        .await;
+    assert_eq!(err_outcomes.len(), 1);
+    let outcome_err = err_outcomes[0].result.as_ref().unwrap_err();
+    assert!(outcome_err.message.contains("Destructive effect"));
+
+    // 3. Parallel execution confirming destructive tool via ParallelAllowDestructive
+    let ok_outcomes = reg
+        .dispatch_batch(
+            &destructive_calls,
+            BatchExecutionMode::ParallelAllowDestructive,
+            &ctx,
+        )
+        .await;
+    assert_eq!(ok_outcomes.len(), 1);
+    assert_eq!(ok_outcomes[0].result.as_ref().unwrap().content(), "wiped");
+
+    // 4. Parallel execution confirming destructive tool via AllowDestructiveBatch context extension
+    let conf_ctx = test_ctx();
+    conf_ctx
+        .set_ext(AllowDestructiveBatch(true))
+        .expect("set_ext succeeds");
+    let ok_ctx_outcomes = reg
+        .dispatch_batch(&destructive_calls, BatchExecutionMode::Parallel, &conf_ctx)
+        .await;
+    assert_eq!(ok_ctx_outcomes.len(), 1);
+    assert_eq!(
+        ok_ctx_outcomes[0].result.as_ref().unwrap().content(),
+        "wiped"
+    );
+
+    // 5. SequentialStopOnError halts on first error
+    let seq_calls = vec![
+        BatchToolCall {
+            id: "s1".into(),
+            name: "sample".into(),
+            arguments: serde_json::json!({ "path": "first" }),
+        },
+        BatchToolCall {
+            id: "s2".into(),
+            name: "non_existent_tool".into(),
+            arguments: serde_json::json!({}),
+        },
+        BatchToolCall {
+            id: "s3".into(),
+            name: "sample".into(),
+            arguments: serde_json::json!({ "path": "third" }),
+        },
+    ];
+
+    let seq_outcomes = reg
+        .dispatch_batch(&seq_calls, BatchExecutionMode::SequentialStopOnError, &ctx)
+        .await;
+    assert_eq!(seq_outcomes.len(), 2);
+    assert!(seq_outcomes[0].result.is_ok());
+    assert!(seq_outcomes[1].result.is_err());
 }
