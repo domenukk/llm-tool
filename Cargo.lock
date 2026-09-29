@@ -495,6 +495,8 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 [[package]]
 name = "md-tmpl"
 version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b034b657f61f3413180dddb74357a1279d200b70ddac5b0be800ba6e1076ac1"
 dependencies = [
  "md-tmpl-core",
  "md-tmpl-macros",
@@ -503,6 +505,8 @@ dependencies = [
 [[package]]
 name = "md-tmpl-core"
 version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5abdef26e34cfe7f9333cd3a7ccaf59e53454472103b3a642962dab445744d13"
 dependencies = [
  "ciborium",
  "flexbuffers",
@@ -517,6 +521,8 @@ dependencies = [
 [[package]]
 name = "md-tmpl-macros"
 version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0273c1bd7b75f393f5efe7080e9a5a188db595955e5c696585b55870c82d4cb"
 dependencies = [
  "hashbrown",
  "md-tmpl-core",
