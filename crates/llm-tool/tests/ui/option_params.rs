@@ -13,8 +13,7 @@ fn search(
     tag: Option<String>,
 ) -> Result<String, String> {
     let max = max_results.unwrap_or(10);
-    // NOLINT: compile test — empty string default for optional param is intentional
-    let tag_str = tag.unwrap_or_default();
+    let tag_str = tag.as_deref().unwrap_or("");
     Ok(format!("query={query} max={max} tag={tag_str}"))
 }
 

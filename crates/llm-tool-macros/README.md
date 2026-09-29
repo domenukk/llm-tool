@@ -52,7 +52,7 @@ The macro produces:
 | **`Option<T>` params**             | Auto-annotated with `#[serde(default)]` → not in `required`.                                                                                  |
 | **`&ToolContext` param**           | Recognized as execution context, forwarded from registry, excluded from params struct.                                                        |
 | **`description = "..."`**          | Inline description string (or template with `env(...)` / `params(...)` / `context`). Overrides the doc comment.                               |
-| **`description_file = "..."`**     | Load description from a `.tmpl.md` template file (requires `md-tmpl` feature). Zero runtime cost.                                             |
+| **`description_file = "..."`**     | Load description from a `.tmpl.md` template file. Compiled into a static string when static.                                                  |
 | **`response = "..."`**             | Format the tool's struct return value using an inline `md-tmpl` template while attaching the raw struct to `ToolOutput::metadata`.            |
 | **`response_file = "..."`**        | Format the tool's struct return value using a `.tmpl.md` file while attaching the raw struct to `ToolOutput::metadata`.                       |
 | **`effect = "..."`**               | Side-effect classification: `"read_only"`, `"mutating"` (default), or `"destructive"` (`idempotent = true` is a shorthand for `"read_only"`). |

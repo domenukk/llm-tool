@@ -1,4 +1,3 @@
-#[cfg(feature = "md-tmpl")]
 fn missing_params_context_error(
     span: proc_macro2::Span,
     source_label: &str,
@@ -13,9 +12,7 @@ fn missing_params_context_error(
     )
 }
 
-#[cfg(feature = "md-tmpl")]
-use quote::format_ident;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{ItemFn, LitStr};
 
 use crate::{DescriptionInfo, ToolAttr, extract_doc_string};
@@ -25,7 +22,6 @@ use crate::{DescriptionInfo, ToolAttr, extract_doc_string};
 ///
 /// All literal types are stringified — md-tmpl's `validate_env_value` then
 /// auto-parses strings into the declared type (int, bool, float).
-#[cfg(feature = "md-tmpl")]
 pub(crate) fn env_pairs(attr: &ToolAttr) -> Vec<(String, String)> {
     attr.env_vars
         .iter()
@@ -34,7 +30,6 @@ pub(crate) fn env_pairs(attr: &ToolAttr) -> Vec<(String, String)> {
 }
 
 /// Convert a `syn::Lit` to its string representation.
-#[cfg(feature = "md-tmpl")]
 fn lit_to_string(lit: &syn::Lit) -> String {
     match lit {
         syn::Lit::Str(s) => s.value(),
@@ -51,7 +46,6 @@ fn lit_to_string(lit: &syn::Lit) -> String {
 ///
 /// Emits string literals regardless of the original literal type —
 /// md-tmpl's proc-macro layer handles the type coercion.
-#[cfg(feature = "md-tmpl")]
 pub(crate) fn env_tokens(attr: &ToolAttr) -> proc_macro2::TokenStream {
     if attr.env_vars.is_empty() {
         return quote! {};
@@ -69,7 +63,6 @@ pub(crate) fn env_tokens(attr: &ToolAttr) -> proc_macro2::TokenStream {
 ///
 /// Env values are baked in as constants during compilation, so rendering
 /// with an empty context produces the fully resolved static description.
-#[cfg(feature = "md-tmpl")]
 fn compile_env_only_template(
     attr: &ToolAttr,
     source: &str,
@@ -103,7 +96,6 @@ fn compile_env_only_template(
 /// On a render error at runtime the method logs the failure and falls back to
 /// `fallback_body` (the template body rendered at compile time) instead of
 /// panicking, so listing tools can never crash the server.
-#[cfg(feature = "md-tmpl")]
 fn build_context_description_method(
     desc_mod_name: &syn::Ident,
     context_fn: &syn::Path,
@@ -171,34 +163,6 @@ pub(crate) fn resolve_inline_description(
     attr: &ToolAttr,
     fn_name: &syn::Ident,
 ) -> syn::Result<DescriptionInfo> {
-    #[cfg(not(feature = "md-tmpl"))]
-    {
-        // NOLINT: suppress unused-variable warning in non-md-tmpl cfg branch
-        let _ = fn_name;
-        let span = attr
-            .description_inline
-            .as_ref()
-            .map_or_else(proc_macro2::Span::call_site, LitStr::span);
-        if attr.has_inline_params || attr.has_context_fn {
-            return Err(syn::Error::new(
-                span,
-                "the `md-tmpl` feature must be enabled to use dynamic inline descriptions",
-            ));
-        }
-        let desc = attr
-            .description_inline
-            .as_ref()
-            .ok_or_else(|| syn::Error::new(span, "missing inline description"))?
-            .value();
-        Ok(DescriptionInfo {
-            static_description: desc,
-            helper_tokens: quote! {},
-            description_method: None,
-            dep_tracking: quote! {},
-        })
-    }
-
-    #[cfg(feature = "md-tmpl")]
     resolve_inline_description_impl(attr, fn_name)
 }
 
@@ -207,33 +171,15 @@ pub(crate) fn resolve_template_description(
     attr: &ToolAttr,
     fn_name: &syn::Ident,
 ) -> syn::Result<DescriptionInfo> {
-    #[cfg(not(feature = "md-tmpl"))]
-    {
-        // NOLINT: suppress unused-variable warning in non-md-tmpl cfg branch
-        let _ = fn_name;
-        let span = attr
-            .description_file_path
-            .as_ref()
-            .map_or_else(proc_macro2::Span::call_site, LitStr::span);
-        Err(syn::Error::new(
-            span,
-            "the `md-tmpl` feature must be enabled to use \
-             `#[llm_tool(description_file = \"...\")]`. \
-             Add `features = [\"md-tmpl\"]` to your llm-tool dependency.",
-        ))
-    }
-
-    #[cfg(feature = "md-tmpl")]
     resolve_template_description_impl(attr, fn_name)
 }
 
-/// Implementation of template description resolution (feature-gated).
+/// Implementation of template description resolution.
 ///
 /// Handles three sub-cases:
 /// 1. Static template (no declared variables) → `const DESCRIPTION`
 /// 2. Template + `params(...)` → compile-time render → `const DESCRIPTION`
 /// 3. Template + `context = fn` → runtime render via `description()` method
-#[cfg(feature = "md-tmpl")]
 pub(crate) fn resolve_template_description_impl(
     attr: &ToolAttr,
     fn_name: &syn::Ident,
@@ -243,7 +189,7 @@ pub(crate) fn resolve_template_description_impl(
         .as_ref()
         .expect("description_file_path validated");
     let rel_path = template_lit.value();
-    let full_path = crate::helpers::resolve_manifest_path(&rel_path);
+    let full_path = crate::helpers::resolve_manifest_path(&rel_path, template_lit.span())?;
 
     let source = std::fs::read_to_string(&full_path).map_err(|e| {
         syn::Error::new(
@@ -339,8 +285,7 @@ pub(crate) fn resolve_template_description_impl(
     }
 }
 
-/// Implementation of inline template description resolution (feature-gated).
-#[cfg(feature = "md-tmpl")]
+/// Implementation of inline template description resolution.
 pub(crate) fn resolve_inline_description_impl(
     attr: &ToolAttr,
     fn_name: &syn::Ident,
@@ -370,8 +315,8 @@ pub(crate) fn resolve_inline_description_impl(
 
     let body_str = body.trim().replace("\r\n", "\n");
 
-    let has_params = attr.has_inline_params;
-    let has_context = attr.has_context_fn;
+    let has_params = !attr.inline_params.is_empty();
+    let has_context = attr.context_fn.is_some();
     let has_declarations = !fm.declarations.is_empty();
     let has_env = !fm.env.is_empty();
 
@@ -438,7 +383,6 @@ pub(crate) fn resolve_inline_description_impl(
     }
 }
 
-#[cfg(feature = "md-tmpl")]
 pub(crate) struct ResolveContextArgs<'a> {
     pub(crate) attr: &'a ToolAttr,
     pub(crate) rel_path: &'a str,
@@ -456,7 +400,6 @@ pub(crate) struct ResolveContextArgs<'a> {
 /// Generates a `description(&self)` method that uses `include_template!` to compile
 /// the template once, then renders it with the user-provided context function
 /// on every call.
-#[cfg(feature = "md-tmpl")]
 pub(crate) fn resolve_context_description(
     args: ResolveContextArgs<'_>,
 ) -> syn::Result<DescriptionInfo> {
@@ -515,7 +458,6 @@ pub(crate) fn resolve_context_description(
 ///
 /// Returns a mapping of struct field names to their parent struct name,
 /// needed for building the context later.
-#[cfg(feature = "md-tmpl")]
 fn validate_params_match(
     attr: &ToolAttr,
     fm: &md_tmpl::Frontmatter,
@@ -583,7 +525,6 @@ fn validate_params_match(
 /// - Every declared template variable has a matching `params(...)` key
 /// - Every `params(...)` key matches a declared template variable
 /// - The template renders without errors
-#[cfg(feature = "md-tmpl")]
 pub(crate) fn resolve_template_with_params(
     attr: &ToolAttr,
     fm: &md_tmpl::Frontmatter,
@@ -596,12 +537,16 @@ pub(crate) fn resolve_template_with_params(
 
     // Build context and render at compile time.
     // Use Template::compile with base_dir so {% include %} and env: resolve correctly.
-    let base_dir = attr.description_file_path.as_ref().map(|lit| {
-        let full = crate::helpers::resolve_manifest_path(&lit.value());
-        full.parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .to_path_buf()
-    });
+    let base_dir = if let Some(lit) = &attr.description_file_path {
+        let full = crate::helpers::resolve_manifest_path(&lit.value(), lit.span())?;
+        Some(
+            full.parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .to_path_buf(),
+        )
+    } else {
+        None
+    };
     let mut opts = md_tmpl::CompileOptions::default().allow_unused(true);
     if let Some(ref dir) = base_dir {
         opts = opts.base_dir(dir);
@@ -679,7 +624,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "md-tmpl")]
     fn inline_template_missing_context_errors() {
         use quote::quote;
         let func: ItemFn = parse_quote! {
@@ -704,7 +648,6 @@ Running on {{ api_version }}"
     }
 
     #[test]
-    #[cfg(feature = "md-tmpl")]
     fn template_file_missing_context_errors() {
         use quote::quote;
         let tmp = tempfile::NamedTempFile::new().expect("create tempfile");

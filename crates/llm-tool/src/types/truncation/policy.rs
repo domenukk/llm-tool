@@ -14,7 +14,13 @@ use super::{
     ratio::HeadRatio,
     sink::{OutputSpillSink, SpillContext, SpillDisposition, SpillError, SpillRef},
 };
-use crate::types::ToolOutput;
+use crate::types::{
+    ToolOutput,
+    quarantine::{
+        CLOSE_FRAME, FRAME_OVERHEAD, OPEN_FRAME, TOOL_OUTPUT_QUARANTINE_TAG,
+        unquarantine_tool_output,
+    },
+};
 
 /// Prefix of the in-band warning emitted when a configured [`OutputSpillSink`] fails.
 pub const SPILL_FAILURE_NOTICE_PREFIX: &str = " WARNING: full output could NOT be retained (";
@@ -26,10 +32,18 @@ pub const SPILL_FAILURE_NOTICE_SUFFIX: &str = "); the omitted bytes are unrecove
 ///
 /// Truncation is never allowed to be silent, so content is sacrificed before the
 /// notice is: a reader must always be able to tell that bytes are missing.
-pub const MINIMAL_TRUNCATION_MARKER: &str = "\n[...truncated...]\n";
+pub const MINIMAL_TRUNCATION_MARKER: &str = "\n[TRUNCATED: bytes omitted]\n";
 
 /// Minimal marker variant used when a configured [`OutputSpillSink`] failed.
-pub const MINIMAL_TRUNCATION_MARKER_SPILL_FAILED: &str = "\n[...truncated; NOT retained...]\n";
+pub const MINIMAL_TRUNCATION_MARKER_SPILL_FAILED: &str =
+    "\n[TRUNCATED: bytes omitted; NOT retained]\n";
+
+/// Compact single-line truncation notice used inside `<tool_output_quarantine>` when
+/// the inner budget is smaller than [`MINIMAL_TRUNCATION_MARKER`].
+const COMPACT_TRUNCATION_MARKER: &str = "[TRUNCATED: bytes omitted]";
+
+/// Compact single-line spill-failed truncation notice used inside `<tool_output_quarantine>`.
+const COMPACT_TRUNCATION_MARKER_SPILL_FAILED: &str = "[TRUNCATED: bytes omitted; NOT retained]";
 
 /// Render the human- and model-readable notice describing a failed spill.
 fn spill_failure_notice(error: &SpillError) -> String {
@@ -163,14 +177,14 @@ impl TruncationPolicy {
             }
             None => match spill {
                 SpillDisposition::Spilled(handle) => format!(
-                    "\n[... {omitted_str} bytes omitted (bytes {offset_start}..{offset_end} of {original_bytes}). Full output retained as ref=\"{handle}\" — recall with read_observation. ...]\n"
+                    "\n[TRUNCATED: {omitted_str} bytes omitted (bytes {offset_start}..{offset_end} of {original_bytes}). Full output retained as ref=\"{handle}\" — inspect with read_observation(ref, pattern, offset, length)]\n"
                 ),
                 SpillDisposition::Failed(error) => format!(
-                    "\n[... {omitted_str} bytes omitted (bytes {offset_start}..{offset_end} of {original_bytes}).{notice} ...]\n",
+                    "\n[TRUNCATED: {omitted_str} bytes omitted (bytes {offset_start}..{offset_end} of {original_bytes}).{notice}]\n",
                     notice = spill_failure_notice(error)
                 ),
                 SpillDisposition::NotConfigured => {
-                    format!("\n[... {omitted_str} bytes truncated ...]\n")
+                    format!("\n[TRUNCATED: {omitted_str} bytes omitted]\n")
                 }
             },
         };
@@ -188,6 +202,11 @@ impl TruncationPolicy {
     /// Truncate `input` using this policy, returning a borrowed `Cow` when no truncation
     /// is needed, or an owned string when middle-out truncation occurs.
     ///
+    /// If `input` is a verified `<tool_output_quarantine>` envelope, the outer XML
+    /// quarantine tags are preserved and only the inner payload is truncated. If `input`
+    /// was already sanitized (contains no raw control tokens or breakout tags), any
+    /// split token formed across the head/marker/tail cut boundary is neutralized.
+    ///
     /// If a configured [`OutputSpillSink`] fails, this method does **not** fail: the
     /// error is logged and rendered into the truncation marker, so the loss of the
     /// omitted bytes is visible to both the operator and the model. Callers that need
@@ -197,6 +216,26 @@ impl TruncationPolicy {
     pub fn truncate<'a>(&self, input: &'a str) -> Cow<'a, str> {
         self.truncate_lossy_with_context(input, &SpillContext::ANONYMOUS)
             .text
+    }
+
+    /// Sanitize and truncate `input` in a single pass, neutralizing all known LLM
+    /// control tokens ([`DELIMITER_RULES`](crate::DELIMITER_RULES)) and breakout tags
+    /// (including any split tokens formed across the head/marker/tail cut boundary)
+    /// while ensuring the final sanitized result fits within `self.max_bytes`.
+    #[must_use]
+    pub fn truncate_sanitized<'a>(&self, input: &'a str) -> Cow<'a, str> {
+        self.truncate_sanitized_lossy_with_context(input, &SpillContext::ANONYMOUS)
+            .text
+    }
+
+    /// Quarantine and truncate `input`, neutralizing all known LLM control tokens and
+    /// wrapping the output in `<tool_output_quarantine>` tags while fitting the total
+    /// envelope inside `self.max_bytes` (when `self.max_bytes >= 70`).
+    #[must_use]
+    pub fn truncate_quarantined(&self, input: &str) -> String {
+        self.truncate_quarantined_lossy_with_context(input, &SpillContext::ANONYMOUS)
+            .text
+            .into_owned()
     }
 
     /// Infallible truncation that degrades visibly — rather than failing — when a
@@ -211,15 +250,63 @@ impl TruncationPolicy {
             return outcome;
         }
 
-        let spill = self.resolve_spill(ctx, input);
-        if let Some(error) = spill.error() {
-            tracing::error!(
-                error = %error,
-                tool = ctx.tool_name,
-                "spill sink failed; omitted bytes are unrecoverable and the truncation marker will say so"
-            );
+        let spill = self.resolve_spill_logged(ctx, input);
+        self.truncate_oversized_auto(input, &spill)
+    }
+
+    /// Infallible sanitize + truncate with caller-provided [`SpillContext`].
+    #[must_use]
+    pub fn truncate_sanitized_lossy_with_context<'a>(
+        &self,
+        input: &'a str,
+        ctx: &SpillContext<'_>,
+    ) -> TruncationOutcome<'a> {
+        if unquarantine_tool_output(input).is_some() {
+            return self.truncate_lossy_with_context(input, ctx);
         }
-        self.truncate_oversized(input, &spill)
+
+        if input.len() <= self.max_bytes {
+            let sanitized = md_tmpl_core::sanitize_untrusted_str(input, TOOL_OUTPUT_QUARANTINE_TAG);
+            if sanitized.len() <= self.max_bytes {
+                return TruncationOutcome {
+                    text: sanitized,
+                    original_len: input.len(),
+                    omitted: None,
+                    spill_ref: None,
+                };
+            }
+        }
+
+        let spill = self.resolve_spill_logged(ctx, input);
+        self.truncate_oversized_sanitized(input, &spill)
+    }
+
+    /// Infallible quarantine + truncate with caller-provided [`SpillContext`].
+    #[must_use]
+    pub fn truncate_quarantined_lossy_with_context<'a>(
+        &self,
+        input: &'a str,
+        ctx: &SpillContext<'_>,
+    ) -> TruncationOutcome<'a> {
+        if unquarantine_tool_output(input).is_some() {
+            return self.truncate_lossy_with_context(input, ctx);
+        }
+
+        let inner_budget = self.max_bytes.saturating_sub(FRAME_OVERHEAD);
+        if input.len() <= inner_budget && self.max_bytes >= FRAME_OVERHEAD {
+            let sanitized = md_tmpl_core::sanitize_untrusted_str(input, TOOL_OUTPUT_QUARANTINE_TAG);
+            if sanitized.len() <= inner_budget {
+                return TruncationOutcome {
+                    text: Cow::Owned(format!("{OPEN_FRAME}{sanitized}{CLOSE_FRAME}")),
+                    original_len: input.len(),
+                    omitted: None,
+                    spill_ref: None,
+                };
+            }
+        }
+
+        let spill = self.resolve_spill_logged(ctx, input);
+        self.truncate_and_wrap_quarantine(input, input.len(), 0, &spill)
     }
 
     /// Truncate `input` using an anonymous spill context, returning a detailed [`TruncationOutcome`].
@@ -248,7 +335,7 @@ impl TruncationPolicy {
             Some(outcome) => Ok(outcome),
             None => match self.resolve_spill(ctx, input) {
                 SpillDisposition::Failed(error) => Err(error),
-                spill => Ok(self.truncate_oversized(input, &spill)),
+                spill => Ok(self.truncate_oversized_auto(input, &spill)),
             },
         }
     }
@@ -275,6 +362,197 @@ impl TruncationPolicy {
                 Err(error) => SpillDisposition::Failed(error),
             },
             None => SpillDisposition::NotConfigured,
+        }
+    }
+
+    fn resolve_spill_logged(&self, ctx: &SpillContext<'_>, input: &str) -> SpillDisposition {
+        let spill = self.resolve_spill(ctx, input);
+        if let Some(error) = spill.error() {
+            tracing::error!(
+                error = %error,
+                tool = ctx.tool_name,
+                "spill sink failed; omitted bytes are unrecoverable and the truncation marker will say so"
+            );
+        }
+        spill
+    }
+
+    /// Dispatch oversized truncation while preserving quarantine envelopes and
+    /// sanitization invariants if `input` was already quarantined or sanitized.
+    fn truncate_oversized_auto<'a>(
+        &self,
+        input: &'a str,
+        spill: &SpillDisposition,
+    ) -> TruncationOutcome<'a> {
+        if let Some(inner) = unquarantine_tool_output(input) {
+            return self.truncate_and_wrap_quarantine(inner, input.len(), OPEN_FRAME.len(), spill);
+        }
+        if !md_tmpl_core::has_untrusted_breakout(input, TOOL_OUTPUT_QUARANTINE_TAG) {
+            return self.truncate_oversized_sanitized(input, spill);
+        }
+        self.truncate_oversized(input, spill)
+    }
+
+    /// Truncate `inner` and wrap the result in `<tool_output_quarantine>\n...\n</tool_output_quarantine>`,
+    /// guaranteeing that the quarantine envelope is never broken even under tiny `max_bytes`.
+    fn truncate_and_wrap_quarantine<'a>(
+        &self,
+        inner: &str,
+        outer_original_len: usize,
+        offset_bias: usize,
+        spill: &SpillDisposition,
+    ) -> TruncationOutcome<'a> {
+        let inner_len = inner.len();
+        let spill_ref = spill.spill_ref().cloned();
+        let inner_budget = self.max_bytes.saturating_sub(FRAME_OVERHEAD);
+
+        if inner_budget < MINIMAL_TRUNCATION_MARKER.len() {
+            let notice = match spill {
+                SpillDisposition::Failed(_) => COMPACT_TRUNCATION_MARKER_SPILL_FAILED,
+                SpillDisposition::NotConfigured | SpillDisposition::Spilled(_) => {
+                    COMPACT_TRUNCATION_MARKER
+                }
+            };
+            let mut head_end = inner_budget.saturating_sub(notice.len()).min(inner_len);
+            while head_end > 0 && !inner.is_char_boundary(head_end) {
+                head_end -= 1;
+            }
+            let mut body = String::with_capacity(head_end + notice.len());
+            body.push_str(&inner[..head_end]);
+            body.push_str(notice);
+            let sanitized_body =
+                md_tmpl_core::sanitize_untrusted_str(&body, TOOL_OUTPUT_QUARANTINE_TAG);
+            let final_body = if head_end > 0 && sanitized_body.len() > inner_budget {
+                notice
+            } else {
+                sanitized_body.as_ref()
+            };
+            return TruncationOutcome {
+                text: Cow::Owned(format!("{OPEN_FRAME}{final_body}{CLOSE_FRAME}")),
+                original_len: outer_original_len,
+                omitted: Some(offset_bias..(offset_bias + inner_len)),
+                spill_ref,
+            };
+        }
+
+        let inner_policy = Self {
+            max_bytes: inner_budget,
+            head_ratio: self.head_ratio,
+            alignment: self.alignment,
+            marker_template: self.marker_template.clone(),
+            spill_sink: None,
+        };
+        let inner_outcome = inner_policy.truncate_oversized_sanitized(inner, spill);
+        let omitted = inner_outcome
+            .omitted
+            .map(|r| (r.start + offset_bias)..(r.end + offset_bias))
+            .or(Some(offset_bias..(offset_bias + inner_len)));
+
+        TruncationOutcome {
+            text: Cow::Owned(format!("{OPEN_FRAME}{}{CLOSE_FRAME}", inner_outcome.text)),
+            original_len: outer_original_len,
+            omitted,
+            spill_ref,
+        }
+    }
+
+    /// Perform middle-out elision on `input` while neutralizing any control tokens
+    /// or breakout tags in the surviving head, marker, tail, or across their splice
+    /// boundary, converging `head_end` and `tail_start` so the sanitized string fits
+    /// within `self.max_bytes`.
+    fn truncate_oversized_sanitized<'a>(
+        &self,
+        input: &'a str,
+        spill: &SpillDisposition,
+    ) -> TruncationOutcome<'a> {
+        let total_bytes = input.len();
+        let spill_ref = spill.spill_ref().cloned();
+
+        if self.max_bytes == 0 {
+            return TruncationOutcome {
+                text: Cow::Borrowed(""),
+                original_len: total_bytes,
+                omitted: Some(0..total_bytes),
+                spill_ref,
+            };
+        }
+
+        let est_omitted = total_bytes.saturating_sub(self.max_bytes);
+        let sample_marker =
+            self.format_marker_detailed(est_omitted, total_bytes, 0, est_omitted, spill);
+        let sample_marker_sanitized =
+            md_tmpl_core::sanitize_untrusted_str(&sample_marker, TOOL_OUTPUT_QUARANTINE_TAG);
+        let marker_len = sample_marker_sanitized.len();
+
+        if self.max_bytes <= marker_len {
+            return self.truncate_with_fallback_marker_sanitized(input, spill, spill_ref);
+        }
+
+        let content_budget = self.max_bytes.saturating_sub(marker_len);
+        let (mut head_end, mut tail_start) =
+            self.compute_initial_boundaries(input, total_bytes, content_budget);
+
+        if head_end >= tail_start {
+            let sanitized_full =
+                md_tmpl_core::sanitize_untrusted_str(input, TOOL_OUTPUT_QUARANTINE_TAG);
+            if sanitized_full.len() <= self.max_bytes {
+                return TruncationOutcome {
+                    text: sanitized_full,
+                    original_len: total_bytes,
+                    omitted: None,
+                    spill_ref,
+                };
+            }
+            let mut mid = total_bytes / 2;
+            while mid > 0 && !input.is_char_boundary(mid) {
+                mid -= 1;
+            }
+            head_end = mid;
+            tail_start = mid;
+        }
+
+        let (mut head_end, mut tail_start, mut marker, _) =
+            self.converge_boundaries(input, total_bytes, head_end, tail_start, spill);
+
+        loop {
+            let mut candidate =
+                String::with_capacity(head_end + marker.len() + (total_bytes - tail_start));
+            candidate.push_str(&input[..head_end]);
+            candidate.push_str(&marker);
+            candidate.push_str(&input[tail_start..]);
+
+            let sanitized =
+                md_tmpl_core::sanitize_untrusted_str(&candidate, TOOL_OUTPUT_QUARANTINE_TAG);
+            if sanitized.len() <= self.max_bytes {
+                return TruncationOutcome {
+                    text: Cow::Owned(sanitized.into_owned()),
+                    original_len: total_bytes,
+                    omitted: Some(head_end..tail_start),
+                    spill_ref,
+                };
+            }
+
+            if head_end == 0 && tail_start >= total_bytes {
+                return self.truncate_with_fallback_marker_sanitized(input, spill, spill_ref);
+            }
+
+            if head_end > 0 && (tail_start == total_bytes || head_end >= (total_bytes - tail_start))
+            {
+                head_end = self.shrink_head_boundary(input, head_end);
+            } else if tail_start < total_bytes {
+                tail_start = self.expand_tail_boundary(input, total_bytes, tail_start);
+            } else {
+                return self.truncate_with_fallback_marker_sanitized(input, spill, spill_ref);
+            }
+
+            let omitted_bytes = tail_start.saturating_sub(head_end);
+            marker = self.format_marker_detailed(
+                omitted_bytes,
+                total_bytes,
+                head_end,
+                tail_start,
+                spill,
+            );
         }
     }
 
@@ -348,7 +626,7 @@ impl TruncationPolicy {
     /// Choose the most informative marker that fits inside `max_bytes`.
     fn fallback_marker(spill: &SpillDisposition, max_bytes: usize) -> String {
         if let SpillDisposition::Spilled(handle) = spill {
-            let with_ref = format!("\n[...truncated; ref=\"{handle}\"...]\n");
+            let with_ref = format!("\n[TRUNCATED: bytes omitted; ref=\"{handle}\"]\n");
             if with_ref.len() <= max_bytes {
                 return with_ref;
             }
@@ -357,6 +635,68 @@ impl TruncationPolicy {
             SpillDisposition::Failed(_) => MINIMAL_TRUNCATION_MARKER_SPILL_FAILED.into(),
             SpillDisposition::NotConfigured | SpillDisposition::Spilled(_) => {
                 MINIMAL_TRUNCATION_MARKER.into()
+            }
+        }
+    }
+
+    fn truncate_with_fallback_marker_sanitized<'a>(
+        &self,
+        input: &str,
+        spill: &SpillDisposition,
+        spill_ref: Option<SpillRef>,
+    ) -> TruncationOutcome<'a> {
+        let total_bytes = input.len();
+        let raw_marker = Self::fallback_marker(spill, self.max_bytes);
+        let marker = md_tmpl_core::sanitize_untrusted_str(&raw_marker, TOOL_OUTPUT_QUARANTINE_TAG);
+
+        if marker.len() >= self.max_bytes {
+            let mut cut = self.max_bytes;
+            while cut > 0 && !marker.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let slice = &marker[..cut];
+            let clean = md_tmpl_core::sanitize_untrusted_str(slice, TOOL_OUTPUT_QUARANTINE_TAG);
+            return TruncationOutcome {
+                text: Cow::Owned(clean.into_owned()),
+                original_len: total_bytes,
+                omitted: Some(0..total_bytes),
+                spill_ref,
+            };
+        }
+
+        let mut head_end = self.max_bytes - marker.len();
+        while head_end > 0 && !input.is_char_boundary(head_end) {
+            head_end -= 1;
+        }
+
+        loop {
+            let mut text = String::with_capacity(head_end + marker.len());
+            text.push_str(&input[..head_end]);
+            text.push_str(&marker);
+            let sanitized = md_tmpl_core::sanitize_untrusted_str(&text, TOOL_OUTPUT_QUARANTINE_TAG);
+            if sanitized.len() <= self.max_bytes {
+                return TruncationOutcome {
+                    text: Cow::Owned(sanitized.into_owned()),
+                    original_len: total_bytes,
+                    omitted: Some(head_end..total_bytes),
+                    spill_ref,
+                };
+            }
+            if head_end == 0 {
+                let mut cut = self.max_bytes.min(marker.len());
+                while cut > 0 && !marker.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                return TruncationOutcome {
+                    text: Cow::Owned(marker[..cut].into()),
+                    original_len: total_bytes,
+                    omitted: Some(0..total_bytes),
+                    spill_ref,
+                };
+            }
+            head_end -= 1;
+            while head_end > 0 && !input.is_char_boundary(head_end) {
+                head_end -= 1;
             }
         }
     }

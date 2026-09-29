@@ -127,8 +127,4 @@ impl<T> OnceLock<T> {
     {
         self.0.call_once(f)
     }
-
-    pub fn get(&self) -> Option<&T> {
-        self.0.get()
-    }
 }

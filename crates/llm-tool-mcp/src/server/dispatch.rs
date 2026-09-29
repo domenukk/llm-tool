@@ -94,14 +94,14 @@ impl McpServer {
     #[cfg(test)]
     async fn handle_request_conn(&self, line: &str, conn: &Connection) -> JsonRpcResponse {
         // Detect batch requests (JSON arrays) — redirect to handle_message.
-        if let Some(first_non_ws) = line.trim_start().as_bytes().first() {
-            if *first_non_ws == b'[' {
-                return JsonRpcResponse::error(
-                    None,
-                    protocol::INVALID_REQUEST,
-                    "batch requests must be processed via handle_message or run/run_async",
-                );
-            }
+        if let Some(first_non_ws) = line.trim_start().as_bytes().first()
+            && *first_non_ws == b'['
+        {
+            return JsonRpcResponse::error(
+                None,
+                protocol::INVALID_REQUEST,
+                "batch requests must be processed via handle_message or run/run_async",
+            );
         }
 
         let val: serde_json::Value = match serde_json::from_str(line) {

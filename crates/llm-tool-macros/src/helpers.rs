@@ -1,16 +1,10 @@
-#[cfg(feature = "md-tmpl")]
-use quote::format_ident;
-use quote::quote;
-#[cfg(feature = "md-tmpl")]
-use syn::LitStr;
-use syn::{FnArg, GenericArgument, ItemFn, Pat, PatType, PathArguments, Type};
+use quote::{format_ident, quote};
+use syn::{FnArg, GenericArgument, ItemFn, LitStr, Pat, PatType, PathArguments, Type};
 
 use crate::{
     ATTR_CONTEXT, ATTR_DOC, MACRO_LLM_TOOL, ParamInfo, ReturnInfo, TYPE_OPTION, TYPE_RESULT,
-    TYPE_STR, TYPE_TOOL_CONTEXT, ToolAttr,
+    TYPE_STR, TYPE_TOOL_CONTEXT, ToolAttr, desc, response_struct_gen,
 };
-#[cfg(feature = "md-tmpl")]
-use crate::{desc, response_struct_gen};
 
 /// Build the struct field types and any auto-borrow bindings for `&str` params.
 pub(crate) fn build_param_types_and_borrows(
@@ -82,7 +76,7 @@ pub(crate) fn build_wrapped_body(
                 #inner
                 match __r {
                     ::core::result::Result::Ok(__v) => { #ok_expr },
-                    ::core::result::Result::Err(__e) => ::core::result::Result::Err(::core::convert::Into::into(__e)),
+                    ::core::result::Result::Err(err) => ::core::result::Result::Err(::core::convert::Into::into(err)),
                 }
             }
         }
@@ -155,37 +149,15 @@ pub(crate) fn resolve_response_template(
     struct_name: &syn::Ident,
     fn_name: &syn::Ident,
 ) -> syn::Result<ResponseTemplateInfo> {
-    // NOLINT: suppress unused-variable warning in non-md-tmpl cfg branch
-    let _ = (struct_name, fn_name);
     let Some(attr) = attr else {
         return Ok(ResponseTemplateInfo::default());
     };
 
     if let Some(response_path) = &attr.response_file_path {
-        #[cfg(not(feature = "md-tmpl"))]
-        {
-            return Err(syn::Error::new(
-                response_path.span(),
-                "the `md-tmpl` feature must be enabled to use `response_file`",
-            ));
-        }
-        #[cfg(feature = "md-tmpl")]
-        {
-            return resolve_response_template_file(attr, response_path, struct_name, fn_name);
-        }
+        return resolve_response_template_file(attr, response_path, struct_name, fn_name);
     }
     if let Some(response_inline) = &attr.response_inline {
-        #[cfg(not(feature = "md-tmpl"))]
-        {
-            return Err(syn::Error::new(
-                response_inline.span(),
-                "the `md-tmpl` feature must be enabled to use `response`",
-            ));
-        }
-        #[cfg(feature = "md-tmpl")]
-        {
-            return resolve_response_template_inline(attr, response_inline, struct_name, fn_name);
-        }
+        return resolve_response_template_inline(attr, response_inline, struct_name, fn_name);
     }
     Ok(ResponseTemplateInfo::default())
 }
@@ -195,45 +167,69 @@ pub(crate) fn resolve_response_template(
 /// If the relative path does not exist under `CARGO_MANIFEST_DIR` (e.g. inside `trybuild`
 /// runner crates located in `target/tests/trybuild/`), this function walks up parent
 /// directories to find the file in the workspace or subcrates.
-#[cfg(feature = "md-tmpl")]
-pub(crate) fn resolve_manifest_path(rel_path: &str) -> std::path::PathBuf {
+pub(crate) fn resolve_manifest_path(
+    rel_path: &str,
+    span: proc_macro2::Span,
+) -> syn::Result<std::path::PathBuf> {
     let path = std::path::Path::new(rel_path);
     if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-        let candidate = std::path::Path::new(&manifest_dir).join(rel_path);
-        if candidate.exists() {
-            return candidate;
+        return Ok(path.to_path_buf());
+    }
+    let manifest_dir = match std::env::var("CARGO_MANIFEST_DIR") {
+        Ok(dir) => dir,
+        Err(std::env::VarError::NotPresent) => ".".to_string(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(syn::Error::new(
+                span,
+                "CARGO_MANIFEST_DIR contains invalid UTF-8",
+            ));
         }
+    };
+    let candidate = std::path::Path::new(&manifest_dir).join(rel_path);
+    if candidate.exists() {
+        return Ok(candidate);
+    }
 
-        let mut dir = std::path::Path::new(&manifest_dir);
-        while let Some(parent) = dir.parent() {
-            let direct = parent.join(rel_path);
-            if direct.exists() {
-                return direct;
-            }
-            let crates_dir = parent.join("crates");
-            if crates_dir.is_dir() {
-                // NOLINT: directory check done above; ignore transient read errors
-                if let Ok(entries) = std::fs::read_dir(&crates_dir) {
-                    for entry in entries.flatten() {
-                        let crate_path = entry.path().join(rel_path);
-                        if crate_path.exists() {
-                            return crate_path;
-                        }
-                    }
+    let mut dir = std::path::Path::new(&manifest_dir);
+    while let Some(parent) = dir.parent() {
+        let direct = parent.join(rel_path);
+        if direct.exists() {
+            return Ok(direct);
+        }
+        let crates_dir = parent.join("crates");
+        if crates_dir.is_dir() {
+            let entries = std::fs::read_dir(&crates_dir).map_err(|err| {
+                syn::Error::new(
+                    span,
+                    format!(
+                        "failed to read workspace directory '{}': {err}",
+                        crates_dir.display()
+                    ),
+                )
+            })?;
+            for entry_res in entries {
+                let entry = entry_res.map_err(|err| {
+                    syn::Error::new(
+                        span,
+                        format!(
+                            "failed to read directory entry in '{}': {err}",
+                            crates_dir.display()
+                        ),
+                    )
+                })?;
+                let crate_path = entry.path().join(rel_path);
+                if crate_path.exists() {
+                    return Ok(crate_path);
                 }
             }
-            dir = parent;
         }
-
-        candidate
+        dir = parent;
     }
+
+    Ok(candidate)
 }
 
-/// Feature-gated implementation of response template resolution from file.
-#[cfg(feature = "md-tmpl")]
+/// Implementation of response template resolution from file.
 pub(crate) fn resolve_response_template_file(
     attr: &ToolAttr,
     response_path: &LitStr,
@@ -241,7 +237,7 @@ pub(crate) fn resolve_response_template_file(
     fn_name: &syn::Ident,
 ) -> syn::Result<ResponseTemplateInfo> {
     let rel_path = response_path.value();
-    let full_path = resolve_manifest_path(&rel_path);
+    let full_path = resolve_manifest_path(&rel_path, response_path.span())?;
     let path_str = full_path.to_string_lossy().to_string();
 
     // Validate the template file exists and parses at compile time.
@@ -315,8 +311,7 @@ pub(crate) fn resolve_response_template_file(
     })
 }
 
-/// Feature-gated implementation of response template resolution from inline string.
-#[cfg(feature = "md-tmpl")]
+/// Implementation of response template resolution from inline string.
 pub(crate) fn resolve_response_template_inline(
     attr: &ToolAttr,
     response_inline: &LitStr,

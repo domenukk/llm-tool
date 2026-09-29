@@ -18,19 +18,16 @@ mod types;
 /// Re-export `md_tmpl` so generated code can
 /// reference `::llm_tool::__md_tmpl::` without requiring the user
 /// to add `md-tmpl` as a direct dependency.
-#[cfg(feature = "md-tmpl")]
 #[doc(hidden)]
 pub use md_tmpl as __md_tmpl;
 /// Public re-export of `md_tmpl` for use in `context = fn` functions.
 ///
 /// Use `llm_tool::md_tmpl::Context` when writing a context function
 /// for `#[llm_tool(description_file = "...", context = my_fn)]`.
-#[cfg(feature = "md-tmpl")]
 pub use md_tmpl;
 /// Re-export `md_tmpl_macros` so `response_file` generated code can
 /// auto-generate response types via `::llm_tool::__md_tmpl_macros::include_types!`
 /// without requiring the user to add `md-tmpl-macros` as a direct dependency.
-#[cfg(feature = "md-tmpl")]
 #[doc(hidden)]
 pub use md_tmpl_macros as __md_tmpl_macros;
 #[doc(hidden)]

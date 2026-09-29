@@ -3,7 +3,9 @@
 use alloc::{borrow::Cow, boxed::Box, format, string::ToString};
 use core::{future::Future, pin::Pin};
 
-use super::types::{ToolContext, ToolDefinition, ToolEffect, ToolError, ToolOutput};
+use super::types::{
+    OutputSanitization, ToolContext, ToolDefinition, ToolEffect, ToolError, ToolOutput,
+};
 
 /// Convenience type for tools that take no parameters.
 #[derive(
@@ -76,8 +78,24 @@ pub trait RustTool: Send + Sync {
     /// Whether the tool is idempotent / read-only safe for concurrent wave execution.
     const IDEMPOTENT: bool = false;
 
-    /// Whether the tool output should be sanitized.
+    /// Whether the tool output should have control tokens neutralized (`OutputSanitization::SanitizeTokens`).
     const SANITIZE_OUTPUT: bool = false;
+
+    /// Whether the tool output should be quarantined (`OutputSanitization::Quarantine`).
+    const QUARANTINE_OUTPUT: bool = false;
+
+    /// Automatic prompt-injection sanitization policy applied to this tool's output.
+    ///
+    /// Defaults to [`OutputSanitization::Quarantine`] if [`Self::QUARANTINE_OUTPUT`] is `true`,
+    /// [`OutputSanitization::SanitizeTokens`] if [`Self::SANITIZE_OUTPUT`] is `true`, or
+    /// [`OutputSanitization::None`] otherwise.
+    const OUTPUT_SANITIZATION: OutputSanitization = if Self::QUARANTINE_OUTPUT {
+        OutputSanitization::Quarantine
+    } else if Self::SANITIZE_OUTPUT {
+        OutputSanitization::SanitizeTokens
+    } else {
+        OutputSanitization::None
+    };
 
     /// Return the execution effect of the tool.
     fn effect(&self) -> ToolEffect {
@@ -87,6 +105,11 @@ pub trait RustTool: Send + Sync {
     /// Return whether the tool is idempotent (read-only).
     fn is_idempotent(&self) -> bool {
         matches!(self.effect(), ToolEffect::ReadOnly)
+    }
+
+    /// Return the automatic prompt-injection sanitization policy for this tool's output.
+    fn output_sanitization(&self) -> OutputSanitization {
+        Self::OUTPUT_SANITIZATION
     }
 
     /// Return the tool description used in [`ToolDefinition`].
@@ -120,6 +143,107 @@ pub trait RustTool: Send + Sync {
     ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send;
 }
 
+/// Shared [`alloc::sync::Arc`]-backed wrapper for any [`RustTool`] implementation,
+/// enabling cheap cloning across registries and subagent scopes.
+#[derive(Debug)]
+pub struct SharedRustTool<T>(pub alloc::sync::Arc<T>);
+
+impl<T> Clone for SharedRustTool<T> {
+    fn clone(&self) -> Self {
+        Self(alloc::sync::Arc::clone(&self.0))
+    }
+}
+
+impl<T> SharedRustTool<T> {
+    /// Wrap `tool` in a new [`SharedRustTool`].
+    #[must_use]
+    pub fn new(tool: T) -> Self {
+        Self(alloc::sync::Arc::new(tool))
+    }
+
+    /// Borrow the underlying tool.
+    #[must_use]
+    pub fn as_inner(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> From<alloc::sync::Arc<T>> for SharedRustTool<T> {
+    fn from(arc: alloc::sync::Arc<T>) -> Self {
+        Self(arc)
+    }
+}
+
+impl<T: RustTool> RustTool for alloc::sync::Arc<T> {
+    type Params = T::Params;
+    const NAME: &'static str = T::NAME;
+    const DESCRIPTION: &'static str = T::DESCRIPTION;
+    const EFFECT: ToolEffect = T::EFFECT;
+    const IDEMPOTENT: bool = T::IDEMPOTENT;
+    const SANITIZE_OUTPUT: bool = T::SANITIZE_OUTPUT;
+    const QUARANTINE_OUTPUT: bool = T::QUARANTINE_OUTPUT;
+    const OUTPUT_SANITIZATION: OutputSanitization = T::OUTPUT_SANITIZATION;
+
+    fn effect(&self) -> ToolEffect {
+        (**self).effect()
+    }
+
+    fn is_idempotent(&self) -> bool {
+        (**self).is_idempotent()
+    }
+
+    fn output_sanitization(&self) -> OutputSanitization {
+        (**self).output_sanitization()
+    }
+
+    fn description(&self) -> Cow<'static, str> {
+        (**self).description()
+    }
+
+    fn call(
+        &self,
+        params: Self::Params,
+        ctx: &ToolContext,
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        (**self).call(params, ctx)
+    }
+}
+
+impl<T: RustTool> RustTool for SharedRustTool<T> {
+    type Params = T::Params;
+    const NAME: &'static str = T::NAME;
+    const DESCRIPTION: &'static str = T::DESCRIPTION;
+    const EFFECT: ToolEffect = T::EFFECT;
+    const IDEMPOTENT: bool = T::IDEMPOTENT;
+    const SANITIZE_OUTPUT: bool = T::SANITIZE_OUTPUT;
+    const QUARANTINE_OUTPUT: bool = T::QUARANTINE_OUTPUT;
+    const OUTPUT_SANITIZATION: OutputSanitization = T::OUTPUT_SANITIZATION;
+
+    fn effect(&self) -> ToolEffect {
+        self.0.effect()
+    }
+
+    fn is_idempotent(&self) -> bool {
+        self.0.is_idempotent()
+    }
+
+    fn output_sanitization(&self) -> OutputSanitization {
+        self.0.output_sanitization()
+    }
+
+    fn description(&self) -> Cow<'static, str> {
+        self.0.description()
+    }
+
+    fn call(
+        &self,
+        params: Self::Params,
+        ctx: &ToolContext,
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        self.0.call(params, ctx)
+    }
+}
+
 /// Build a [`ToolDefinition`] from any [`RustTool`] implementor.
 ///
 /// The generated schema is sanitized for broad compatibility with LLM
@@ -144,7 +268,8 @@ pub fn definition_of<T: RustTool>(tool: &T) -> Result<ToolDefinition, ToolError>
         tool.description().into_owned(),
         parameter_schema,
         tool.effect(),
-    ))
+    )
+    .with_output_sanitization(tool.output_sanitization()))
 }
 
 /// Recursively sanitize JSON Schema `"type"` fields for Go genai compatibility.
@@ -220,7 +345,8 @@ impl<T: RustTool> ErasedTool for T {
             let params: T::Params = serde_json::from_value(args).map_err(|e| {
                 ToolError::new(format!("Failed to deserialize tool parameters: {e}"))
             })?;
-            self.call(params, ctx).await
+            let output = self.call(params, ctx).await?;
+            Ok(self.output_sanitization().apply(output))
         })
     }
 
@@ -233,7 +359,8 @@ impl<T: RustTool> ErasedTool for T {
             let params: T::Params = serde_json::from_str(args_json).map_err(|e| {
                 ToolError::new(format!("Failed to deserialize tool parameters: {e}"))
             })?;
-            self.call(params, ctx).await
+            let output = self.call(params, ctx).await?;
+            Ok(self.output_sanitization().apply(output))
         })
     }
 }

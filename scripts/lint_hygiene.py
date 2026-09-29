@@ -4,11 +4,6 @@
 Run via `just lint-hygiene` or directly: `python3 scripts/lint_hygiene.py`
 
 Exit code 0 = clean, 1 = violations found.
-
-Escape hatch: add `// NOLINT: <reason>` on the line ABOVE a flagged
-pattern to suppress it.  The reason is mandatory.
-Bare `// NOLINT` without a reason is itself flagged as a violation.
-Stale NOLINTs (where the next line doesn't trigger any check) are also flagged.
 """
 
 import re
@@ -41,8 +36,8 @@ class Check:
     dirs: list[str]
     exts: set[str]
     message: str
-    exclude: re.Pattern[str] | None = None  # lines matching this are skipped
-    exclude_path: re.Pattern[str] | None = None  # file paths matching this are skipped
+    exclude: re.Pattern[str] | None = None
+    exclude_path: re.Pattern[str] | None = None
     no_nolint: bool = False
     hits: list[str] = field(default_factory=list)
     suppressed: list[str] = field(default_factory=list)
@@ -56,6 +51,7 @@ CHECKS: list[Check] = [
         dirs=RUST_DIRS,
         exts=RUST_EXTS,
         message="Fix the underlying issue instead of suppressing the lint.",
+        no_nolint=True,
     ),
     Check(
         name="Rust: #[expect(...)]",
@@ -63,6 +59,7 @@ CHECKS: list[Check] = [
         dirs=RUST_DIRS,
         exts=RUST_EXTS,
         message="Fix the underlying issue instead of suppressing the lint.",
+        no_nolint=True,
     ),
     Check(
         name="Rust: allow(clippy::too_many_lines) (never acceptable)",
@@ -70,6 +67,23 @@ CHECKS: list[Check] = [
         dirs=RUST_DIRS,
         exts=RUST_EXTS,
         message="Refactor the function into smaller pieces instead of suppressing the lint.",
+        no_nolint=True,
+    ),
+    Check(
+        name="Rust: type_complexity suppression",
+        pattern=re.compile(r"clippy::type_complexity"),
+        dirs=RUST_DIRS,
+        exts=RUST_EXTS,
+        message="Extract a type alias or struct instead of suppressing clippy::type_complexity.",
+        no_nolint=True,
+    ),
+    Check(
+        name="Rust: cognitive_complexity suppression",
+        pattern=re.compile(r"clippy::cognitive_complexity"),
+        dirs=RUST_DIRS,
+        exts=RUST_EXTS,
+        message="Refactor the function into smaller pieces instead of suppressing clippy::cognitive_complexity.",
+        no_nolint=True,
     ),
     # ── Rust: silently discarded values ───────────────────────────────────
     Check(
@@ -78,6 +92,7 @@ CHECKS: list[Check] = [
         dirs=RUST_DIRS,
         exts=RUST_EXTS,
         message="Handle the Result/value properly — don't silently discard it.",
+        no_nolint=True,
     ),
     Check(
         name="Rust: if let Ok(...) (silent Err drop)",
@@ -85,6 +100,7 @@ CHECKS: list[Check] = [
         dirs=RUST_DIRS,
         exts=RUST_EXTS,
         message="The Err branch is silently ignored. Use match, map_err, or ? to handle errors.",
+        no_nolint=True,
     ),
     Check(
         name="Rust: .unwrap_or_default() (hidden errors)",
@@ -92,6 +108,7 @@ CHECKS: list[Check] = [
         dirs=RUST_DIRS,
         exts=RUST_EXTS,
         message="Silently replaces errors/None with defaults. Log or propagate instead.",
+        no_nolint=True,
     ),
     Check(
         name="Rust: .ok() (Result→Option, error discarded)",
@@ -99,6 +116,7 @@ CHECKS: list[Check] = [
         dirs=RUST_DIRS,
         exts=RUST_EXTS,
         message="Converts Result to Option, silently discarding the error.",
+        no_nolint=True,
     ),
     Check(
         name="Rust: .is_ok() / .is_err() (value discarded)",
@@ -106,8 +124,8 @@ CHECKS: list[Check] = [
         dirs=RUST_DIRS,
         exts=RUST_EXTS,
         message="Checks the Result but discards the inner value. Use match or ? instead.",
-        # Legitimate in assertions, conditions, and boolean expressions.
         exclude=re.compile(r"assert|if |while |\|\||&&|return .*\.is_"),
+        no_nolint=True,
     ),
     Check(
         name="Rust: discarded closure arg |_|",
@@ -115,15 +133,16 @@ CHECKS: list[Check] = [
         dirs=RUST_DIRS,
         exts=RUST_EXTS,
         message="Closure discards its argument. Name it and use it (log, propagate, etc.).",
-        # Skip doc-comments and string literals that mention closures.
         exclude=re.compile(r"^\s*///|^\s*//[^/].*\|_\||" + r'".*\|_\|'),
+        no_nolint=True,
     ),
     Check(
-        name="Rust: Err(_) (error value discarded in match)",
-        pattern=re.compile(r"\bErr\(_\)"),
+        name="Rust: Err(_) / Err(_err) (error value discarded in match)",
+        pattern=re.compile(r"\bErr\(_[a-zA-Z0-9_]*\)"),
         dirs=RUST_DIRS,
         exts=RUST_EXTS,
         message="Error value is discarded in pattern match. Capture and log/propagate it.",
+        no_nolint=True,
     ),
     Check(
         name="Rust: .unwrap_or(()) / .unwrap_or(0) (silent swallow)",
@@ -131,14 +150,24 @@ CHECKS: list[Check] = [
         dirs=RUST_DIRS,
         exts=RUST_EXTS,
         message="Silently swallows errors with a trivial default. Handle the error explicitly.",
+        no_nolint=True,
     ),
-    # ── Rust: panic-at-runtime markers ────────────────────────────────────
+    # ── Rust: panic-at-runtime / skipped test markers ─────────────────────
     Check(
         name="Rust: todo!() / unimplemented!()",
         pattern=re.compile(r"\b(todo|unimplemented)!\("),
         dirs=RUST_DIRS,
         exts=RUST_EXTS,
         message="Will panic at runtime. Implement or return an error.",
+        no_nolint=True,
+    ),
+    Check(
+        name="Rust: #[ignore] (skipped test)",
+        pattern=re.compile(r"#\[ignore\b"),
+        dirs=RUST_DIRS,
+        exts=RUST_EXTS,
+        message="Never ignore tests — fix or make deterministic.",
+        no_nolint=True,
     ),
     Check(
         name="Template source: single-line \\n-escaped frontmatter",
@@ -171,33 +200,18 @@ def is_nolinted(lines: list[str], lineno: int) -> bool:
     """Check if the line above `lineno` (1-indexed) has a valid NOLINT: reason."""
     if lineno < 2:
         return False
-    prev_line = lines[lineno - 2]  # lineno 1-indexed, list 0-indexed
+    prev_line = lines[lineno - 2]
     return bool(NOLINT_WITH_REASON.search(prev_line))
-
-
-def line_matches_any_check(line: str, checks: list[Check]) -> bool:
-    """Return True if `line` would trigger any check pattern (ignoring excludes)."""
-    for check in checks:
-        if check.pattern.search(line):
-            return True
-    return False
 
 
 # ── Check runners ────────────────────────────────────────────────────────────
 
 
 def run_pattern_checks() -> bool:
-    """Run all pattern checks. Returns True if any failed.
-
-    Tracks which NOLINT comments are consumed (suppress a real hit) so we can
-    detect stale ones afterwards.
-    """
+    """Run all pattern checks. Returns True if any failed."""
     failed = False
-    # Collect all NOLINT locations and whether they were consumed.
-    # Key: (path, lineno of NOLINT line), value: consumed?
     nolint_locations: dict[tuple[Path, int], bool] = {}
 
-    # First pass: find all NOLINT lines.
     all_dirs_exts: set[tuple[str, str]] = set()
     for check in CHECKS:
         for d in check.dirs:
@@ -212,9 +226,8 @@ def run_pattern_checks() -> bool:
             continue
         for lineno, line in enumerate(lines, start=1):
             if NOLINT_WITH_REASON.search(line):
-                nolint_locations[(path, lineno)] = False  # not yet consumed
+                nolint_locations[(path, lineno)] = False
 
-    # Second pass: run checks, marking consumed NOLINTs.
     for check in CHECKS:
         print(f"=== {check.name} ===")
         files = source_files(check.dirs, check.exts)
@@ -230,14 +243,11 @@ def run_pattern_checks() -> bool:
                     continue
                 if check.exclude and check.exclude.search(line):
                     continue
-                if is_nolinted(lines, lineno):
-                    # Mark the NOLINT as consumed.
+                if not check.no_nolint and is_nolinted(lines, lineno):
                     nolint_key = (path, lineno - 1)
                     if nolint_key in nolint_locations:
                         nolint_locations[nolint_key] = True
-                    check.suppressed.append(
-                        f"  {path}:{lineno}: {line.strip()}"
-                    )
+                    check.suppressed.append(f"  {path}:{lineno}: {line.strip()}")
                     continue
                 check.hits.append(f"  {path}:{lineno}: {line.strip()}")
         if check.hits:
@@ -251,7 +261,6 @@ def run_pattern_checks() -> bool:
             for sup in check.suppressed:
                 print(f"  ℹ  (suppressed) {sup.strip()}")
 
-    # Check for stale NOLINTs (not consumed by any check).
     print("=== Stale NOLINT comments ===")
     stale: list[str] = []
     for (path, lineno), consumed in sorted(nolint_locations.items()):
@@ -296,7 +305,7 @@ def run_bare_nolint_check() -> bool:
 
 def run_long_file_check() -> bool:
     """Flag files exceeding MAX_FILE_LINES."""
-    print(f"=== Long files (>{MAX_FILE_LINES} lines) ===")
+    print(f"=== Long files (>={MAX_FILE_LINES} lines) ===")
     long_files: list[tuple[Path, int]] = []
 
     for path in source_files(RUST_DIRS, RUST_EXTS):
@@ -304,7 +313,7 @@ def run_long_file_check() -> bool:
             line_count = sum(1 for _ in path.open(errors="replace"))
         except OSError:
             continue
-        if line_count > MAX_FILE_LINES:
+        if line_count >= MAX_FILE_LINES:
             long_files.append((path, line_count))
 
     if long_files:

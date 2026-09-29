@@ -294,8 +294,10 @@ async fn tcp_listener_serves_requests() {
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        // NOLINT: test background task — server result unused; test controls lifecycle
-        let _ = server.run_tcp_listener(listener).await;
+        server
+            .run_tcp_listener(listener)
+            .await
+            .expect("tcp server failed");
     });
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -325,8 +327,10 @@ async fn unix_listener_serves_requests() {
     let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
 
     tokio::spawn(async move {
-        // NOLINT: test background task — server result unused; test controls lifecycle
-        let _ = server.run_unix_listener(listener).await;
+        server
+            .run_unix_listener(listener)
+            .await
+            .expect("unix server failed");
     });
 
     let mut stream = tokio::net::UnixStream::connect(&sock_path).await.unwrap();
@@ -788,8 +792,10 @@ async fn tcp_multiple_concurrent_clients() {
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        // NOLINT: test background task — server result unused; test controls lifecycle
-        let _ = server.run_tcp_listener(listener).await;
+        server
+            .run_tcp_listener(listener)
+            .await
+            .expect("tcp server failed");
     });
 
     // Spawn 3 concurrent clients.
@@ -838,8 +844,10 @@ async fn unix_multiple_concurrent_clients() {
     let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
 
     tokio::spawn(async move {
-        // NOLINT: test background task — server result unused; test controls lifecycle
-        let _ = server.run_unix_listener(listener).await;
+        server
+            .run_unix_listener(listener)
+            .await
+            .expect("unix server failed");
     });
 
     let mut handles = Vec::new();

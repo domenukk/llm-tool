@@ -166,8 +166,10 @@ async fn tcp_connections_keep_independent_identities() {
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        // NOLINT: test background task — server result unused; test controls lifecycle
-        let _ = server.run_tcp_listener(listener).await;
+        server
+            .run_tcp_listener(listener)
+            .await
+            .expect("tcp server failed");
     });
 
     let (alice, bob) = tokio::join!(tcp_whoami(addr, INIT_ALICE), tcp_whoami(addr, INIT_BOB));

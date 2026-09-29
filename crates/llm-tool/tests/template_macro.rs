@@ -1,5 +1,3 @@
-#![cfg(feature = "md-tmpl")]
-
 use std::path::PathBuf;
 
 #[test]

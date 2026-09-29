@@ -1,8 +1,4 @@
 //! Integration tests for template-based tool descriptions.
-//!
-//! Run with: `cargo test --features md-tmpl`
-
-#![cfg(feature = "md-tmpl")]
 
 use llm_tool::{RustTool, ToolRegistry, llm_tool};
 

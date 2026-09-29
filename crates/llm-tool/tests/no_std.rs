@@ -35,7 +35,6 @@ fn get_state_val(
     Ok(format!("{}", ext.value))
 }
 
-#[cfg(feature = "md-tmpl")]
 #[llm_tool(description_file = "tools/static_desc.tmpl.md")]
 fn static_tmpl_tool(
     /// Location
@@ -53,21 +52,17 @@ async fn test_no_std_paths() {
 
     registry.register(GetStateVal);
 
-    #[cfg(feature = "md-tmpl")]
-    {
-        registry.register(StaticTmplTool);
-        assert_eq!(
-            StaticTmplTool::DESCRIPTION.replace("\r\n", "\n"),
-            "Fetch the current weather for any city worldwide.
+    registry.register(StaticTmplTool);
+    assert_eq!(
+        StaticTmplTool::DESCRIPTION.replace("\r\n", "\n"),
+        "Fetch the current weather for any city worldwide.
 
 Returns structured weather data containing temperature, humidity,
 wind speed, and a human-readable conditions summary.
 Supports both metric and imperial unit systems."
-        );
-    }
+    );
 
-    let expected_len = if cfg!(feature = "md-tmpl") { 3 } else { 2 };
-    assert_eq!(registry.len(), expected_len);
+    assert_eq!(registry.len(), 3);
 
     let ctx = ToolContext::new().with_conversation_id("test-conv");
     ctx.set_ext(Arc::new(CustomState { value: 42 }))
@@ -87,16 +82,13 @@ Supports both metric and imperial unit systems."
         .expect("dispatch get_state_val failed");
     assert_eq!(out.content(), "42");
 
-    #[cfg(feature = "md-tmpl")]
-    {
-        let out = registry
-            .dispatch(
-                "static_tmpl_tool",
-                serde_json::json!({ "loc": "Paris" }),
-                &ctx,
-            )
-            .await
-            .expect("dispatch static_tmpl_tool failed");
-        assert_eq!(out.content(), "Weather for Paris");
-    }
+    let out = registry
+        .dispatch(
+            "static_tmpl_tool",
+            serde_json::json!({ "loc": "Paris" }),
+            &ctx,
+        )
+        .await
+        .expect("dispatch static_tmpl_tool failed");
+    assert_eq!(out.content(), "Weather for Paris");
 }

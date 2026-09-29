@@ -1,10 +1,8 @@
 # llm-tool-mcp
 
-MCP ([Model Context Protocol](https://modelcontextprotocol.io/)) stdio server
-for [`llm-tool`](https://crates.io/crates/llm-tool) registries.
-
-Register your tools in a `ToolRegistry`, hand it to `McpServer`, and get a fully
-compliant MCP server — no boilerplate.
+MCP ([Model Context Protocol](https://modelcontextprotocol.io/)) server for
+[`llm-tool`](https://crates.io/crates/llm-tool) registries over stdio, TCP, and
+Unix domain sockets.
 
 ## Quick start
 
@@ -57,25 +55,22 @@ let resp: serde_json::Value = serde_json::from_slice(&output).unwrap();
 assert_eq!(resp["result"]["content"][0]["text"], "42");
 ```
 
-## Transports: Stdio vs TCP vs Unix Sockets
+## Transports: Stdio, TCP, and Unix Sockets
 
-`McpServer` is builder-style and supports all common execution models
-out-of-the-box. Two flavors are available:
+Two execution styles are available:
 
-- **Blocking convenience** — `run_stdio`, `run_tcp`, `run_unix`, and the
-  transport-dispatching `serve(Transport)`. These build a Tokio runtime
-  internally, so a simple binary's `main` needs no `async`. They block until the
-  transport finishes.
-- **Async first-class** — `run_async`, `listen_tcp`, `listen_unix`. Use these
-  when you already have a Tokio runtime (as most real applications do) so the
-  server shares it instead of spawning a second one.
+- **Blocking** — `run_stdio`, `run_tcp`, `run_unix`, and `serve(Transport)`.
+  These construct a single-threaded Tokio runtime internally and block until the
+  transport closes.
+- **Async** — `run_async`, `listen_tcp`, `listen_unix`. Use these inside an
+  existing Tokio runtime.
 
 ```rust
 # use llm_tool::ToolRegistry;
 # use llm_tool_mcp::{McpServer, Transport};
 let server = McpServer::new("my-server", "0.1.0", ToolRegistry::new());
 
-// ── Blocking convenience (no async main required) ──
+// ── Blocking (no async main required) ──
 
 // 1. Standard MCP desktop client transport (stdio subprocess):
 // server.run_stdio().expect("stdio server failed");
@@ -89,7 +84,7 @@ let server = McpServer::new("my-server", "0.1.0", ToolRegistry::new());
 // 4. Pick a transport at runtime (e.g. from CLI flags) and serve it:
 let transport = Transport::Tcp("0.0.0.0:8080".parse().unwrap());
 // server.serve(transport).expect("server failed");
-# let _ = transport;
+# assert!(matches!(transport, Transport::Tcp(_)));
 ```
 
 ```rust

@@ -115,16 +115,14 @@ async fn run_tcp_blocking_serves_rmcp_client() {
     let server = test_server();
     // Blocking runner serves forever; detach onto its own thread.
     let handle = std::thread::spawn(move || {
-        // NOLINT: background serve thread — result unused; test controls lifecycle
-        let _ = server.run_tcp(addr);
+        server.run_tcp(addr).expect("tcp server failed");
     });
 
     let mut client = connect_client_tcp(addr).await;
     let tools = client.list_all_tools().await.expect("list tools failed");
     assert_eq!(tools.len(), 3);
 
-    // NOLINT: test cleanup — close errors are non-fatal
-    let _ = client.close().await;
+    client.close().await.expect("client close failed");
     // Detach the forever-serving thread; it is reaped at process exit.
     drop(handle);
 }
@@ -135,16 +133,14 @@ async fn serve_transport_tcp_serves_rmcp_client() {
     let server = test_server();
     let transport = Transport::Tcp(addr);
     let handle = std::thread::spawn(move || {
-        // NOLINT: background serve thread — result unused; test controls lifecycle
-        let _ = server.serve(transport);
+        server.serve(transport).expect("serve failed");
     });
 
     let mut client = connect_client_tcp(addr).await;
     let tools = client.list_all_tools().await.expect("list tools failed");
     assert_eq!(tools.len(), 3);
 
-    // NOLINT: test cleanup — close errors are non-fatal
-    let _ = client.close().await;
+    client.close().await.expect("client close failed");
     drop(handle);
 }
 
@@ -156,8 +152,7 @@ async fn run_unix_blocking_serves_rmcp_client() {
     let server = test_server();
     let thread_path = sock_path.clone();
     let handle = std::thread::spawn(move || {
-        // NOLINT: background serve thread — result unused; test controls lifecycle
-        let _ = server.run_unix(thread_path);
+        server.run_unix(thread_path).expect("unix server failed");
     });
 
     // Retry-connect while the background thread binds the socket.
@@ -166,7 +161,6 @@ async fn run_unix_blocking_serves_rmcp_client() {
     let tools = client.list_all_tools().await.expect("list tools failed");
     assert_eq!(tools.len(), 3);
 
-    // NOLINT: test cleanup — close errors are non-fatal
-    let _ = client.close().await;
+    client.close().await.expect("client close failed");
     drop(handle);
 }

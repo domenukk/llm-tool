@@ -27,7 +27,7 @@ fn middle_out_truncates_and_inserts_marker() {
     assert!(result.len() <= 80);
     assert!(result.starts_with("HEAD_CONTENT"));
     assert!(result.ends_with("TAIL_CONTENT_1234567890"));
-    assert!(result.contains("bytes truncated"));
+    assert!(result.contains("bytes omitted"));
 }
 
 #[test]
@@ -38,7 +38,7 @@ fn utf8_multi_byte_boundaries_preserved() {
     assert!(result.len() <= 90);
     let count = result.chars().count();
     assert!(count > 0);
-    assert!(result.contains("bytes truncated"));
+    assert!(result.contains("bytes omitted"));
 }
 
 #[test]
@@ -68,7 +68,7 @@ fn truncate_output_in_place() {
     let policy = TruncationPolicy::new(100);
     truncate_output(&mut out, &policy);
     assert!(out.content().len() <= 100);
-    assert!(out.content().contains("bytes truncated"));
+    assert!(out.content().contains("bytes omitted"));
 }
 
 #[test]

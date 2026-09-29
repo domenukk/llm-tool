@@ -41,7 +41,7 @@ fn test_no_sink_output_byte_identical_to_pre_change() {
     assert_eq!(result.len(), 80);
     assert_eq!(
         result,
-        "HEAD_CONTENT_1234567890_M\n[... 36 bytes truncated ...]\nT_TAIL_CONTENT_1234567890"
+        "HEAD_CONTENT_1234567890_\n[TRUNCATED: 37 bytes omitted]\nT_TAIL_CONTENT_1234567890"
     );
 
     // Custom marker with deprecated placeholder {count} is also byte-identical
@@ -140,7 +140,12 @@ fn test_line_boundary_never_emits_partial_line() {
     // Split outcome into lines, filtering out marker lines that begin with "[" or whitespace
     for line in outcome.text.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("[...") || trimmed.ends_with("...]") || trimmed.is_empty() {
+        if trimmed.starts_with("[...")
+            || trimmed.starts_with("[TRUNCATED:")
+            || trimmed.ends_with("...]")
+            || trimmed.ends_with("omitted]")
+            || trimmed.is_empty()
+        {
             continue;
         }
         assert!(
@@ -161,7 +166,7 @@ fn test_line_boundary_single_line_degrades_gracefully() {
 
     assert!(outcome.text.len() <= 100);
     assert!(outcome.is_truncated());
-    assert!(outcome.text.contains("bytes truncated"));
+    assert!(outcome.text.contains("bytes omitted"));
 }
 
 #[test]
@@ -229,7 +234,7 @@ fn test_tight_budget_never_truncates_silently() {
     let policy = TruncationPolicy::new(40);
     let text = policy.truncate(&payload);
     assert!(
-        text.contains("truncated"),
+        text.contains("TRUNCATED") || text.contains("omitted"),
         "a tight budget must still announce truncation, got: {text}"
     );
     assert!(text.len() <= 40, "got {} bytes", text.len());
@@ -261,7 +266,7 @@ fn test_spill_failure_marker_omitted_when_no_sink_configured() {
     let payload = "Y".repeat(300);
     let text = policy.truncate(&payload);
 
-    assert!(text.contains("bytes truncated"));
+    assert!(text.contains("bytes omitted"));
     assert!(
         !text.contains("could NOT be retained"),
         "no sink configured means nothing was promised; no failure warning belongs here"
@@ -323,7 +328,7 @@ fn test_sink_configured_default_marker_format() {
 
     assert!(
         outcome.text.contains(
-            "Full output retained as ref=\"obs-test-42\" — recall with read_observation."
+            "Full output retained as ref=\"obs-test-42\" — inspect with read_observation(ref, pattern, offset, length)"
         )
     );
     assert!(outcome.text.contains("bytes omitted"));

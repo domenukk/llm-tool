@@ -2,7 +2,7 @@
 name = "llm-tool"
 version.workspace = true
 edition.workspace = true
-rust-version = "1.95"
+rust-version.workspace = true
 description = "Framework-agnostic Rust tool definitions for LLM agents"
 license.workspace = true
 repository.workspace = true
@@ -17,25 +17,16 @@ std = [
   "serde/std",
   "schemars/std",
   "hashbrown/default",
-  "md-tmpl?/std",
+  "md-tmpl/std",
 ]
-# Enable `#[llm_tool(description_file = "path.tmpl.md")]` or
-# `#[llm_tool(response_file = "path.tmpl.md")]` for template-based
-# tool descriptions and response rendering. Requires `md-tmpl`
-# as a direct dependency for runtime context types (`Context`, `Template`).
-md-tmpl = [
-  "dep:md-tmpl",
-  "dep:md-tmpl-macros",
-  "dep:typed-builder",
-  "llm-tool-macros/md-tmpl",
-]
+# Backwards-compatible no-op feature alias (`md-tmpl` support is always enabled).
+md-tmpl = []
 
 [dependencies]
-llm-tool-macros = { path = "../llm-tool-macros", version = "0.10.2" }
-md-tmpl = { version = "0.10.2", optional = true, default-features = false, features = [
-  "serde",
-] }
-md-tmpl-macros = { version = "0.10.2", optional = true, default-features = false, features = [
+llm-tool-macros = { path = "../llm-tool-macros", version = "0.10.3" }
+md-tmpl-core = { version = "0.10.3", default-features = false }
+md-tmpl = { version = "0.10.3", default-features = false, features = ["serde"] }
+md-tmpl-macros = { version = "0.10.3", default-features = false, features = [
   "serde",
 ] }
 hashbrown = { version = "0.17", default-features = false, features = [
@@ -57,7 +48,7 @@ spin = { version = "0.12", default-features = false, features = [
   "lazy",
 ] }
 tracing = { version = "0.1", default-features = false }
-typed-builder = { version = "0.23", optional = true }
+typed-builder = { version = "0.23" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "sync", "fs"] }

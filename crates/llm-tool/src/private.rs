@@ -26,7 +26,7 @@ pub mod __private {
     #[cfg(not(feature = "std"))]
     pub use spin::LazyLock as Lazy;
 
-    use crate::types::{Json, ToolError, ToolOutput};
+    use crate::types::{Json, Sanitized, ToolError, ToolOutput, Untrusted};
 
     /// Report a runtime tool-description template render failure.
     ///
@@ -78,6 +78,10 @@ pub mod __private {
     }
 
     impl Wrap<&str> {
+        /// `&str` → wrap as plain text (no JSON encoding).
+        pub fn __convert(self) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::new(self.0))
+        }
         pub fn __convert_prompt(self) -> Result<crate::types::PromptOutput, ToolError> {
             Ok(crate::types::PromptOutput::user(self.0))
         }
@@ -87,6 +91,48 @@ pub mod __private {
             mime_type: Option<&str>,
         ) -> Result<crate::types::ResourceOutput, ToolError> {
             Ok(crate::types::ResourceOutput::text(uri, mime_type, self.0))
+        }
+    }
+
+    impl Wrap<Sanitized<ToolOutput>> {
+        /// `Sanitized<ToolOutput>` → neutralize control tokens on the inner `ToolOutput`.
+        pub fn __convert(self) -> Result<ToolOutput, ToolError> {
+            Ok(self.0.0.sanitized())
+        }
+    }
+
+    impl Wrap<Sanitized<String>> {
+        /// `Sanitized<String>` → wrap as plain text and neutralize control tokens.
+        pub fn __convert(self) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::new(self.0.0).sanitized())
+        }
+    }
+
+    impl Wrap<Sanitized<&str>> {
+        /// `Sanitized<&str>` → wrap as plain text and neutralize control tokens.
+        pub fn __convert(self) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::new(self.0.0).sanitized())
+        }
+    }
+
+    impl Wrap<Untrusted<ToolOutput>> {
+        /// `Untrusted<ToolOutput>` → quarantine the inner `ToolOutput`.
+        pub fn __convert(self) -> Result<ToolOutput, ToolError> {
+            Ok(self.0.0.quarantined())
+        }
+    }
+
+    impl Wrap<Untrusted<String>> {
+        /// `Untrusted<String>` → wrap as plain text and quarantine.
+        pub fn __convert(self) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::new(self.0.0).quarantined())
+        }
+    }
+
+    impl Wrap<Untrusted<&str>> {
+        /// `Untrusted<&str>` → wrap as plain text and quarantine.
+        pub fn __convert(self) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::new(self.0.0).quarantined())
         }
     }
 
@@ -106,19 +152,37 @@ pub mod __private {
         }
     }
 
+    fn serialize_to_tool_output<T: serde::Serialize>(val: &T) -> Result<ToolOutput, ToolError> {
+        let json_value = serde_json::to_value(val)
+            .map_err(|e| ToolError::new(format!("serialization failed: {e}")))?;
+        let content = json_value.to_string();
+        match json_value {
+            serde_json::Value::Object(map) => Ok(ToolOutput {
+                content,
+                metadata: map.into_iter().collect(),
+            }),
+            _ => Ok(ToolOutput::new(content)),
+        }
+    }
+
     impl<T: serde::Serialize> Wrap<Json<T>> {
         /// `Json<T>` → serialize to JSON string.
         pub fn __convert(self) -> Result<ToolOutput, ToolError> {
-            let json_value = serde_json::to_value(&self.0.0)
-                .map_err(|e| ToolError::new(format!("serialization failed: {e}")))?;
-            let content = json_value.to_string();
-            match json_value {
-                serde_json::Value::Object(map) => Ok(ToolOutput {
-                    content,
-                    metadata: map.into_iter().collect(),
-                }),
-                _ => Ok(ToolOutput::new(content)),
-            }
+            serialize_to_tool_output(&self.0.0)
+        }
+    }
+
+    impl<T: serde::Serialize> Wrap<Sanitized<Json<T>>> {
+        /// `Sanitized<Json<T>>` → serialize to JSON string and neutralize control tokens.
+        pub fn __convert(self) -> Result<ToolOutput, ToolError> {
+            serialize_to_tool_output(&Sanitized(self.0.0.0)).map(ToolOutput::sanitized)
+        }
+    }
+
+    impl<T: serde::Serialize> Wrap<Untrusted<Json<T>>> {
+        /// `Untrusted<Json<T>>` → serialize to JSON string and quarantine.
+        pub fn __convert(self) -> Result<ToolOutput, ToolError> {
+            serialize_to_tool_output(&self.0.0.0).map(ToolOutput::quarantined)
         }
     }
 
@@ -126,26 +190,32 @@ pub mod __private {
 
     /// Fallback conversion for any `T: Serialize` not covered by inherent methods.
     ///
-    /// The compiler checks inherent methods first, so `String` and `ToolOutput`
-    /// use their inherent impls. Everything else falls through to this trait,
-    /// which serializes the value to JSON.
+    /// Method resolution checks:
+    /// 1. Inherent methods on `Wrap<...>` (`ToolOutput`, `String`, `&str`, `Json<T>`,
+    ///    and their `Sanitized<...>` / `Untrusted<...>` counterparts).
+    /// 2. Value-receiver `SerializeFallback` impls on `Wrap<Sanitized<T>>` and
+    ///    `Wrap<Untrusted<T>>` for arbitrary `T: Serialize`.
+    /// 3. Autoref-receiver `SerializeFallback` impl on `&Wrap<T>` for arbitrary `T: Serialize`.
     pub trait SerializeFallback {
         /// Serialize `self` to JSON and wrap as [`ToolOutput`].
         fn __convert(self) -> Result<ToolOutput, ToolError>;
     }
 
-    impl<T: serde::Serialize> SerializeFallback for Wrap<T> {
+    impl<T: serde::Serialize> SerializeFallback for Wrap<Sanitized<T>> {
         fn __convert(self) -> Result<ToolOutput, ToolError> {
-            let json_value = serde_json::to_value(&self.0)
-                .map_err(|e| ToolError::new(format!("serialization failed: {e}")))?;
-            let content = json_value.to_string();
-            match json_value {
-                serde_json::Value::Object(map) => Ok(ToolOutput {
-                    content,
-                    metadata: map.into_iter().collect(),
-                }),
-                _ => Ok(ToolOutput::new(content)),
-            }
+            serialize_to_tool_output(&self.0).map(ToolOutput::sanitized)
+        }
+    }
+
+    impl<T: serde::Serialize> SerializeFallback for Wrap<Untrusted<T>> {
+        fn __convert(self) -> Result<ToolOutput, ToolError> {
+            serialize_to_tool_output(&self.0.0).map(ToolOutput::quarantined)
+        }
+    }
+
+    impl<T: serde::Serialize> SerializeFallback for &Wrap<T> {
+        fn __convert(self) -> Result<ToolOutput, ToolError> {
+            serialize_to_tool_output(&self.0)
         }
     }
 }

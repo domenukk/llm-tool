@@ -28,11 +28,11 @@ jobs:
       - name: Hygiene checks
         run: python3 scripts/lint_hygiene.py
 
-      - name: Test (default features)
+      - name: Test
         run: cargo test --workspace
 
-      - name: Test (all features)
-        run: cargo test --workspace --all-features
+      - name: Check no_std (core crate)
+        run: cargo check -p llm-tool --no-default-features
 
   clippy:
     name: Clippy
@@ -43,14 +43,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: thumbv7em-none-eabihf
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Clippy (default features)
+      - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Clippy (all features)
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Build no_std (thumbv7em-none-eabihf)
+        run: cargo build -p llm-tool --no-default-features --target thumbv7em-none-eabihf
 
   fmt:
     name: Formatting
@@ -77,9 +78,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build docs (default)
+      - name: Build docs
         run: cargo doc --workspace --no-deps
-
-      - name: Build docs (all features)
-        run: cargo doc --workspace --all-features --no-deps
 

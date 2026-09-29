@@ -80,8 +80,10 @@ async fn rmcp_client_prompts_resources_integration_test() {
 
     tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(server_r);
-        // NOLINT: test background task — server result unused; test controls lifecycle
-        let _ = server.run_async(&mut reader, server_w).await;
+        server
+            .run_async(&mut reader, server_w)
+            .await
+            .expect("async server failed");
     });
 
     let mut client = rmcp::service::serve_client((), client_io)
@@ -159,6 +161,5 @@ async fn rmcp_client_prompts_resources_integration_test() {
         other => panic!("expected McpError with INVALID_PARAMS, got {other:?}"),
     }
 
-    // NOLINT: test cleanup — close errors are non-fatal
-    let _ = client.close().await;
+    client.close().await.expect("client close failed");
 }

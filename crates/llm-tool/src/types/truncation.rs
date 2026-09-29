@@ -8,6 +8,7 @@
 //! splitting multi-byte code points or emitting partial lines.
 
 pub mod alignment;
+pub mod chars;
 pub mod outcome;
 pub mod placeholder;
 pub mod policy;
@@ -15,6 +16,7 @@ pub mod ratio;
 pub mod sink;
 
 pub use alignment::*;
+pub use chars::*;
 pub use outcome::*;
 pub use placeholder::*;
 pub use policy::*;
