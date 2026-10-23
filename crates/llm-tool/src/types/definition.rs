@@ -120,7 +120,7 @@ impl<'de> Deserialize<'de> for ToolDefinition {
 
 impl ToolDefinition {
     /// Construct a [`ToolDefinition`] with default [`ToolEffect::Mutating`]
-    /// and [`OutputSanitization::None`].
+    /// and the secure default [`OutputSanitization::SanitizeTokens`].
     #[must_use]
     pub fn new(
         name: impl Into<String>,
@@ -156,7 +156,7 @@ impl ToolDefinition {
             description: description.into(),
             parameter_schema,
             effect,
-            output_sanitization: OutputSanitization::None,
+            output_sanitization: OutputSanitization::default(),
             parameter_schema_json: OnceLock::new(),
         }
     }

@@ -46,12 +46,17 @@ pub use md_tmpl_core::{
 
 /// Automatic prompt-injection sanitization policy applied to tool outputs.
 ///
-/// Can be configured on tool definitions via:
-/// - `#[llm_tool(sanitize = true)]` or `#[llm_tool(sanitization = "sanitize_tokens")]`
-/// - `#[llm_tool(quarantine = true)]` or `#[llm_tool(sanitization = "quarantine")]`
-/// - [`RustTool::SANITIZE_OUTPUT`](crate::RustTool::SANITIZE_OUTPUT),
-///   [`RustTool::QUARANTINE_OUTPUT`](crate::RustTool::QUARANTINE_OUTPUT), or
-///   [`RustTool::OUTPUT_SANITIZATION`](crate::RustTool::OUTPUT_SANITIZATION)
+/// **Secure by default:** the default is [`OutputSanitization::SanitizeTokens`].
+/// Raw, unmodified output requires an explicit opt-out.
+///
+/// Configure it on a tool via:
+/// - `#[llm_tool(quarantine)]` / `#[llm_tool(sanitize = "tag")]` for stronger envelopes
+/// - `#[llm_tool(sanitization = "none")]` (or `sanitize = false`) to opt out
+/// - [`RustTool::OUTPUT_SANITIZATION`](crate::RustTool::OUTPUT_SANITIZATION) on manual impls
+///
+/// [`ToolRegistry::with_output_floor`](crate::ToolRegistry::with_output_floor) enforces a
+/// registry-wide minimum (also `SanitizeTokens` by default), so a single tool that opts out
+/// still gets the floor unless the registry floor is lowered too.
 ///
 /// Or on individual return values / struct fields via [`Sanitized<T>`](super::Sanitized)
 /// and [`Untrusted<T>`](super::Untrusted) ([`Quarantined<T>`](super::Quarantined)).
@@ -60,12 +65,12 @@ pub use md_tmpl_core::{
 )]
 #[serde(rename_all = "snake_case")]
 pub enum OutputSanitization {
-    /// Do not automatically modify the tool output (default).
-    #[default]
+    /// Do not modify the tool output. Must be chosen explicitly.
     None,
     /// Neutralize all known LLM control/turn/tool delimiters ([`DELIMITER_RULES`])
     /// and breakout tags in-place without adding outer XML boundary tags (already-valid
-    /// boundary envelopes are preserved unchanged).
+    /// boundary envelopes are preserved unchanged). This is the default.
+    #[default]
     SanitizeTokens,
     /// Neutralize all known LLM control/turn/tool delimiters ([`DELIMITER_RULES`])
     /// and idempotently wrap the output in a `<tool_output_quarantine>` XML envelope
@@ -113,6 +118,28 @@ impl<'de> serde::Deserialize<'de> for OutputSanitization {
 }
 
 impl OutputSanitization {
+    /// Protection level used to compare policies: raw < token-neutralized < enveloped.
+    const fn protection_level(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::SanitizeTokens => 1,
+            Self::Quarantine | Self::SanitizeTagged(_) | Self::SanitizeWithNotice { .. } => 2,
+        }
+    }
+
+    /// Return the more protective of `self` and `floor`.
+    ///
+    /// Ties keep `self`, so a tool's own envelope (e.g. a custom tag) is never
+    /// replaced by an equally strong floor.
+    #[must_use]
+    pub const fn at_least(self, floor: Self) -> Self {
+        if floor.protection_level() > self.protection_level() {
+            floor
+        } else {
+            self
+        }
+    }
+
     /// Returns `true` if the policy is [`OutputSanitization::None`].
     #[must_use]
     pub const fn is_none(&self) -> bool {

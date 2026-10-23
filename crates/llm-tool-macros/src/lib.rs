@@ -213,8 +213,8 @@ pub(crate) enum MacroToolEffect {
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub(crate) enum MacroOutputSanitization {
-    #[default]
     None,
+    #[default]
     SanitizeTokens,
     Quarantine,
     SanitizeTagged(syn::LitStr),
@@ -750,7 +750,7 @@ impl ToolAttrBuilder {
 
         let sanitization = self
             .sanitization
-            .map_or(MacroOutputSanitization::None, |(mode, _)| mode);
+            .map_or_else(MacroOutputSanitization::default, |(mode, _)| mode);
 
         Ok(ToolAttr {
             description_inline: self.description_inline,
@@ -913,7 +913,7 @@ fn resolve_effect_and_sanitization_tokens(
     };
     let idempotent_bool = attr.is_some_and(|a| a.idempotent);
 
-    let san_val = attr.map_or(MacroOutputSanitization::None, |a| a.sanitization.clone());
+    let san_val = attr.map_or_else(MacroOutputSanitization::default, |a| a.sanitization.clone());
     let san_tokens = match &san_val {
         MacroOutputSanitization::None => quote!(#crate_path::OutputSanitization::None),
         MacroOutputSanitization::SanitizeTokens => {
@@ -927,7 +927,7 @@ fn resolve_effect_and_sanitization_tokens(
             quote!(#crate_path::OutputSanitization::SanitizeWithNotice { tag: #tag, notice: #notice })
         }
     };
-    let sanitize_bool = matches!(san_val, MacroOutputSanitization::SanitizeTokens);
+    let sanitize_bool = !matches!(san_val, MacroOutputSanitization::None);
     let quarantine_bool = matches!(
         san_val,
         MacroOutputSanitization::Quarantine

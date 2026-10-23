@@ -197,11 +197,27 @@ includes an explicit notice.
 Sanitize untrusted tool outputs to neutralize `ChatML`, Llama, Harmony, and
 `DeepSeek` control tokens, preventing indirect prompt injection attacks.
 
+#### Secure by Default
+
+Every tool output is sanitized unless you opt out. Tools default to
+`OutputSanitization::SanitizeTokens` (control tokens neutralized in place), and
+`ToolRegistry` enforces the same minimum on every dispatch, so a single tool
+that opts out still gets sanitized:
+
+| Goal                                  | Setting                                                                                    |
+| ------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Default (neutralize control tokens)   | nothing to do                                                                              |
+| Wrap untrusted content in an envelope | `#[llm_tool(quarantine)]` or `#[llm_tool(sanitize = "tag")]`                               |
+| Raise the minimum for all tools       | `ToolRegistry::new().with_output_floor(OutputSanitization::Quarantine)`                    |
+| Raw output (trusted content only)     | `#[llm_tool(sanitization = "none")]` **and** `with_output_floor(OutputSanitization::None)` |
+
+Manual `RustTool` impls can keep using the `SANITIZE_OUTPUT` /
+`QUARANTINE_OUTPUT` shorthands; `SANITIZE_OUTPUT` now defaults to `true`.
+
 #### Declarative Output Sanitization
 
-Mark tools that return untrusted external data with `#[llm_tool(sanitize)]`
-(in-place delimiter neutralization) or `#[llm_tool(sanitize = "tag")]` (wraps in
-`<tag>` with an explicit boundary notice):
+Wrap untrusted external data with `#[llm_tool(sanitize = "tag")]` (wraps in
+`<tag>` with an explicit boundary notice) or `#[llm_tool(quarantine)]`:
 
 ```rust
 use llm_tool::{llm_tool, ToolContext, ToolRegistry};

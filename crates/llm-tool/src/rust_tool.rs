@@ -78,17 +78,25 @@ pub trait RustTool: Send + Sync {
     /// Whether the tool is idempotent / read-only safe for concurrent wave execution.
     const IDEMPOTENT: bool = false;
 
-    /// Whether the tool output should have control tokens neutralized (`OutputSanitization::SanitizeTokens`).
-    const SANITIZE_OUTPUT: bool = false;
+    /// Shorthand: neutralize control tokens in this tool's output.
+    ///
+    /// Defaults to `true` (secure by default). Set to `false` to opt out, or prefer
+    /// setting [`Self::OUTPUT_SANITIZATION`] directly.
+    const SANITIZE_OUTPUT: bool = true;
 
-    /// Whether the tool output should be quarantined (`OutputSanitization::Quarantine`).
+    /// Shorthand: wrap this tool's output in a `<tool_output_quarantine>` envelope.
+    ///
+    /// Takes precedence over [`Self::SANITIZE_OUTPUT`]. Prefer setting
+    /// [`Self::OUTPUT_SANITIZATION`] directly.
     const QUARANTINE_OUTPUT: bool = false;
 
     /// Automatic prompt-injection sanitization policy applied to this tool's output.
     ///
-    /// Defaults to [`OutputSanitization::Quarantine`] if [`Self::QUARANTINE_OUTPUT`] is `true`,
-    /// [`OutputSanitization::SanitizeTokens`] if [`Self::SANITIZE_OUTPUT`] is `true`, or
-    /// [`OutputSanitization::None`] otherwise.
+    /// Derived from the shorthands: [`OutputSanitization::Quarantine`] if
+    /// [`Self::QUARANTINE_OUTPUT`], else [`OutputSanitization::SanitizeTokens`] if
+    /// [`Self::SANITIZE_OUTPUT`] (the default), else [`OutputSanitization::None`].
+    /// Override it to pick a tagged envelope, or [`OutputSanitization::None`] only for
+    /// output you fully control.
     const OUTPUT_SANITIZATION: OutputSanitization = if Self::QUARANTINE_OUTPUT {
         OutputSanitization::Quarantine
     } else if Self::SANITIZE_OUTPUT {

@@ -623,21 +623,16 @@ fn llm_tool_macro_sanitize_and_quarantine_metadata() {
     use crate::{OutputSanitization, RustTool, ToolEffect};
 
     assert_eq!(ReadUntrustedLog::EFFECT, ToolEffect::ReadOnly);
-    const { assert!(ReadUntrustedLog::SANITIZE_OUTPUT) };
-    const { assert!(!ReadUntrustedLog::QUARANTINE_OUTPUT) };
     assert_eq!(
         ReadUntrustedLog::OUTPUT_SANITIZATION,
         OutputSanitization::SanitizeTokens
     );
 
-    const { assert!(FetchUntrustedPage::QUARANTINE_OUTPUT) };
-    const { assert!(!FetchUntrustedPage::SANITIZE_OUTPUT) };
     assert_eq!(
         FetchUntrustedPage::OUTPUT_SANITIZATION,
         OutputSanitization::Quarantine
     );
 
-    const { assert!(ExplicitSanitizeMode::SANITIZE_OUTPUT) };
     assert_eq!(
         ExplicitSanitizeMode::OUTPUT_SANITIZATION,
         OutputSanitization::SanitizeTokens
@@ -798,27 +793,21 @@ fn llm_tool_bare_and_tagged_sanitize_metadata() {
 
     assert_eq!(BareSanitize::EFFECT, ToolEffect::ReadOnly);
     const { assert!(BareSanitize::IDEMPOTENT) };
-    const { assert!(BareSanitize::SANITIZE_OUTPUT) };
-    const { assert!(!BareSanitize::QUARANTINE_OUTPUT) };
     assert_eq!(
         BareSanitize::OUTPUT_SANITIZATION,
         OutputSanitization::SanitizeTokens
     );
 
-    const { assert!(BareQuarantine::QUARANTINE_OUTPUT) };
-    const { assert!(!BareQuarantine::SANITIZE_OUTPUT) };
     assert_eq!(
         BareQuarantine::OUTPUT_SANITIZATION,
         OutputSanitization::Quarantine
     );
 
-    const { assert!(TaggedSanitize::QUARANTINE_OUTPUT) };
     assert_eq!(
         TaggedSanitize::OUTPUT_SANITIZATION,
         OutputSanitization::SanitizeTagged("user_query")
     );
 
-    const { assert!(CustomNoticeSanitize::QUARANTINE_OUTPUT) };
     assert_eq!(
         CustomNoticeSanitize::OUTPUT_SANITIZATION,
         OutputSanitization::SanitizeWithNotice {

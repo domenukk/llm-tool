@@ -11,7 +11,7 @@ pub use batch::{
 
 use super::{
     rust_tool::{ErasedTool, RustTool, definition_of},
-    types::{RegistryItem, ToolContext, ToolDefinition, ToolError, ToolOutput},
+    types::{OutputSanitization, RegistryItem, ToolContext, ToolDefinition, ToolError, ToolOutput},
 };
 use crate::{
     compat::{HashMap, RwLock, read_lock_recover, write_lock_recover},
@@ -33,9 +33,14 @@ struct RegisteredTool {
 ///
 /// Holds type-erased tool implementations and cached [`ToolDefinition`](super::types::ToolDefinition)
 /// schemas for fast lookup and execution.
+///
+/// Every dispatched output is sanitized with at least the registry's
+/// [`output_floor`](Self::output_floor) (default [`OutputSanitization::SanitizeTokens`]),
+/// even if an individual tool opted out.
 pub struct ToolRegistry {
     tools: HashMap<&'static str, RegisteredTool>,
     cached_definitions: RwLock<Option<Arc<[ToolDefinition]>>>,
+    output_floor: OutputSanitization,
 }
 
 impl core::fmt::Debug for ToolRegistry {
@@ -48,6 +53,7 @@ impl core::fmt::Debug for ToolRegistry {
         f.debug_struct("ToolRegistry")
             .field("tool_count", &self.tools.len())
             .field("tool_names", &names)
+            .field("output_floor", &self.output_floor)
             .finish_non_exhaustive()
     }
 }
@@ -65,7 +71,53 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
             cached_definitions: RwLock::new(None),
+            output_floor: OutputSanitization::default(),
         }
+    }
+
+    /// Set the minimum [`OutputSanitization`] enforced on every dispatched tool output.
+    ///
+    /// The effective policy per call is the tool's own policy raised to at least this
+    /// floor ([`OutputSanitization::at_least`]). Lowering it to
+    /// [`OutputSanitization::None`] restores raw passthrough for tools that opt out.
+    #[must_use]
+    pub const fn with_output_floor(mut self, floor: OutputSanitization) -> Self {
+        self.output_floor = floor;
+        self
+    }
+
+    /// In-place variant of [`with_output_floor`](Self::with_output_floor).
+    pub const fn set_output_floor(&mut self, floor: OutputSanitization) -> &mut Self {
+        self.output_floor = floor;
+        self
+    }
+
+    /// The minimum [`OutputSanitization`] enforced on every dispatched tool output.
+    #[must_use]
+    pub const fn output_floor(&self) -> OutputSanitization {
+        self.output_floor
+    }
+
+    /// The policy actually applied to `name`'s output: its own policy raised to the floor.
+    ///
+    /// Returns `None` if no tool named `name` is registered.
+    #[must_use]
+    pub fn effective_output_sanitization(&self, name: &str) -> Option<OutputSanitization> {
+        self.definition(name)
+            .map(|def| def.output_sanitization.at_least(self.output_floor))
+    }
+
+    /// Raise `future`'s output to the registry floor when the tool's own policy is weaker.
+    fn enforce_output_floor<'a>(
+        &self,
+        tool_policy: OutputSanitization,
+        future: BoxToolFuture<'a>,
+    ) -> BoxToolFuture<'a> {
+        let effective = tool_policy.at_least(self.output_floor);
+        if effective == tool_policy {
+            return future;
+        }
+        Box::pin(async move { future.await.map(|output| effective.apply(output)) })
     }
 
     fn invalidate_cache(&self) {
@@ -171,7 +223,8 @@ impl ToolRegistry {
         let Some(entry) = self.tools.get(name) else {
             return Err(ToolError::not_found(RegistryItem::Tool, name));
         };
-        Ok(entry.erased.call_erased(args, ctx))
+        let future = entry.erased.call_erased(args, ctx);
+        Ok(self.enforce_output_floor(entry.definition.output_sanitization, future))
     }
 
     /// Dispatch a tool call by name with a raw JSON arguments string,
@@ -189,7 +242,8 @@ impl ToolRegistry {
         let Some(entry) = self.tools.get(name) else {
             return Err(ToolError::not_found(RegistryItem::Tool, name));
         };
-        Ok(entry.erased.call_erased_str(args_json, ctx))
+        let future = entry.erased.call_erased_str(args_json, ctx);
+        Ok(self.enforce_output_floor(entry.definition.output_sanitization, future))
     }
 
     /// Dispatch a tool call by name with raw JSON arguments and a context.
