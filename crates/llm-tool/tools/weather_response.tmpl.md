@@ -2,9 +2,9 @@
 name: weather_response
 description: Response template for the get_weather tool
 params:
-  - city = str
+  - city = untrusted str
   - temp_f = int
-  - condition = str
+  - condition = untrusted str
   - humidity = int
 ---
 
