@@ -130,6 +130,19 @@ impl ToolDefinition {
         Self::with_effect(name, description, parameter_schema, ToolEffect::Mutating)
     }
 
+    /// Construct a [`ToolDefinition`] directly from a parameter struct `T` implementing [`schemars::JsonSchema`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`serde_json::Error`] if the generated schema cannot be converted to a JSON value.
+    pub fn from_schema<T: schemars::JsonSchema>(
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Result<Self, serde_json::Error> {
+        let parameter_schema = serde_json::to_value(schemars::schema_for!(T))?;
+        Ok(Self::new(name, description, parameter_schema))
+    }
+
     /// Construct a [`ToolDefinition`] with an explicit [`ToolEffect`].
     #[must_use]
     pub fn with_effect(
@@ -195,5 +208,35 @@ impl ToolDefinition {
     #[must_use]
     pub const fn is_idempotent(&self) -> bool {
         matches!(self.effect, ToolEffect::ReadOnly)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(schemars::JsonSchema, serde::Deserialize)]
+    struct LookupParams {
+        path: String,
+        max_lines: u32,
+    }
+
+    #[test]
+    fn from_schema_derives_typed_parameter_schema() {
+        let def = ToolDefinition::from_schema::<LookupParams>("lookup", "Look up a file")
+            .expect("schema serializes");
+        assert_eq!(def.name, "lookup");
+        assert_eq!(def.description, "Look up a file");
+        let props = def.parameter_schema["properties"]
+            .as_object()
+            .expect("object schema has properties");
+        assert!(props.contains_key("path"));
+        assert!(props.contains_key("max_lines"));
+        assert!(def.parameter_schema_json().contains("\"max_lines\""));
+
+        let parsed: LookupParams =
+            serde_json::from_str(r#"{"path":"src/lib.rs","max_lines":40}"#).expect("valid args");
+        assert_eq!(parsed.path, "src/lib.rs");
+        assert_eq!(parsed.max_lines, 40);
     }
 }

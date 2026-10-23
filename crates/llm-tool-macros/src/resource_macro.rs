@@ -252,6 +252,24 @@ pub fn resource_impl(func: &ItemFn, attr: &ResourceAttr) -> syn::Result<TokenStr
         })
         .collect();
 
+    let read_method = if func.sig.asyncness.is_some() {
+        quote! {
+            async fn read(&self, __uri: &str, __params: Self::Params) -> ::core::result::Result<#crate_path::ResourceOutput, #crate_path::ToolError> {
+                let #params_name { #( #mut_tokens #param_names, )* } = __params;
+                #( #borrow_bindings )*
+                #body_tokens
+            }
+        }
+    } else {
+        quote! {
+            fn read(&self, __uri: &str, __params: Self::Params) -> ::core::future::Ready<::core::result::Result<#crate_path::ResourceOutput, #crate_path::ToolError>> {
+                let #params_name { #( #mut_tokens #param_names, )* } = __params;
+                #( #borrow_bindings )*
+                ::core::future::ready({ #body_tokens })
+            }
+        }
+    };
+
     Ok(quote! {
         #dep_tracking
         #helper_tokens
@@ -277,11 +295,7 @@ pub fn resource_impl(func: &ItemFn, attr: &ResourceAttr) -> syn::Result<TokenStr
 
             #description_method
 
-            async fn read(&self, __uri: &str, __params: Self::Params) -> ::core::result::Result<#crate_path::ResourceOutput, #crate_path::ToolError> {
-                let #params_name { #( #mut_tokens #param_names, )* } = __params;
-                #( #borrow_bindings )*
-                #body_tokens
-            }
+            #read_method
         }
     })
 }

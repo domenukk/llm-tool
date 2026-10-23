@@ -943,6 +943,30 @@ fn resolve_effect_and_sanitization_tokens(
     )
 }
 
+fn build_tool_call_method(
+    is_async: bool,
+    crate_path: &proc_macro2::TokenStream,
+    inner: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    if is_async {
+        quote! {
+            async fn call(&self, params: Self::Params, _ctx: &#crate_path::ToolContext) -> ::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError> {
+                #inner
+                __raw_res.map(|__out| Self::OUTPUT_SANITIZATION.apply(__out))
+            }
+        }
+    } else {
+        quote! {
+            fn call(&self, params: Self::Params, _ctx: &#crate_path::ToolContext) -> ::core::future::Ready<::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError>> {
+                ::core::future::ready((|| -> ::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError> {
+                    #inner
+                    __raw_res.map(|__out| Self::OUTPUT_SANITIZATION.apply(__out))
+                })())
+            }
+        }
+    }
+}
+
 fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2::TokenStream> {
     let crate_path = quote! { ::llm_tool };
     let fn_name = &func.sig.ident;
@@ -951,7 +975,6 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
     let struct_name = format_ident!("{}", tool_name_str.to_case(Case::Pascal));
     let params_name = format_ident!("{}Params", struct_name);
 
-    // Resolve description: template file OR doc comment.
     let DescriptionInfo {
         static_description,
         helper_tokens,
@@ -959,16 +982,11 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
         dep_tracking,
     } = resolve_description(func, attr)?;
 
-    // Resolve response template (if provided).
     let response_info = resolve_response_template(attr, &struct_name, fn_name)?;
-
-    // Extract parameters, separating ToolContext from regular params.
     let all_params = extract_params(func, MACRO_LLM_TOOL)?;
     validate_params(&all_params, &func.sig)?;
     let ctx_param = all_params.iter().find(|p| p.is_context);
     let params: Vec<&ParamInfo> = all_params.iter().filter(|p| !p.is_context).collect();
-
-    // Parse return type: either Result<T, E> or bare T.
     let return_info = parse_return_type(func, MACRO_LLM_TOOL)?;
 
     let param_names: Vec<_> = params.iter().map(|p| &p.name).collect();
@@ -982,14 +1000,11 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
     let body_tokens = build_body_tokens(func, &return_info, &crate_path, &response_info);
 
     let vis = &func.vis;
-
     let params_doc = format!("Auto-generated parameters for the [`{struct_name}`] tool.");
     let struct_doc = format!(
         "Auto-generated tool struct. See the `#[llm_tool]`-annotated function `{fn_name}` for the implementation."
     );
 
-    // If the user's function takes a ToolContext parameter, bind it from the
-    // `_ctx` reference provided by the RustTool::call signature.
     let ctx_binding = if let Some(cp) = ctx_param {
         let ctx_name = &cp.name;
         quote! { let #ctx_name = _ctx; }
@@ -1012,6 +1027,18 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
     let response_helper_tokens = &response_info.helper_tokens;
     let (effect_tokens, idempotent_bool, san_tokens, sanitize_bool, quarantine_bool) =
         resolve_effect_and_sanitization_tokens(attr, &crate_path);
+
+    let call_inner = quote! {
+        use #crate_path::__private::SerializeFallback as _;
+        let #params_name { #( #mut_tokens #param_names, )* } = params;
+        #( #borrow_bindings )*
+        #ctx_binding
+        let __raw_res: ::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError> = {
+            #body_tokens
+        };
+    };
+    let call_method =
+        build_tool_call_method(func.sig.asyncness.is_some(), &crate_path, &call_inner);
 
     Ok(quote! {
         #dep_tracking
@@ -1044,22 +1071,7 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
 
             #description_method
 
-            async fn call(&self, params: Self::Params, _ctx: &#crate_path::ToolContext) -> ::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError> {
-
-                // Import the fallback trait so `Wrap<T>::__convert()` resolves
-                // for `T: Serialize` types that lack an inherent `__convert`.
-                use #crate_path::__private::SerializeFallback as _;
-                // Destructure params into local bindings matching the original
-                // function signature.
-                let #params_name { #( #mut_tokens #param_names, )* } = params;
-                // Auto-borrow &str params from their owned String fields.
-                #( #borrow_bindings )*
-                #ctx_binding
-                let __raw_res: ::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError> = {
-                    #body_tokens
-                };
-                __raw_res.map(|__out| Self::OUTPUT_SANITIZATION.apply(__out))
-            }
+            #call_method
         }
     })
 }

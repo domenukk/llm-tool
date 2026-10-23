@@ -22,6 +22,34 @@ fn build_prompt_body_tokens(
     crate::helpers::build_wrapped_body(func, return_info, &ok_expr)
 }
 
+fn build_prompt_render_method(
+    is_async: bool,
+    crate_path: &TokenStream,
+    params_name: &syn::Ident,
+    mut_tokens: &[TokenStream],
+    param_names: &[&syn::Ident],
+    borrow_bindings: &[TokenStream],
+    body_tokens: &TokenStream,
+) -> TokenStream {
+    if is_async {
+        quote! {
+            async fn render(&self, params: Self::Params) -> ::core::result::Result<#crate_path::PromptOutput, #crate_path::ToolError> {
+                let #params_name { #( #mut_tokens #param_names, )* } = params;
+                #( #borrow_bindings )*
+                #body_tokens
+            }
+        }
+    } else {
+        quote! {
+            fn render(&self, params: Self::Params) -> ::core::future::Ready<::core::result::Result<#crate_path::PromptOutput, #crate_path::ToolError>> {
+                let #params_name { #( #mut_tokens #param_names, )* } = params;
+                #( #borrow_bindings )*
+                ::core::future::ready({ #body_tokens })
+            }
+        }
+    }
+}
+
 pub fn prompt_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<TokenStream> {
     let crate_path = quote! { ::llm_tool };
     let fn_name = &func.sig.ident;
@@ -54,7 +82,6 @@ pub fn prompt_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<TokenS
         ));
     }
     let params: Vec<&ParamInfo> = all_params.iter().collect();
-
     for param in &params {
         if param.doc_attrs.is_empty() {
             return Err(syn::Error::new_spanned(
@@ -69,7 +96,6 @@ pub fn prompt_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<TokenS
     }
 
     let return_info = parse_return_type(func, MACRO_LLM_PROMPT)?;
-
     let param_names: Vec<_> = params.iter().map(|p| &p.name).collect();
     let param_descriptions: Vec<String> = params
         .iter()
@@ -97,6 +123,16 @@ pub fn prompt_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<TokenS
         })
         .collect();
 
+    let render_method = build_prompt_render_method(
+        func.sig.asyncness.is_some(),
+        &crate_path,
+        &params_name,
+        &mut_tokens,
+        &param_names,
+        &borrow_bindings,
+        &body_tokens,
+    );
+
     Ok(quote! {
         #dep_tracking
         #helper_tokens
@@ -121,11 +157,7 @@ pub fn prompt_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<TokenS
 
             #description_method
 
-            async fn render(&self, params: Self::Params) -> ::core::result::Result<#crate_path::PromptOutput, #crate_path::ToolError> {
-                let #params_name { #( #mut_tokens #param_names, )* } = params;
-                #( #borrow_bindings )*
-                #body_tokens
-            }
+            #render_method
         }
     })
 }

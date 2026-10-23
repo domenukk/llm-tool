@@ -6,6 +6,7 @@ Run via `just lint-hygiene` or directly: `python3 scripts/lint_hygiene.py`
 Exit code 0 = clean, 1 = violations found.
 """
 
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -334,6 +335,7 @@ def run_long_file_check() -> bool:
 
 
 def main() -> int:
+    os.chdir(Path(__file__).resolve().parent.parent)
     failed = run_pattern_checks()
     failed = run_bare_nolint_check() or failed
     failed = run_long_file_check() or failed

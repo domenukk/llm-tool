@@ -19,7 +19,7 @@ default = []
 md-tmpl = []
 
 [dependencies]
-md-tmpl = { version = "0.10.3" }
+md-tmpl = { version = "0.10.6" }
 hashbrown = { version = "0.17" }
 syn = { version = "2", features = ["full"] }
 quote = "1"
