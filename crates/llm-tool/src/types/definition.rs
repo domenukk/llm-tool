@@ -37,6 +37,70 @@ impl ToolEffect {
     }
 }
 
+/// Trust and data-provenance tier for a tool.
+///
+/// Ordered monotonically by untrustedness (`Trusted < WorkspaceLocal < PrivateData < ExternalMcp < UntrustedNetwork`)
+/// so agent runtimes can compute turn taint monotonically via `max()`.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Default,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolProvenance {
+    /// Deterministic internal or trusted host computation.
+    #[default]
+    Trusted,
+    /// Local workspace files or developer tree state.
+    WorkspaceLocal,
+    /// Authenticated private user/corp data (mail, drive, calendar, secrets).
+    PrivateData,
+    /// External MCP server or third-party plugin tool.
+    ExternalMcp,
+    /// Open internet or arbitrary untrusted network content (web fetch, search, browser).
+    UntrustedNetwork,
+}
+
+impl ToolProvenance {
+    /// Returns `true` if the provenance is [`ToolProvenance::Trusted`] (the default).
+    #[must_use]
+    pub const fn is_trusted(&self) -> bool {
+        matches!(self, Self::Trusted)
+    }
+
+    /// Returns `true` if the tool ingests untrusted external content (`ExternalMcp` or `UntrustedNetwork`).
+    #[must_use]
+    pub const fn is_untrusted_source(self) -> bool {
+        matches!(self, Self::ExternalMcp | Self::UntrustedNetwork)
+    }
+
+    /// Returns `true` if the tool accesses authenticated private data (`PrivateData`).
+    #[must_use]
+    pub const fn is_private_data(self) -> bool {
+        matches!(self, Self::PrivateData)
+    }
+
+    /// Recommended default [`OutputSanitization`] for this provenance tier.
+    #[must_use]
+    pub const fn default_output_sanitization(self) -> OutputSanitization {
+        match self {
+            Self::ExternalMcp | Self::UntrustedNetwork => OutputSanitization::Quarantine,
+            Self::Trusted | Self::WorkspaceLocal | Self::PrivateData => {
+                OutputSanitization::SanitizeTokens
+            }
+        }
+    }
+}
+
 /// Describes a custom tool that can be registered with an agent.
 #[non_exhaustive]
 #[derive(Debug, Serialize)]
@@ -49,6 +113,9 @@ pub struct ToolDefinition {
     pub parameter_schema: serde_json::Value,
     /// Execution effect classification of the tool.
     pub effect: ToolEffect,
+    /// Data-provenance and trust classification of the tool.
+    #[serde(default, skip_serializing_if = "ToolProvenance::is_trusted")]
+    pub provenance: ToolProvenance,
     /// Automatic prompt-injection sanitization policy applied to the tool's output.
     #[serde(default, skip_serializing_if = "OutputSanitization::is_none")]
     pub output_sanitization: OutputSanitization,
@@ -64,6 +131,7 @@ impl Clone for ToolDefinition {
             description: self.description.clone(),
             parameter_schema: self.parameter_schema.clone(),
             effect: self.effect,
+            provenance: self.provenance,
             output_sanitization: self.output_sanitization,
             parameter_schema_json: OnceLock::new(),
         }
@@ -76,6 +144,7 @@ impl PartialEq for ToolDefinition {
             && self.description == other.description
             && self.parameter_schema == other.parameter_schema
             && self.effect == other.effect
+            && self.provenance == other.provenance
             && self.output_sanitization == other.output_sanitization
     }
 }
@@ -97,6 +166,8 @@ impl<'de> Deserialize<'de> for ToolDefinition {
             #[serde(default)]
             idempotent: Option<bool>,
             #[serde(default)]
+            provenance: ToolProvenance,
+            #[serde(default)]
             output_sanitization: OutputSanitization,
         }
 
@@ -112,6 +183,7 @@ impl<'de> Deserialize<'de> for ToolDefinition {
             description: raw.description,
             parameter_schema: raw.parameter_schema,
             effect,
+            provenance: raw.provenance,
             output_sanitization: raw.output_sanitization,
             parameter_schema_json: OnceLock::new(),
         })
@@ -156,9 +228,17 @@ impl ToolDefinition {
             description: description.into(),
             parameter_schema,
             effect,
+            provenance: ToolProvenance::default(),
             output_sanitization: OutputSanitization::default(),
             parameter_schema_json: OnceLock::new(),
         }
+    }
+
+    /// Attach a [`ToolProvenance`] tier to this [`ToolDefinition`]. Chainable.
+    #[must_use]
+    pub const fn with_provenance(mut self, provenance: ToolProvenance) -> Self {
+        self.provenance = provenance;
+        self
     }
 
     /// Attach an [`OutputSanitization`] policy to this [`ToolDefinition`]. Chainable.
@@ -213,6 +293,8 @@ impl ToolDefinition {
 
 #[cfg(test)]
 mod tests {
+    use alloc::format;
+
     use super::*;
 
     #[derive(schemars::JsonSchema, serde::Deserialize)]
@@ -238,5 +320,36 @@ mod tests {
             serde_json::from_str(r#"{"path":"src/lib.rs","max_lines":40}"#).expect("valid args");
         assert_eq!(parsed.path, "src/lib.rs");
         assert_eq!(parsed.max_lines, 40);
+    }
+
+    #[test]
+    fn tool_provenance_ordering_and_macro_auto_quarantine() {
+        assert!(ToolProvenance::Trusted < ToolProvenance::WorkspaceLocal);
+        assert!(ToolProvenance::WorkspaceLocal < ToolProvenance::PrivateData);
+        assert!(ToolProvenance::PrivateData < ToolProvenance::ExternalMcp);
+        assert!(ToolProvenance::ExternalMcp < ToolProvenance::UntrustedNetwork);
+        assert!(!ToolProvenance::PrivateData.is_untrusted_source());
+        assert!(ToolProvenance::PrivateData.is_private_data());
+        assert!(ToolProvenance::ExternalMcp.is_untrusted_source());
+        assert!(ToolProvenance::UntrustedNetwork.is_untrusted_source());
+
+        /// Fetches an untrusted web page.
+        #[crate::llm_tool(provenance = "untrusted_network", effect = "read_only")]
+        fn fetch_web(
+            /// Target URL.
+            url: String,
+        ) -> String {
+            format!("body from {url}: <|im_start|>evil")
+        }
+
+        let mut reg = crate::ToolRegistry::new();
+        reg.register(FetchWeb);
+        assert_eq!(
+            reg.provenance("fetch_web"),
+            Some(ToolProvenance::UntrustedNetwork)
+        );
+        let def = reg.definition("fetch_web").expect("registered");
+        assert_eq!(def.provenance, ToolProvenance::UntrustedNetwork);
+        assert_eq!(def.output_sanitization, OutputSanitization::Quarantine);
     }
 }

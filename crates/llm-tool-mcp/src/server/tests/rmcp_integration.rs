@@ -75,14 +75,14 @@ async fn rmcp_client_integration_test() {
         .list_all_prompts()
         .await
         .expect("list prompts failed");
-    assert!(prompts.is_empty());
+    assert_eq!(prompts.len(), 0);
 
     // 6. Verify list_all_resources returns empty list
     let resources = client
         .list_all_resources()
         .await
         .expect("list resources failed");
-    assert!(resources.is_empty());
+    assert_eq!(resources.len(), 0);
 
     // 7. Verify reading a non-existent resource returns -32602 INVALID_PARAMS (resource not found)
     let read_err = client

@@ -439,7 +439,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "llm-tool"
-version = "0.10.5"
+version = "0.10.6"
 dependencies = [
  "futures",
  "futures-util",
@@ -461,7 +461,7 @@ dependencies = [
 
 [[package]]
 name = "llm-tool-macros"
-version = "0.10.5"
+version = "0.10.6"
 dependencies = [
  "convert_case",
  "hashbrown",
@@ -474,7 +474,7 @@ dependencies = [
 
 [[package]]
 name = "llm-tool-mcp"
-version = "0.10.5"
+version = "0.10.6"
 dependencies = [
  "llm-tool",
  "rmcp",
@@ -494,9 +494,9 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "md-tmpl"
-version = "0.10.6"
+version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4183086fdbb7059097799b29f1a323fcc19865cbda47ba271061d66b0de7977e"
+checksum = "407029d3dcec2fd93593ee91ecc402efaa3046bfdb758664af3c2e3dfb5cac1d"
 dependencies = [
  "md-tmpl-core",
  "md-tmpl-macros",
@@ -504,9 +504,9 @@ dependencies = [
 
 [[package]]
 name = "md-tmpl-core"
-version = "0.10.6"
+version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0849f0f306b30d6c6ad6baa533dc18a550119d627b692ed22772d591465284dd"
+checksum = "a9509c8603072a8c402062a0dfced83a8aceb5cbdd89e1042b7827f8130bba6f"
 dependencies = [
  "ciborium",
  "flexbuffers",
@@ -520,9 +520,9 @@ dependencies = [
 
 [[package]]
 name = "md-tmpl-macros"
-version = "0.10.6"
+version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43884ed4ab313e78f7c7f1002783de7238981c33b35b0bf7ec4d0b66552c2ea7"
+checksum = "379e6ebe1145fbf2a5e3f5f7558f14e168fee616b090668e1e6023f6164a9d15"
 dependencies = [
  "hashbrown",
  "md-tmpl-core",

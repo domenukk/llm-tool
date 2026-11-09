@@ -22,7 +22,7 @@ use crate::{DescriptionInfo, ToolAttr, extract_doc_string};
 ///
 /// All literal types are stringified — md-tmpl's `validate_env_value` then
 /// auto-parses strings into the declared type (int, bool, float).
-pub(crate) fn env_pairs(attr: &ToolAttr) -> Vec<(String, String)> {
+pub fn env_pairs(attr: &ToolAttr) -> Vec<(String, String)> {
     attr.env_vars
         .iter()
         .map(|(k, v)| (k.to_string(), lit_to_string(v)))
@@ -46,7 +46,7 @@ fn lit_to_string(lit: &syn::Lit) -> String {
 ///
 /// Emits string literals regardless of the original literal type —
 /// md-tmpl's proc-macro layer handles the type coercion.
-pub(crate) fn env_tokens(attr: &ToolAttr) -> proc_macro2::TokenStream {
+pub fn env_tokens(attr: &ToolAttr) -> proc_macro2::TokenStream {
     if attr.env_vars.is_empty() {
         return quote! {};
     }
@@ -118,10 +118,7 @@ fn build_context_description_method(
     }
 }
 
-pub(crate) fn resolve_description(
-    func: &ItemFn,
-    attr: Option<&ToolAttr>,
-) -> syn::Result<DescriptionInfo> {
+pub fn resolve_description(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<DescriptionInfo> {
     match attr {
         // Inline description template or string.
         Some(
@@ -159,7 +156,7 @@ pub(crate) fn resolve_description(
 }
 
 /// Resolve dynamic/static description from inline template string.
-pub(crate) fn resolve_inline_description(
+pub fn resolve_inline_description(
     attr: &ToolAttr,
     fn_name: &syn::Ident,
 ) -> syn::Result<DescriptionInfo> {
@@ -167,7 +164,7 @@ pub(crate) fn resolve_inline_description(
 }
 
 /// Read a `.tmpl.md` template file and extract its body as the tool description.
-pub(crate) fn resolve_template_description(
+pub fn resolve_template_description(
     attr: &ToolAttr,
     fn_name: &syn::Ident,
 ) -> syn::Result<DescriptionInfo> {
@@ -180,7 +177,7 @@ pub(crate) fn resolve_template_description(
 /// 1. Static template (no declared variables) → `const DESCRIPTION`
 /// 2. Template + `params(...)` → compile-time render → `const DESCRIPTION`
 /// 3. Template + `context = fn` → runtime render via `description()` method
-pub(crate) fn resolve_template_description_impl(
+pub fn resolve_template_description_impl(
     attr: &ToolAttr,
     fn_name: &syn::Ident,
 ) -> syn::Result<DescriptionInfo> {
@@ -286,7 +283,7 @@ pub(crate) fn resolve_template_description_impl(
 }
 
 /// Implementation of inline template description resolution.
-pub(crate) fn resolve_inline_description_impl(
+pub fn resolve_inline_description_impl(
     attr: &ToolAttr,
     fn_name: &syn::Ident,
 ) -> syn::Result<DescriptionInfo> {
@@ -383,16 +380,16 @@ pub(crate) fn resolve_inline_description_impl(
     }
 }
 
-pub(crate) struct ResolveContextArgs<'a> {
-    pub(crate) attr: &'a ToolAttr,
-    pub(crate) rel_path: &'a str,
-    pub(crate) template_lit: &'a LitStr,
-    pub(crate) source: &'a str,
-    pub(crate) full_path: &'a std::path::Path,
-    pub(crate) body_str: &'a str,
-    pub(crate) has_declarations: bool,
-    pub(crate) dep_tracking: proc_macro2::TokenStream,
-    pub(crate) fn_name: &'a syn::Ident,
+pub struct ResolveContextArgs<'a> {
+    pub attr: &'a ToolAttr,
+    pub rel_path: &'a str,
+    pub template_lit: &'a LitStr,
+    pub source: &'a str,
+    pub full_path: &'a std::path::Path,
+    pub body_str: &'a str,
+    pub has_declarations: bool,
+    pub dep_tracking: proc_macro2::TokenStream,
+    pub fn_name: &'a syn::Ident,
 }
 
 /// Resolve a template description with a runtime context function.
@@ -400,9 +397,7 @@ pub(crate) struct ResolveContextArgs<'a> {
 /// Generates a `description(&self)` method that uses `include_template!` to compile
 /// the template once, then renders it with the user-provided context function
 /// on every call.
-pub(crate) fn resolve_context_description(
-    args: ResolveContextArgs<'_>,
-) -> syn::Result<DescriptionInfo> {
+pub fn resolve_context_description(args: ResolveContextArgs<'_>) -> syn::Result<DescriptionInfo> {
     let ResolveContextArgs {
         attr,
         rel_path,
@@ -525,7 +520,7 @@ fn validate_params_match(
 /// - Every declared template variable has a matching `params(...)` key
 /// - Every `params(...)` key matches a declared template variable
 /// - The template renders without errors
-pub(crate) fn resolve_template_with_params(
+pub fn resolve_template_with_params(
     attr: &ToolAttr,
     fm: &md_tmpl::Frontmatter,
     source: &str,

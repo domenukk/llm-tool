@@ -32,7 +32,7 @@ use tracing::warn;
 // names in scope (via its glob import of this module) as before the split into
 // `builder` / `transport` / `dispatch`.
 #[cfg(test)]
-pub(crate) use crate::protocol::{self, *};
+use crate::protocol::{self, *};
 use crate::protocol::{McpToolSchema, ToolsListResult};
 
 mod builder;
@@ -159,7 +159,7 @@ where
 /// A caller-specific view: the registry to dispatch against plus its
 /// pre-serialized `tools/list` body. Cheap to clone (two `Arc`s).
 #[derive(Clone)]
-pub(crate) struct CallerView {
+struct CallerView {
     registry: Arc<ToolRegistry>,
     tools_list: Arc<serde_json::Value>,
 }
@@ -217,7 +217,7 @@ impl Connection {
         }
     }
 
-    pub(crate) fn get_view(&self) -> Option<CallerView> {
+    fn get_view(&self) -> Option<CallerView> {
         match self.view.lock() {
             Ok(guard) => guard.clone(),
             Err(e) => {
@@ -227,7 +227,7 @@ impl Connection {
         }
     }
 
-    pub(crate) fn set_view(&self, view: Option<CallerView>) {
+    fn set_view(&self, view: Option<CallerView>) {
         match self.view.lock() {
             Ok(mut guard) => *guard = view,
             Err(e) => {
@@ -271,14 +271,10 @@ impl Connection {
                 None
             }
         };
-        if let Some(tx) = tx_opt {
-            match tx.send(()) {
-                Ok(()) => true,
-                Err(()) => false,
-            }
-        } else {
-            false
-        }
+        tx_opt.is_some_and(|tx| match tx.send(()) {
+            Ok(()) => true,
+            Err(()) => false,
+        })
     }
 }
 

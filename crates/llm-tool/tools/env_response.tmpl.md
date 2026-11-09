@@ -6,7 +6,7 @@ env:
   - SERVICE_NAME = str
 
 params:
-  - result = untrusted str
+  - result = str
   - count = int
 ---
 

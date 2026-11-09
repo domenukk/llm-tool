@@ -18,7 +18,7 @@ pub const ATTR_MIME_TYPE: &str = "mime_type";
 pub const ATTR_MIME: &str = "mime";
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub(crate) enum ResourceAttrKey {
+pub enum ResourceAttrKey {
     Uri,
     Name,
     Description,
@@ -30,7 +30,7 @@ pub(crate) enum ResourceAttrKey {
 }
 
 impl ResourceAttrKey {
-    pub(crate) const ALL: &'static [Self] = &[
+    pub const ALL: &'static [Self] = &[
         Self::Uri,
         Self::Name,
         Self::Description,
@@ -41,7 +41,7 @@ impl ResourceAttrKey {
         Self::Context,
     ];
 
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Uri => ATTR_URI,
             Self::Name => ATTR_NAME,
@@ -54,7 +54,7 @@ impl ResourceAttrKey {
         }
     }
 
-    pub(crate) const fn aliases(self) -> &'static [&'static str] {
+    pub const fn aliases(self) -> &'static [&'static str] {
         match self {
             Self::Uri => &[ATTR_URI, ATTR_URI_TEMPLATE],
             Self::Name => &[ATTR_NAME],
@@ -194,6 +194,34 @@ fn build_resource_body_tokens(
     crate::helpers::build_wrapped_body(func, return_info, &ok_expr)
 }
 
+fn build_resource_read_method(
+    is_async: bool,
+    crate_path: &proc_macro2::TokenStream,
+    params_name: &syn::Ident,
+    mut_tokens: &[proc_macro2::TokenStream],
+    param_names: &[&syn::Ident],
+    borrow_bindings: &[proc_macro2::TokenStream],
+    body_tokens: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    if is_async {
+        quote! {
+            async fn read(&self, __uri: &str, __params: Self::Params) -> ::core::result::Result<#crate_path::ResourceOutput, #crate_path::ToolError> {
+                let #params_name { #( #mut_tokens #param_names, )* } = __params;
+                #( #borrow_bindings )*
+                #body_tokens
+            }
+        }
+    } else {
+        quote! {
+            fn read(&self, __uri: &str, __params: Self::Params) -> ::core::future::Ready<::core::result::Result<#crate_path::ResourceOutput, #crate_path::ToolError>> {
+                let #params_name { #( #mut_tokens #param_names, )* } = __params;
+                #( #borrow_bindings )*
+                ::core::future::ready({ #body_tokens })
+            }
+        }
+    }
+}
+
 pub fn resource_impl(func: &ItemFn, attr: &ResourceAttr) -> syn::Result<TokenStream> {
     let crate_path = quote! { ::llm_tool };
     let fn_name = &func.sig.ident;
@@ -213,12 +241,13 @@ pub fn resource_impl(func: &ItemFn, attr: &ResourceAttr) -> syn::Result<TokenStr
     } = crate::resolve_description(func, Some(&attr.tool_attr))?;
 
     let uri_str = attr.uri.value();
-    let mime_expr = if let Some(m) = &attr.mime_type {
-        let val = m.value();
-        quote! { ::core::option::Option::Some(#val) }
-    } else {
-        quote! { ::core::option::Option::None }
-    };
+    let mime_expr = attr.mime_type.as_ref().map_or_else(
+        || quote! { ::core::option::Option::None },
+        |m| {
+            let val = m.value();
+            quote! { ::core::option::Option::Some(#val) }
+        },
+    );
 
     let all_params = extract_params(func, MACRO_LLM_RESOURCE)?;
     if all_params.iter().any(|p| p.is_context) {
@@ -231,6 +260,17 @@ pub fn resource_impl(func: &ItemFn, attr: &ResourceAttr) -> syn::Result<TokenStr
     let return_info = parse_return_type(func, MACRO_LLM_RESOURCE)?;
 
     let param_names: Vec<_> = params.iter().map(|p| &p.name).collect();
+    let param_descriptions: Vec<String> = params
+        .iter()
+        .map(|p| {
+            let doc = crate::extract_doc_string(&p.doc_attrs);
+            if doc.is_empty() {
+                format!("Resource parameter `{}`.", p.name)
+            } else {
+                doc
+            }
+        })
+        .collect();
     let (param_struct_types, borrow_bindings) = build_param_types_and_borrows(&params);
     let serde_defaults = build_serde_defaults(&params);
     let body_tokens = build_resource_body_tokens(func, &return_info, &crate_path);
@@ -252,23 +292,15 @@ pub fn resource_impl(func: &ItemFn, attr: &ResourceAttr) -> syn::Result<TokenStr
         })
         .collect();
 
-    let read_method = if func.sig.asyncness.is_some() {
-        quote! {
-            async fn read(&self, __uri: &str, __params: Self::Params) -> ::core::result::Result<#crate_path::ResourceOutput, #crate_path::ToolError> {
-                let #params_name { #( #mut_tokens #param_names, )* } = __params;
-                #( #borrow_bindings )*
-                #body_tokens
-            }
-        }
-    } else {
-        quote! {
-            fn read(&self, __uri: &str, __params: Self::Params) -> ::core::future::Ready<::core::result::Result<#crate_path::ResourceOutput, #crate_path::ToolError>> {
-                let #params_name { #( #mut_tokens #param_names, )* } = __params;
-                #( #borrow_bindings )*
-                ::core::future::ready({ #body_tokens })
-            }
-        }
-    };
+    let read_method = build_resource_read_method(
+        func.sig.asyncness.is_some(),
+        &crate_path,
+        &params_name,
+        &mut_tokens,
+        &param_names,
+        &borrow_bindings,
+        &body_tokens,
+    );
 
     Ok(quote! {
         #dep_tracking
@@ -278,6 +310,7 @@ pub fn resource_impl(func: &ItemFn, attr: &ResourceAttr) -> syn::Result<TokenStr
         #[derive(::serde::Deserialize)]
         #vis struct #params_name {
             #(
+                #[doc = #param_descriptions]
                 #serde_defaults
                 pub #param_names: #param_struct_types,
             )*

@@ -254,6 +254,17 @@ pub const METHOD_NOTIFICATIONS_MESSAGE: &str = "notifications/message";
 
 // ── Request ─────────────────────────────────────────────────────────
 
+/// Deserializes an explicit `"id"` field (including `"id": null` as `Some(Value::Null)`),
+/// while `#[serde(default)]` produces `None` when `"id"` is omitted (notifications).
+pub(crate) fn deserialize_explicit_id<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
 /// A JSON-RPC 2.0 request.
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
@@ -261,7 +272,8 @@ pub struct JsonRpcRequest {
     #[serde(rename = "jsonrpc")]
     pub version: String,
 
-    /// Request identifier (number or string). `None` for notifications.
+    /// Request identifier (number, string, or explicit null). `None` for notifications.
+    #[serde(default, deserialize_with = "deserialize_explicit_id")]
     pub id: Option<serde_json::Value>,
 
     /// Method name (e.g. `"initialize"`, `"tools/list"`, `"tools/call"`).
@@ -375,6 +387,29 @@ pub struct CancelledNotificationParams {
 }
 
 // ── MCP-specific types ──────────────────────────────────────────────
+
+/// Client identification sent during the MCP `initialize` handshake.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientInfo {
+    /// Human-readable client/caller name (used for per-connection identity when enabled).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Client version string.
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+/// Request parameters for `initialize`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitializeParams {
+    /// Requested MCP protocol version (e.g. `"2024-11-05"`).
+    #[serde(default)]
+    pub protocol_version: Option<String>,
+    /// Optional client identification metadata.
+    #[serde(default)]
+    pub client_info: Option<ClientInfo>,
+}
 
 /// Result body for `initialize`.
 #[derive(Debug, Serialize)]

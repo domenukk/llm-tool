@@ -7,10 +7,36 @@ use tracing::{debug, info, warn};
 
 use super::{Connection, McpServer};
 use crate::protocol::{
-    self, Capabilities, ContentItem, InitializeResult, JSONRPC_VERSION, JsonRpcRequest,
-    JsonRpcResponse, PromptCapabilities, ResourceCapabilities, ServerInfo, ToolCallParams,
-    ToolCallResult, ToolCapabilities,
+    self, Capabilities, ContentItem, InitializeParams, InitializeResult, JSONRPC_VERSION,
+    JsonRpcRequest, JsonRpcResponse, PromptCapabilities, ResourceCapabilities, ServerInfo,
+    ToolCallParams, ToolCallResult, ToolCapabilities, deserialize_explicit_id,
 };
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum WireString {
+    Valid(String),
+    Invalid(serde::de::IgnoredAny),
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawRpcObject {
+    #[serde(default)]
+    jsonrpc: Option<WireString>,
+    #[serde(default, deserialize_with = "deserialize_explicit_id")]
+    id: Option<serde_json::Value>,
+    #[serde(default)]
+    method: Option<WireString>,
+    #[serde(default)]
+    params: Option<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum RawRpcEnvelope {
+    Object(RawRpcObject),
+    NonObject(serde::de::IgnoredAny),
+}
 
 impl McpServer {
     /// Handle exactly one JSON-RPC request string, always producing a response.
@@ -28,18 +54,18 @@ impl McpServer {
         self.handle_request_conn(line, &Connection::default()).await
     }
 
-    /// Validate a JSON value as a JSON-RPC 2.0 request and dispatch it.
+    /// Validate a parsed JSON-RPC 2.0 envelope and dispatch it.
     ///
     /// Returns `(is_notification, response)`, where `is_notification` is `true`
     /// if and only if the request was a syntactically valid JSON-RPC 2.0 notification
     /// (`"jsonrpc": "2.0"` with no `"id"` field). Per JSON-RPC 2.0 §4.1, notifications
     /// must never produce a wire response, even if the method call itself fails.
-    async fn dispatch_request_value(
+    async fn dispatch_envelope(
         &self,
-        val: serde_json::Value,
+        envelope: RawRpcEnvelope,
         conn: &Connection,
     ) -> (bool, JsonRpcResponse) {
-        let Some(obj) = val.as_object() else {
+        let RawRpcEnvelope::Object(raw) = envelope else {
             return (
                 false,
                 JsonRpcResponse::error(
@@ -50,37 +76,74 @@ impl McpServer {
             );
         };
 
-        let id = obj.get("id").cloned();
-        let request: JsonRpcRequest = match serde_json::from_value(val) {
-            Ok(r) => r,
-            Err(e) => {
+        let id = raw.id;
+        let version = match raw.jsonrpc {
+            Some(WireString::Valid(v)) => v,
+            Some(WireString::Invalid(_)) => {
                 return (
                     false,
                     JsonRpcResponse::error(
                         id,
                         protocol::INVALID_REQUEST,
-                        format!("invalid JSON-RPC request: {e}"),
+                        "invalid JSON-RPC request: 'jsonrpc' field must be a string",
+                    ),
+                );
+            }
+            None => {
+                return (
+                    false,
+                    JsonRpcResponse::error(
+                        id,
+                        protocol::INVALID_REQUEST,
+                        "invalid JSON-RPC request: missing 'jsonrpc' field",
+                    ),
+                );
+            }
+        };
+
+        let method = match raw.method {
+            Some(WireString::Valid(m)) => m,
+            Some(WireString::Invalid(_)) => {
+                return (
+                    false,
+                    JsonRpcResponse::error(
+                        id,
+                        protocol::INVALID_REQUEST,
+                        "invalid JSON-RPC request: 'method' field must be a string",
+                    ),
+                );
+            }
+            None => {
+                return (
+                    false,
+                    JsonRpcResponse::error(
+                        id,
+                        protocol::INVALID_REQUEST,
+                        "invalid JSON-RPC request: missing 'method' field",
                     ),
                 );
             }
         };
 
         // JSON-RPC 2.0 §4: the "jsonrpc" field MUST be exactly "2.0".
-        if request.version != JSONRPC_VERSION {
+        if version != JSONRPC_VERSION {
             return (
                 false,
                 JsonRpcResponse::error(
-                    request.id,
+                    id,
                     protocol::INVALID_REQUEST,
-                    format!(
-                        "invalid jsonrpc version: expected \"2.0\", got \"{}\"",
-                        request.version
-                    ),
+                    format!("invalid jsonrpc version: expected \"2.0\", got \"{version}\""),
                 ),
             );
         }
 
-        let is_notification = request.id.is_none();
+        let is_notification = id.is_none();
+        let request = JsonRpcRequest {
+            version,
+            id,
+            method,
+            params: raw.params,
+        };
         let response = self.dispatch_method(request, conn).await;
         (is_notification, response)
     }
@@ -104,7 +167,7 @@ impl McpServer {
             );
         }
 
-        let val: serde_json::Value = match serde_json::from_str(line) {
+        let envelope: RawRpcEnvelope = match serde_json::from_str(line) {
             Ok(r) => r,
             Err(e) => {
                 return JsonRpcResponse::error(
@@ -115,7 +178,7 @@ impl McpServer {
             }
         };
 
-        let (_is_notification, response) = self.dispatch_request_value(val, conn).await;
+        let (_is_notification, response) = self.dispatch_envelope(envelope, conn).await;
         response
     }
 
@@ -168,7 +231,7 @@ impl McpServer {
             return self.dispatch_batch(trimmed, conn).await;
         }
 
-        let val: serde_json::Value = match serde_json::from_str(trimmed) {
+        let envelope: RawRpcEnvelope = match serde_json::from_str(trimmed) {
             Ok(r) => r,
             Err(e) => {
                 return Some(RpcOutcome::Single(JsonRpcResponse::error(
@@ -179,7 +242,7 @@ impl McpServer {
             }
         };
 
-        let (is_notification, response) = self.dispatch_request_value(val, conn).await;
+        let (is_notification, response) = self.dispatch_envelope(envelope, conn).await;
         if is_notification {
             None
         } else {
@@ -190,7 +253,7 @@ impl McpServer {
     /// Handle a JSON-RPC 2.0 batch request array, collecting one response per
     /// non-notification member.
     async fn dispatch_batch(&self, line: &str, conn: &Connection) -> Option<RpcOutcome> {
-        let val: serde_json::Value = match serde_json::from_str(line) {
+        let arr: Vec<RawRpcEnvelope> = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
                 return Some(RpcOutcome::Single(JsonRpcResponse::error(
@@ -199,14 +262,6 @@ impl McpServer {
                     format!("invalid JSON: {e}"),
                 )));
             }
-        };
-
-        let serde_json::Value::Array(arr) = val else {
-            return Some(RpcOutcome::Single(JsonRpcResponse::error(
-                None,
-                protocol::INVALID_REQUEST,
-                "expected JSON array for batch request",
-            )));
         };
 
         if arr.is_empty() {
@@ -219,7 +274,7 @@ impl McpServer {
 
         let mut responses = Vec::with_capacity(arr.len());
         for item in arr {
-            let (is_notification, resp) = self.dispatch_request_value(item, conn).await;
+            let (is_notification, resp) = self.dispatch_envelope(item, conn).await;
             if !is_notification {
                 responses.push(resp);
             }
@@ -237,9 +292,7 @@ impl McpServer {
         let id = request.id.clone();
 
         match request.method.as_str() {
-            protocol::METHOD_INITIALIZE => {
-                self.handle_initialize(id, request.params.as_ref(), conn)
-            }
+            protocol::METHOD_INITIALIZE => self.handle_initialize(id, request.params, conn),
             // No-op acknowledgements: liveness/log-level, plus the `initialized`
             // notification some clients send (both namespaced and bare forms).
             protocol::METHOD_PING
@@ -380,7 +433,7 @@ impl McpServer {
     fn handle_initialize(
         &self,
         id: Option<serde_json::Value>,
-        params: Option<&serde_json::Value>,
+        params: Option<serde_json::Value>,
         conn: &Connection,
     ) -> JsonRpcResponse {
         info!(server = %self.name, version = %self.version, "MCP initialize");
@@ -388,9 +441,20 @@ impl McpServer {
         // Protocol version negotiation: if the client sends a
         // `protocolVersion` in params, we report our supported version.
         // The server always responds with the version it actually supports.
-        let mut caller: Option<&str> = None;
-        if let Some(p) = params {
-            if let Some(client_ver) = p.get("protocolVersion").and_then(|v| v.as_str()) {
+        let init_params =
+            params.and_then(
+                |raw| match serde_json::from_value::<InitializeParams>(raw) {
+                    Ok(parsed) => Some(parsed),
+                    Err(err) => {
+                        debug!(error = %err, "ignoring malformed MCP initialize params");
+                        None
+                    }
+                },
+            );
+
+        let mut caller_name: Option<String> = None;
+        if let Some(ref p) = init_params {
+            if let Some(ref client_ver) = p.protocol_version {
                 debug!(client_version = %client_ver, server_version = Self::PROTOCOL_VERSION, "protocol version negotiation");
             }
 
@@ -400,15 +464,15 @@ impl McpServer {
             // every connection sees the same session while acting as itself.
             if self.per_connection_identity {
                 if let Some(name) = p
-                    .get("clientInfo")
-                    .and_then(|c| c.get("name"))
-                    .and_then(|n| n.as_str())
+                    .client_info
+                    .as_ref()
+                    .and_then(|c| c.name.as_deref())
                     .map(str::trim)
                     .filter(|n| !n.is_empty())
                 {
                     info!(caller = %name, "adopting per-connection caller identity");
                     conn.set_ctx(Some(self.context.with_caller(name)));
-                    caller = Some(name);
+                    caller_name = Some(name.to_owned());
                 } else {
                     debug!(
                         "per-connection identity enabled but client sent no \
@@ -420,7 +484,7 @@ impl McpServer {
 
         // Resolve this caller's registry view. A no-op (leaves the shared
         // registry in play) when no [`RegistryFactory`] is configured.
-        conn.set_view(self.resolve_view(caller));
+        conn.set_view(self.resolve_view(caller_name.as_deref()));
 
         let tools_cap = Some(ToolCapabilities {});
         let prompts_cap = if self.prompts.is_empty() {
@@ -503,9 +567,16 @@ impl McpServer {
     ///     Ok(format!("{}", a + b))
     /// }
     ///
-    /// # tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+    /// # use tokio::runtime::Builder;
+    /// # Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+    /// #[derive(serde::Serialize)]
+    /// struct AddArgs {
+    ///     a: i64,
+    ///     b: i64,
+    /// }
     /// let server = McpServer::new("srv", "0.1.0", ToolRegistry::new().with_tool(Add));
-    /// let result = server.dispatch_tool("add", serde_json::json!({"a": 2, "b": 3})).await;
+    /// let args = serde_json::to_value(AddArgs { a: 2, b: 3 }).unwrap();
+    /// let result = server.dispatch_tool("add", args).await;
     /// assert!(!result.is_error);
     /// assert_eq!(result.text(), Some("5"));
     /// # })

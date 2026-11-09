@@ -31,11 +31,31 @@ pub trait RustPrompt: Send + Sync {
     ) -> impl Future<Output = Result<PromptOutput, ToolError>> + Send;
 }
 
+/// Strongly-typed representation of a JSON Schema property for prompt arguments.
+#[derive(serde::Deserialize)]
+struct PromptPropertySchema {
+    /// Optional human-readable description from field doc comments.
+    description: Option<alloc::string::String>,
+}
+
+/// Strongly-typed representation of an object JSON Schema for [`RustPrompt::Params`].
+#[derive(serde::Deserialize)]
+struct PromptParamsSchema {
+    /// JSON Schema `"type"` discriminator (must be `"object"` for prompt parameter structs).
+    #[serde(rename = "type")]
+    schema_type: Option<alloc::string::String>,
+    /// Required parameter names.
+    required: Option<Vec<alloc::string::String>>,
+    /// Declared object properties in deterministic key order.
+    properties: Option<alloc::collections::BTreeMap<alloc::string::String, PromptPropertySchema>>,
+}
+
 /// Build a [`PromptDefinition`] from any [`RustPrompt`] implementor.
 ///
 /// # Errors
 ///
-/// Returns `Err` if the prompt's `Params` type fails to produce a JSON schema.
+/// Returns `Err` if the prompt's `Params` type fails to produce a valid
+/// `"type": "object"` JSON schema.
 pub fn definition_of_prompt<T: RustPrompt>(prompt: &T) -> Result<PromptDefinition, ToolError> {
     let schema = schemars::schema_for!(T::Params);
     let val = serde_json::to_value(&schema).map_err(|e| {
@@ -44,30 +64,34 @@ pub fn definition_of_prompt<T: RustPrompt>(prompt: &T) -> Result<PromptDefinitio
             T::NAME
         ))
     })?;
-    let mut arguments = Vec::new();
-
-    if let Some(obj) = val.as_object() {
-        let required_fields: Vec<&str> = match obj.get("required").and_then(|r| r.as_array()) {
-            Some(arr) => arr.iter().filter_map(|v| v.as_str()).collect(),
-            // An absent `required` field correctly yields no required arguments.
-            None => Vec::new(),
-        };
-        if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
-            for (name, prop) in props {
-                let description = prop
-                    .get("description")
-                    .and_then(|d| d.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let required = required_fields.contains(&name.as_str());
-                arguments.push(PromptArgumentDefinition {
-                    name: name.clone(),
-                    description,
-                    required,
-                });
-            }
-        }
+    let parsed: PromptParamsSchema = serde_json::from_value(val).map_err(|e| {
+        ToolError::new(format!(
+            "Failed to parse object schema for prompt '{}': {e}",
+            T::NAME
+        ))
+    })?;
+    if parsed.schema_type.as_deref() != Some("object") {
+        return Err(ToolError::new(format!(
+            "Prompt '{}' Params schema must have type \"object\", got {:?}",
+            T::NAME,
+            parsed.schema_type
+        )));
     }
+
+    let required_fields = parsed.required.as_deref().unwrap_or(&[]);
+    let arguments = parsed
+        .properties
+        .into_iter()
+        .flatten()
+        .map(|(name, prop)| {
+            let required = required_fields.iter().any(|req| req == &name);
+            PromptArgumentDefinition {
+                name,
+                description: prop.description.unwrap_or_else(alloc::string::String::new),
+                required,
+            }
+        })
+        .collect();
 
     Ok(PromptDefinition {
         name: T::NAME.to_string(),
@@ -77,14 +101,14 @@ pub fn definition_of_prompt<T: RustPrompt>(prompt: &T) -> Result<PromptDefinitio
 }
 
 /// Type-erased future returned by [`ErasedPrompt::render_erased`].
-pub(crate) type BoxPromptFuture<'a> =
+pub type BoxPromptFuture<'a> =
     Pin<Box<dyn Future<Output = Result<PromptOutput, ToolError>> + Send + 'a>>;
 
 /// Type-erased wrapper enabling heterogeneous prompt storage.
 ///
 /// This is an internal implementation detail of [`PromptRegistry`]; callers
 /// interact with prompts through the registry rather than this trait.
-pub(crate) trait ErasedPrompt: Send + Sync {
+pub trait ErasedPrompt: Send + Sync {
     /// Deserialize arguments and render the prompt template.
     fn render_erased(&self, args: serde_json::Value) -> BoxPromptFuture<'_>;
 }
@@ -301,5 +325,33 @@ impl<'a> IntoIterator for &'a PromptRegistry {
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NonObjectPrompt;
+
+    impl RustPrompt for NonObjectPrompt {
+        type Params = alloc::string::String;
+        const NAME: &'static str = "non_object_prompt";
+        const DESCRIPTION: &'static str = "Prompt with non-object params";
+
+        async fn render(&self, params: Self::Params) -> Result<PromptOutput, ToolError> {
+            Ok(PromptOutput::user(params))
+        }
+    }
+
+    #[test]
+    fn definition_of_prompt_rejects_non_object_schema() {
+        let err = definition_of_prompt(&NonObjectPrompt)
+            .expect_err("non-object prompt schema must fail loudly");
+        assert!(
+            err.message.contains("must have type \"object\""),
+            "unexpected error: {}",
+            err.message
+        );
     }
 }

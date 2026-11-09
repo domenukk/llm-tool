@@ -1,12 +1,10 @@
 # llm-tool-macros
 
-Proc-macro crate for [`llm-tool`](https://crates.io/crates/llm-tool).
+Macros for [`llm-tool`](https://crates.io/crates/llm-tool).
 
-Provides the `#[llm_tool]` attribute macro that transforms a plain Rust function
-into a strongly-typed
-[`RustTool`](https://docs.rs/llm-tool/latest/llm_tool/trait.RustTool.html)
-implementation. **You don't need to depend on this crate directly** — use
-`llm_tool::llm_tool` instead.
+Provides `#[llm_tool]` to turn a Rust function into a
+[`RustTool`](https://docs.rs/llm-tool/latest/llm_tool/trait.RustTool.html). Use
+`llm_tool::llm_tool` rather than depending on this crate directly.
 
 ## What the macro generates
 
@@ -40,26 +38,28 @@ The macro produces:
 
 ## Rules
 
-| Requirement                        | Detail                                                                                                                                        |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Doc comment on function**        | Required — becomes the tool description.                                                                                                      |
-| **Doc comment on every parameter** | Required — becomes the JSON Schema field description.                                                                                         |
-| **Return type**                    | `Result<T, E>` or bare `T` (infallible).                                                                                                      |
-| **`T` (Ok type)**                  | `String` (auto-wrapped into `ToolOutput`), `ToolOutput` (passed through), any `T: Serialize` (auto-serialized to JSON), or `Json<T>`.         |
-| **`E` (Err type)**                 | Any `E: Into<ToolError>` — built-in for `ToolError`, `String`, `std::io::Error`, `serde_json::Error`, `Box<dyn Error + Send + Sync>`.         |
-| **`async fn`**                     | Supported — the generated `call()` is always async.                                                                                           |
-| **`&str` params**                  | Accepted — the struct stores `String`, macro auto-borrows.                                                                                    |
-| **`Option<T>` params**             | Auto-annotated with `#[serde(default)]` → not in `required`.                                                                                  |
-| **`&ToolContext` param**           | Recognized as execution context, forwarded from registry, excluded from params struct.                                                        |
-| **`description = "..."`**          | Inline description string (or template with `env(...)` / `params(...)` / `context`). Overrides the doc comment.                               |
-| **`description_file = "..."`**     | Load description from a `.tmpl.md` template file. Compiled into a static string when static.                                                  |
-| **`response = "..."`**             | Format the tool's struct return value using an inline `md-tmpl` template while attaching the raw struct to `ToolOutput::metadata`.            |
-| **`response_file = "..."`**        | Format the tool's struct return value using a `.tmpl.md` file while attaching the raw struct to `ToolOutput::metadata`.                       |
-| **`effect = "..."`**               | Side-effect classification: `"read_only"`, `"mutating"` (default), or `"destructive"` (`idempotent = true` is a shorthand for `"read_only"`). |
-| **`params(k = "v", ...)`**         | Compile-time key-value pairs for template variables. Requires `description_file` or `description`.                                            |
-| **`env(K = "v", ...)`**            | Compile-time values for `env:` frontmatter declarations. Requires `description_file` or `description`. Combinable with `params` or `context`. |
-| **`context = fn`**                 | Runtime template context function. Signature: `fn(&Tool) -> Context`. Requires `description_file` or `description`.                           |
-| **`self` receiver**                | Not allowed — must be a free function.                                                                                                        |
+| Requirement                        | Detail                                                                                                                                                                                                             |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Doc comment on function**        | Required — becomes the tool description.                                                                                                                                                                           |
+| **Doc comment on every parameter** | Required — becomes the JSON Schema field description.                                                                                                                                                              |
+| **Return type**                    | `Result<T, E>` or bare `T` (infallible).                                                                                                                                                                           |
+| **`T` (Ok type)**                  | `String` (auto-wrapped into `ToolOutput`), `ToolOutput` (passed through), any `T: Serialize` (auto-serialized to JSON), or `Json<T>`.                                                                              |
+| **`E` (Err type)**                 | Any `E: Into<ToolError>` — built-in for `ToolError`, `String`, `std::io::Error`, `serde_json::Error`, `Box<dyn Error + Send + Sync>`.                                                                              |
+| **`async fn`**                     | Supported — the generated `call()` is always async.                                                                                                                                                                |
+| **`&str` params**                  | Accepted — the struct stores `String`, macro auto-borrows.                                                                                                                                                         |
+| **`Option<T>` params**             | Auto-annotated with `#[serde(default)]` → not in `required`.                                                                                                                                                       |
+| **`&ToolContext` param**           | Recognized as execution context, forwarded from registry, excluded from params struct.                                                                                                                             |
+| **`description = "..."`**          | Inline description string (or template with `env(...)` / `params(...)` / `context`). Overrides the doc comment.                                                                                                    |
+| **`description_file = "..."`**     | Load description from a `.tmpl.md` template file. Compiled into a static string when static.                                                                                                                       |
+| **`response = "..."`**             | Format the tool's struct return value using an inline `md-tmpl` template while attaching the raw struct to `ToolOutput::metadata`.                                                                                 |
+| **`response_file = "..."`**        | Format the tool's struct return value using a `.tmpl.md` file while attaching the raw struct to `ToolOutput::metadata`.                                                                                            |
+| **`effect = "..."`**               | Side-effect classification: `"read_only"`, `"mutating"` (default), or `"destructive"` (`idempotent = true` is a shorthand for `"read_only"`).                                                                      |
+| **`provenance = "..."`**           | Data provenance tier: `"trusted"`, `"workspace_local"` (default), `"private_data"`, `"external_mcp"`, or `"untrusted_network"` (`external_mcp` and `untrusted_network` auto-default to quarantine output framing). |
+| **`sanitize` / `quarantine`**      | Output sanitization mode: `sanitize` (default token neutralization), `sanitize = "tag"`, `sanitize(tag = "...", notice = "...")`, `quarantine`, or `sanitization = "none"`.                                        |
+| **`params(k = "v", ...)`**         | Compile-time key-value pairs for template variables. Requires `description_file` or `description`.                                                                                                                 |
+| **`env(K = "v", ...)`**            | Compile-time values for `env:` frontmatter declarations. Requires `description_file` or `description`. Combinable with `params` or `context`.                                                                      |
+| **`context = fn`**                 | Runtime template context function. Signature: `fn(&Tool) -> Context`. Requires `description_file` or `description`.                                                                                                |
+| **`self` receiver**                | Not allowed — must be a free function.                                                                                                                                                                             |
 
 ## License
 

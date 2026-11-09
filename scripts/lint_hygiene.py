@@ -1,62 +1,94 @@
 #!/usr/bin/env python3
-"""Hygiene linter — flags suppression patterns and structural issues.
+"""Hygiene linter — flags suppression patterns, untyped production json!(), and structural issues.
 
 Run via `just lint-hygiene` or directly: `python3 scripts/lint_hygiene.py`
 
 Exit code 0 = clean, 1 = violations found.
 """
 
+from __future__ import annotations
+
 import os
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from enum import Enum
+from itertools import pairwise
 from pathlib import Path
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
 MAX_FILE_LINES = 1200
 
-RUST_DIRS = ["crates/"]
-RUST_EXTS = {".rs"}
+RUST_DIRS = ("crates/",)
+RUST_EXTS = frozenset({".rs"})
+EXCLUDED_DIRS = frozenset(
+    {
+        ".git",
+        ".venv",
+        "target",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+    }
+)
 
 # Suppression markers.
 NOLINT_WITH_REASON = re.compile(r"//\s*NOLINT:\s*\S")
-NOLINT_ANY = re.compile(r"//\s*NOLINT")
 NOLINT_BARE = re.compile(r"//\s*NOLINT\s*$")
+
+# Test-code classification (Rust).
+TEST_PATH = re.compile(
+    r"(^|/)(tests|benches|examples)/|(^|/)tests\.rs$|(^|/)tests_[^/]*\.rs$|_tests?\.rs$"
+)
+CFG_TEST_ATTR = re.compile(
+    r"^\s*#\s*\[\s*cfg\s*\(\s*(?:all\s*\([^)]*\btest\b[^)]*\)|test)\s*\)\s*\]\s*$"
+)
+CFG_TEST_MOD_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;")
+CFG_TEST_MOD_INLINE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{")
+MODULE_ROOT_FILES = frozenset({"mod.rs", "lib.rs", "main.rs"})
+
+
+class Scope(Enum):
+    """Which code a check applies to."""
+
+    ALL = "all"
+    PRODUCTION_ONLY = "production"
+    TEST_ONLY = "test"
 
 
 # ── Check definitions ────────────────────────────────────────────────────────
 
 
-@dataclass
+@dataclass(frozen=True)
 class Check:
     """A single hygiene check definition."""
 
     name: str
     pattern: re.Pattern[str]
-    dirs: list[str]
-    exts: set[str]
+    dirs: tuple[str, ...]
+    exts: frozenset[str]
     message: str
     exclude: re.Pattern[str] | None = None
     exclude_path: re.Pattern[str] | None = None
     no_nolint: bool = False
-    hits: list[str] = field(default_factory=list)
-    suppressed: list[str] = field(default_factory=list)
+    scope: Scope = Scope.ALL
 
 
-CHECKS: list[Check] = [
+CHECKS: tuple[Check, ...] = (
     # ── Rust: lint suppression ────────────────────────────────────────────
     Check(
-        name="Rust: #[allow(...)]",
-        pattern=re.compile(r"#\[allow\("),
+        name="Rust: #[allow(...)] / #![allow(...)]",
+        pattern=re.compile(r"#!?\s*\[\s*allow\s*\("),
         dirs=RUST_DIRS,
         exts=RUST_EXTS,
         message="Fix the underlying issue instead of suppressing the lint.",
         no_nolint=True,
     ),
     Check(
-        name="Rust: #[expect(...)]",
-        pattern=re.compile(r"#\[expect\("),
+        name="Rust: #[expect(...)] / #![expect(...)]",
+        pattern=re.compile(r"#!?\s*\[\s*expect\s*\("),
         dirs=RUST_DIRS,
         exts=RUST_EXTS,
         message="Fix the underlying issue instead of suppressing the lint.",
@@ -85,6 +117,23 @@ CHECKS: list[Check] = [
         exts=RUST_EXTS,
         message="Refactor the function into smaller pieces instead of suppressing clippy::cognitive_complexity.",
         no_nolint=True,
+    ),
+    Check(
+        name="Rust: #[path = ...] module override",
+        pattern=re.compile(r"#!?\s*\[\s*path\s*="),
+        dirs=RUST_DIRS,
+        exts=RUST_EXTS,
+        message="Always use standard Rust <module>/mod.rs directory hierarchy instead of #[path = ...] overrides.",
+        no_nolint=True,
+    ),
+    Check(
+        name="Rust: serde_json::json! in production code",
+        pattern=re.compile(r"\bjson!\s*[\(\[\{]"),
+        dirs=RUST_DIRS,
+        exts=RUST_EXTS,
+        message="Untyped JSON grab-bag in production code. Use #[derive(Serialize, Deserialize)] structs (json! is allowed only in tests).",
+        no_nolint=True,
+        scope=Scope.PRODUCTION_ONLY,
     ),
     # ── Rust: silently discarded values ───────────────────────────────────
     Check(
@@ -178,23 +227,123 @@ CHECKS: list[Check] = [
         message="NEVER use single-line \\n-escaped frontmatter strings; always use proper multiline strings.",
         no_nolint=True,
     ),
-]
+)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def source_files(dirs: list[str], exts: set[str]) -> list[Path]:
-    """Collect all source files under `dirs` matching `exts`."""
+def source_files(
+    root_dir: Path, dirs: tuple[str, ...], exts: frozenset[str]
+) -> list[Path]:
+    """Collect all source files under `root_dir / d` matching `exts`."""
     files: list[Path] = []
     for d in dirs:
-        root = Path(d)
-        if not root.is_dir():
+        sub = root_dir / d
+        if not sub.is_dir():
             continue
-        for path in root.rglob("*"):
+        for path in sub.rglob("*"):
+            rel_parts = path.relative_to(root_dir).parts
+            if any(part in EXCLUDED_DIRS for part in rel_parts):
+                continue
             if path.is_file() and path.suffix in exts:
                 files.append(path)
     return sorted(files)
+
+
+def module_dir(path: Path) -> Path:
+    """Directory holding the child modules declared in `path`."""
+    if path.name in MODULE_ROOT_FILES:
+        return path.parent
+    return path.parent / path.stem
+
+
+def cfg_test_module_paths(rust_files: list[Path]) -> list[Path]:
+    """Files/dirs of out-of-line modules declared under `#[cfg(test)]` or `#[cfg(all(test, ...))]`."""
+    gated: list[Path] = []
+    for path in rust_files:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        for attr_line, decl_line in pairwise(lines):
+            if not CFG_TEST_ATTR.match(attr_line):
+                continue
+            decl = CFG_TEST_MOD_DECL.match(decl_line)
+            if decl is None:
+                continue
+            child = module_dir(path) / decl.group(1)
+            gated.extend([child.with_suffix(".rs"), child])
+    return gated
+
+
+def is_test_file(rel_posix: str, path: Path, gated_modules: list[Path]) -> bool:
+    """Whether every line of `path` is test/example/bench code."""
+    if TEST_PATH.search(rel_posix):
+        return True
+    return any(path == gated or gated in path.parents for gated in gated_modules)
+
+
+def inline_test_line_numbers(lines: list[str]) -> set[int]:
+    """Return 1-indexed line numbers covered by `#[cfg(test)]` / `#[cfg(all(test, ...))]` items."""
+    test_lines: set[int] = set()
+    i = 0
+    n = len(lines)
+    while i < n:
+        if CFG_TEST_ATTR.match(lines[i]):
+            start = i
+            i += 1
+            while i < n and lines[i].strip().startswith("#"):
+                i += 1
+            if i < n and CFG_TEST_MOD_INLINE.match(lines[i]):
+                # Inline #[cfg(test)] mod tests { ... } through balanced closing brace.
+                brace_depth = 0
+                started = False
+                while i < n:
+                    clean = re.sub(r'"(?:\\.|[^"\\])*"', '""', lines[i])
+                    clean = re.sub(r"//.*", "", clean)
+                    for ch in clean:
+                        if ch == "{":
+                            brace_depth += 1
+                            started = True
+                        elif ch == "}":
+                            brace_depth -= 1
+                    i += 1
+                    if started and brace_depth <= 0:
+                        break
+                for ln in range(start + 1, i + 1):
+                    test_lines.add(ln)
+                continue
+            # Single #[cfg(test)] item (fn, struct, impl, use, mod decl).
+            brace_depth = 0
+            started = False
+            while i < n:
+                clean = re.sub(r'"(?:\\.|[^"\\])*"', '""', lines[i])
+                clean = re.sub(r"//.*", "", clean)
+                for ch in clean:
+                    if ch == "{":
+                        brace_depth += 1
+                        started = True
+                    elif ch == "}":
+                        brace_depth -= 1
+                i += 1
+                if started and brace_depth <= 0:
+                    break
+                if not started and ";" in clean:
+                    break
+            for ln in range(start + 1, i + 1):
+                test_lines.add(ln)
+            continue
+        i += 1
+    return test_lines
+
+
+def line_in_scope(scope: Scope, is_test_line: bool) -> bool:
+    """Whether a check with `scope` applies to a (test / production) line."""
+    match scope:
+        case Scope.ALL:
+            return True
+        case Scope.PRODUCTION_ONLY:
+            return not is_test_line
+        case Scope.TEST_ONLY:
+            return is_test_line
 
 
 def is_nolinted(lines: list[str], lineno: int) -> bool:
@@ -208,21 +357,18 @@ def is_nolinted(lines: list[str], lineno: int) -> bool:
 # ── Check runners ────────────────────────────────────────────────────────────
 
 
-def run_pattern_checks() -> bool:
-    """Run all pattern checks. Returns True if any failed."""
+def run_pattern_checks(root_dir: Path | None = None) -> bool:
+    """Run all pattern checks under `root_dir`. Returns True if any failed."""
+    base = root_dir if root_dir is not None else Path()
     failed = False
     nolint_locations: dict[tuple[Path, int], bool] = {}
 
-    all_dirs_exts: set[tuple[str, str]] = set()
-    for check in CHECKS:
-        for d in check.dirs:
-            for ext in check.exts:
-                all_dirs_exts.add((d, ext))
-    all_dirs_set = {d for d, _ in all_dirs_exts}
-    all_exts_set = {e for _, e in all_dirs_exts}
-    for path in source_files(list(all_dirs_set), all_exts_set):
+    rust_files = source_files(base, RUST_DIRS, RUST_EXTS)
+    gated_modules = cfg_test_module_paths(rust_files)
+
+    for path in rust_files:
         try:
-            lines = path.read_text(errors="replace").splitlines()
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             continue
         for lineno, line in enumerate(lines, start=1):
@@ -231,16 +377,24 @@ def run_pattern_checks() -> bool:
 
     for check in CHECKS:
         print(f"=== {check.name} ===")
-        files = source_files(check.dirs, check.exts)
+        hits: list[str] = []
+        suppressed: list[str] = []
+        files = source_files(base, check.dirs, check.exts)
         for path in files:
-            if check.exclude_path and check.exclude_path.search(str(path)):
+            rel_posix = path.relative_to(base).as_posix()
+            if check.exclude_path and check.exclude_path.search(rel_posix):
                 continue
             try:
-                lines = path.read_text(errors="replace").splitlines()
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:
                 continue
+            whole_file_is_test = is_test_file(rel_posix, path, gated_modules)
+            cfg_test_lines = set() if whole_file_is_test else inline_test_line_numbers(lines)
             for lineno, line in enumerate(lines, start=1):
                 if not check.pattern.search(line):
+                    continue
+                is_test_line = whole_file_is_test or (lineno in cfg_test_lines)
+                if not line_in_scope(check.scope, is_test_line):
                     continue
                 if check.exclude and check.exclude.search(line):
                     continue
@@ -248,30 +402,30 @@ def run_pattern_checks() -> bool:
                     nolint_key = (path, lineno - 1)
                     if nolint_key in nolint_locations:
                         nolint_locations[nolint_key] = True
-                    check.suppressed.append(f"  {path}:{lineno}: {line.strip()}")
+                    suppressed.append(f"  {rel_posix}:{lineno}: {line.strip()}")
                     continue
-                check.hits.append(f"  {path}:{lineno}: {line.strip()}")
-        if check.hits:
-            for hit in check.hits:
+                hits.append(f"  {rel_posix}:{lineno}: {line.strip()}")
+        if hits:
+            for hit in hits:
                 print(hit)
             print(f"^^^ {check.message}")
             failed = True
         else:
             print("  ✓ clean")
-        if check.suppressed:
-            for sup in check.suppressed:
-                print(f"  ℹ  (suppressed) {sup.strip()}")
+        for sup in suppressed:
+            print(f"  ℹ  (suppressed) {sup.strip()}")
 
     print("=== Stale NOLINT comments ===")
     stale: list[str] = []
     for (path, lineno), consumed in sorted(nolint_locations.items()):
         if not consumed:
+            rel_posix = path.relative_to(base).as_posix()
             try:
-                lines = path.read_text(errors="replace").splitlines()
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
                 line_text = lines[lineno - 1].strip() if lineno <= len(lines) else "???"
             except OSError:
                 line_text = "???"
-            stale.append(f"  {path}:{lineno}: {line_text}")
+            stale.append(f"  {rel_posix}:{lineno}: {line_text}")
     if stale:
         for s in stale:
             print(s)
@@ -283,18 +437,20 @@ def run_pattern_checks() -> bool:
     return failed
 
 
-def run_bare_nolint_check() -> bool:
+def run_bare_nolint_check(root_dir: Path | None = None) -> bool:
     """Flag NOLINT comments that don't include a reason."""
+    base = root_dir if root_dir is not None else Path()
     print("=== Bare NOLINT (missing reason) ===")
     hits: list[str] = []
-    for path in source_files(RUST_DIRS, RUST_EXTS):
+    for path in source_files(base, RUST_DIRS, RUST_EXTS):
+        rel_posix = path.relative_to(base).as_posix()
         try:
-            content = path.read_text(errors="replace")
+            content = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         for lineno, line in enumerate(content.splitlines(), start=1):
             if NOLINT_BARE.search(line):
-                hits.append(f"  {path}:{lineno}: {line.strip()}")
+                hits.append(f"  {rel_posix}:{lineno}: {line.strip()}")
     if hits:
         for hit in hits:
             print(hit)
@@ -304,23 +460,28 @@ def run_bare_nolint_check() -> bool:
     return False
 
 
-def run_long_file_check() -> bool:
-    """Flag files exceeding MAX_FILE_LINES."""
-    print(f"=== Long files (>={MAX_FILE_LINES} lines) ===")
-    long_files: list[tuple[Path, int]] = []
+def run_long_file_check(
+    root_dir: Path | None = None, max_lines: int = MAX_FILE_LINES
+) -> bool:
+    """Flag files reaching or exceeding `max_lines`."""
+    base = root_dir if root_dir is not None else Path()
+    print(f"=== Long files (>={max_lines} lines) ===")
+    long_files: list[tuple[str, int]] = []
 
-    for path in source_files(RUST_DIRS, RUST_EXTS):
+    for path in source_files(base, RUST_DIRS, RUST_EXTS):
+        rel_posix = path.relative_to(base).as_posix()
         try:
-            line_count = sum(1 for _ in path.open(errors="replace"))
+            with path.open(encoding="utf-8", errors="replace") as handle:
+                line_count = sum(1 for _ in handle)
         except OSError:
             continue
-        if line_count >= MAX_FILE_LINES:
-            long_files.append((path, line_count))
+        if line_count >= max_lines:
+            long_files.append((rel_posix, line_count))
 
     if long_files:
         long_files.sort(key=lambda x: -x[1])
-        for path, count in long_files:
-            print(f"  ⚠  {path} ({count} lines)")
+        for rel_posix, count in long_files:
+            print(f"  ⚠  {rel_posix} ({count} lines)")
         print(
             "^^^ Long file detected. Should be refactored to be modular "
             "and testable (with good testing) and a good folder structure."
@@ -331,14 +492,21 @@ def run_long_file_check() -> bool:
     return False
 
 
+def check_workspace(root_dir: Path) -> bool:
+    """Run all hygiene checks on `root_dir`. Returns True if any violation is found."""
+    failed = run_pattern_checks(root_dir)
+    failed = run_bare_nolint_check(root_dir) or failed
+    failed = run_long_file_check(root_dir) or failed
+    return failed
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
 def main() -> int:
-    os.chdir(Path(__file__).resolve().parent.parent)
-    failed = run_pattern_checks()
-    failed = run_bare_nolint_check() or failed
-    failed = run_long_file_check() or failed
+    repo_root = Path(__file__).resolve().parent.parent
+    os.chdir(repo_root)
+    failed = check_workspace(repo_root)
 
     print()
     if failed:

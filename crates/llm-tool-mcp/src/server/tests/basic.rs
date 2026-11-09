@@ -644,7 +644,7 @@ fn run_skips_empty_and_whitespace_lines() {
     server.run(reader, &mut output).unwrap();
 
     // No output for blank lines.
-    assert!(output.is_empty());
+    assert_eq!(output.len(), 0);
 }
 
 // ── String IDs ──────────────────────────────────────────────────
@@ -928,7 +928,7 @@ fn notification_initialized_no_output_in_run() {
     server.run(reader, &mut output).unwrap();
 
     // Notification should produce zero bytes of output.
-    assert!(output.is_empty());
+    assert_eq!(output.len(), 0);
 }
 
 #[tokio::test]

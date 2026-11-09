@@ -1,11 +1,11 @@
 ---
 name: search_response
 types:
-  - SearchResultItem = struct(title = untrusted str, score = int)
+  - SearchResultItem = struct(title = str, score = int)
 
 allow_unused: true
 params:
-  - query = untrusted str
+  - query = str
   - results = list(SearchResultItem)
   - total = int
 ---

@@ -51,7 +51,7 @@ just check
 - **NEVER commit or push** unless explicitly asked by the user.
 - **NEVER `git push`** under any circumstances unless explicitly asked.
 - **NEVER change commit descriptions** when amending.
-- Place one-off fix or migration scripts in `/tmp/jetski`, **not** in the repo.
+- Place one-off fix or migration scripts in `/tmp`, **not** in the repo.
 
 ---
 

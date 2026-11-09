@@ -201,6 +201,7 @@ struct ToolAttr {
     context_fn: Option<syn::Path>,
     idempotent: bool,
     effect: MacroToolEffect,
+    provenance: helpers::MacroToolProvenance,
     sanitization: MacroOutputSanitization,
 }
 
@@ -266,6 +267,7 @@ pub(crate) const ATTR_CONTEXT: &str = "context";
 pub(crate) const ATTR_ENV: &str = "env";
 pub(crate) const ATTR_IDEMPOTENT: &str = "idempotent";
 pub(crate) const ATTR_EFFECT: &str = "effect";
+pub(crate) const ATTR_PROVENANCE: &str = "provenance";
 pub(crate) const ATTR_SANITIZE: &str = "sanitize";
 pub(crate) const ATTR_QUARANTINE: &str = "quarantine";
 pub(crate) const ATTR_SANITIZATION: &str = "sanitization";
@@ -287,6 +289,7 @@ pub(crate) enum ToolAttrKey {
     Context,
     Idempotent,
     Effect,
+    Provenance,
     Sanitize,
     Quarantine,
     Sanitization,
@@ -303,6 +306,7 @@ impl ToolAttrKey {
         Self::Context,
         Self::Idempotent,
         Self::Effect,
+        Self::Provenance,
         Self::Sanitize,
         Self::Quarantine,
         Self::Sanitization,
@@ -319,6 +323,7 @@ impl ToolAttrKey {
             Self::Context => ATTR_CONTEXT,
             Self::Idempotent => ATTR_IDEMPOTENT,
             Self::Effect => ATTR_EFFECT,
+            Self::Provenance => ATTR_PROVENANCE,
             Self::Sanitize => ATTR_SANITIZE,
             Self::Quarantine => ATTR_QUARANTINE,
             Self::Sanitization => ATTR_SANITIZATION,
@@ -362,6 +367,7 @@ pub(crate) struct ToolAttrBuilder {
     response_inline: Option<syn::LitStr>,
     idempotent: Option<syn::LitBool>,
     effect: Option<(MacroToolEffect, proc_macro2::Span)>,
+    provenance: Option<(helpers::MacroToolProvenance, proc_macro2::Span)>,
     sanitization: Option<(MacroOutputSanitization, proc_macro2::Span)>,
     has_explicit_sanitization: bool,
     inline_params: Vec<(syn::Ident, syn::LitStr)>,
@@ -719,6 +725,29 @@ impl ToolAttrBuilder {
             ToolAttrKey::Effect => {
                 self.parse_effect_attr(ident, key, input)?;
             }
+            ToolAttrKey::Provenance => {
+                let _: syn::Token![=] = input.parse()?;
+                if self.provenance.is_some() {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!("duplicate `{}` attribute", key.as_str()),
+                    ));
+                }
+                let span = input.span();
+                let prov = if input.peek(syn::Ident) {
+                    let id: syn::Ident = input.parse()?;
+                    helpers::parse_provenance_str(id.to_string().as_str(), id.span())?
+                } else if input.peek(syn::LitStr) {
+                    let lit: syn::LitStr = input.parse()?;
+                    helpers::parse_provenance_str(lit.value().as_str(), lit.span())?
+                } else {
+                    return Err(syn::Error::new(
+                        span,
+                        "expected identifier or string literal (`trusted`, `workspace_local`, `private_data`, `external_mcp`, or `untrusted_network`)",
+                    ));
+                };
+                self.provenance = Some((prov, span));
+            }
             ToolAttrKey::Sanitize => {
                 self.parse_sanitize_attr(ident, key, input)?;
             }
@@ -747,10 +776,20 @@ impl ToolAttrBuilder {
             (None, None) => MacroToolEffect::Mutating,
         };
         let idempotent = matches!(effect, MacroToolEffect::ReadOnly);
+        let provenance = self
+            .provenance
+            .map_or_else(helpers::MacroToolProvenance::default, |(p, _)| p);
 
-        let sanitization = self
-            .sanitization
-            .map_or_else(MacroOutputSanitization::default, |(mode, _)| mode);
+        let sanitization = self.sanitization.map_or_else(
+            || {
+                if provenance.is_untrusted_source() {
+                    MacroOutputSanitization::Quarantine
+                } else {
+                    MacroOutputSanitization::default()
+                }
+            },
+            |(mode, _)| mode,
+        );
 
         Ok(ToolAttr {
             description_inline: self.description_inline,
@@ -762,6 +801,7 @@ impl ToolAttrBuilder {
             context_fn: self.context_fn,
             idempotent,
             effect,
+            provenance,
             sanitization,
         })
     }
@@ -1005,12 +1045,13 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
         "Auto-generated tool struct. See the `#[llm_tool]`-annotated function `{fn_name}` for the implementation."
     );
 
-    let ctx_binding = if let Some(cp) = ctx_param {
-        let ctx_name = &cp.name;
-        quote! { let #ctx_name = _ctx; }
-    } else {
-        quote! {}
-    };
+    let ctx_binding = ctx_param.map_or_else(
+        || quote! {},
+        |cp| {
+            let ctx_name = &cp.name;
+            quote! { let #ctx_name = _ctx; }
+        },
+    );
 
     let mut_tokens: Vec<proc_macro2::TokenStream> = params
         .iter()
@@ -1027,6 +1068,9 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
     let response_helper_tokens = &response_info.helper_tokens;
     let (effect_tokens, idempotent_bool, san_tokens, sanitize_bool, quarantine_bool) =
         resolve_effect_and_sanitization_tokens(attr, &crate_path);
+    let provenance_tokens = attr
+        .map_or_else(helpers::MacroToolProvenance::default, |a| a.provenance)
+        .to_tokens(&crate_path);
 
     let call_inner = quote! {
         use #crate_path::__private::SerializeFallback as _;
@@ -1050,6 +1094,7 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
         #[derive(::serde::Deserialize, ::schemars::JsonSchema)]
         #vis struct #params_name {
             #(
+                #[doc = #param_descriptions]
                 #[schemars(description = #param_descriptions)]
                 #serde_defaults
                 pub #param_names: #param_struct_types,
@@ -1065,6 +1110,7 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
             const DESCRIPTION: &'static str = #static_description;
             const IDEMPOTENT: bool = #idempotent_bool;
             const EFFECT: #crate_path::ToolEffect = #effect_tokens;
+            const PROVENANCE: #crate_path::ToolProvenance = #provenance_tokens;
             const SANITIZE_OUTPUT: bool = #sanitize_bool;
             const QUARANTINE_OUTPUT: bool = #quarantine_bool;
             const OUTPUT_SANITIZATION: #crate_path::OutputSanitization = #san_tokens;

@@ -94,7 +94,7 @@ const fn other_type_name(value: &serde_json::Value) -> &'static str {
 /// assert_eq!(out.metadata()["cached"], true);
 ///
 /// // Single ad-hoc entry
-/// let out = ToolOutput::new("done").with_meta("exit_code", serde_json::json!(0));
+/// let out = ToolOutput::new("done").with_meta("exit_code", serde_json::Value::from(0));
 /// assert_eq!(out.metadata()["exit_code"], 0);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,9 +124,19 @@ impl ToolOutput {
     /// [`from_metadata`](Self::from_metadata).
     ///
     /// ```rust
-    /// use llm_tool::{ToolOutput, ToolError};
+    /// use llm_tool::{ToolError, ToolOutput};
+    /// use serde::Serialize;
     ///
-    /// let data = serde_json::json!({"temp": 72, "unit": "F"});
+    /// #[derive(Serialize)]
+    /// struct Reading {
+    ///     temp: i32,
+    ///     unit: &'static str,
+    /// }
+    ///
+    /// let data = Reading {
+    ///     temp: 72,
+    ///     unit: "F",
+    /// };
     /// let output = ToolOutput::json(&data).unwrap();
     /// assert!(output.content().contains("72"));
     /// assert!(output.metadata().is_empty()); // no metadata attached
@@ -472,7 +482,7 @@ impl core::fmt::Display for RegistryItem {
 /// assert_eq!(err.metadata()["status_code"], 503);
 ///
 /// // Single ad-hoc entry
-/// let err = ToolError::new("timeout").with_meta("retry_after_secs", serde_json::json!(30));
+/// let err = ToolError::new("timeout").with_meta("retry_after_secs", serde_json::Value::from(30));
 /// assert_eq!(err.metadata()["retry_after_secs"], 30);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,6 +493,20 @@ pub struct ToolError {
     /// NOT sent to the model.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     metadata: HashMap<String, serde_json::Value>,
+}
+
+/// Structured category metadata attached to built-in [`ToolError`] constructors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorKindMetadata {
+    /// Structured error category (`"not_registered"`, `"destructive_in_parallel_batch"`, or `io::ErrorKind`).
+    pub error_kind: String,
+}
+
+/// Structured classification metadata attached when converting [`serde_json::Error`] into [`ToolError`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsonErrorCategoryMetadata {
+    /// `serde_json::error::Category` classification (`"Io"`, `"Syntax"`, `"Data"`, `"Eof"`).
+    pub category: String,
 }
 
 impl ToolError {
@@ -503,6 +527,12 @@ impl ToolError {
     /// [`destructive_in_parallel_batch`](Self::destructive_in_parallel_batch) when a
     /// destructive tool is rejected during parallel batch execution.
     pub const KIND_DESTRUCTIVE_BATCH: &'static str = "destructive_in_parallel_batch";
+
+    fn with_infallible_metadata<T: serde::Serialize>(self, meta: &T) -> Self {
+        match self.with_metadata(meta) {
+            Ok(err) | Err(err) => err,
+        }
+    }
 
     /// Construct an error for a registry lookup that found no entry named
     /// `name` of the given [`RegistryItem`].
@@ -526,9 +556,10 @@ impl ToolError {
     /// ```
     #[must_use]
     pub fn not_found(kind: RegistryItem, name: &str) -> Self {
-        Self::new(format!("no {kind} named '{name}' is registered")).with_meta(
-            Self::ERROR_KIND_KEY,
-            serde_json::json!(Self::KIND_NOT_REGISTERED),
+        Self::new(format!("no {kind} named '{name}' is registered")).with_infallible_metadata(
+            &ErrorKindMetadata {
+                error_kind: Self::KIND_NOT_REGISTERED.to_string(),
+            },
         )
     }
 
@@ -539,10 +570,9 @@ impl ToolError {
         Self::new(format!(
             "Tool '{tool_name}' has Destructive effect and cannot be executed in Parallel batch mode without explicit confirmation"
         ))
-        .with_meta(
-            Self::ERROR_KIND_KEY,
-            serde_json::json!(Self::KIND_DESTRUCTIVE_BATCH),
-        )
+        .with_infallible_metadata(&ErrorKindMetadata {
+            error_kind: Self::KIND_DESTRUCTIVE_BATCH.to_string(),
+        })
     }
 
     /// Attach a single metadata key-value pair. Chainable.
@@ -611,26 +641,26 @@ impl ToolError {
     /// ```
     #[must_use]
     pub fn is_not_found(&self) -> bool {
-        self.metadata
-            .get(Self::ERROR_KIND_KEY)
-            .and_then(serde_json::Value::as_str)
-            == Some(Self::KIND_NOT_REGISTERED)
+        matches!(
+            self.metadata.get(Self::ERROR_KIND_KEY),
+            Some(serde_json::Value::String(kind)) if kind == Self::KIND_NOT_REGISTERED
+        )
     }
 
     /// Whether this error denotes a [`ToolEffect::Destructive`] tool rejected
     /// during parallel batch dispatch.
     #[must_use]
     pub fn is_destructive_batch_rejected(&self) -> bool {
-        self.metadata
-            .get(Self::ERROR_KIND_KEY)
-            .and_then(serde_json::Value::as_str)
-            == Some(Self::KIND_DESTRUCTIVE_BATCH)
+        matches!(
+            self.metadata.get(Self::ERROR_KIND_KEY),
+            Some(serde_json::Value::String(kind)) if kind == Self::KIND_DESTRUCTIVE_BATCH
+        )
     }
 }
 
 impl core::fmt::Display for ToolError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", self.message)
+        f.write_str(&self.message)
     }
 }
 
@@ -651,17 +681,17 @@ impl From<&str> for ToolError {
 #[cfg(feature = "std")]
 impl From<std::io::Error> for ToolError {
     fn from(e: std::io::Error) -> Self {
-        Self::new(e.to_string()).with_meta(
-            Self::ERROR_KIND_KEY,
-            serde_json::json!(format!("{:?}", e.kind())),
-        )
+        Self::new(e.to_string()).with_infallible_metadata(&ErrorKindMetadata {
+            error_kind: format!("{:?}", e.kind()),
+        })
     }
 }
 
 impl From<serde_json::Error> for ToolError {
     fn from(e: serde_json::Error) -> Self {
-        Self::new(e.to_string())
-            .with_meta("category", serde_json::json!(format!("{:?}", e.classify())))
+        Self::new(e.to_string()).with_infallible_metadata(&JsonErrorCategoryMetadata {
+            category: format!("{:?}", e.classify()),
+        })
     }
 }
 
@@ -683,6 +713,7 @@ pub mod prompt;
 pub mod quarantine;
 pub mod resource;
 pub mod sanitized;
+pub mod surrogate;
 pub mod truncation;
 
 pub use context::*;
@@ -691,6 +722,7 @@ pub use prompt::*;
 pub use quarantine::*;
 pub use resource::*;
 pub use sanitized::*;
+pub use surrogate::*;
 pub use truncation::*;
 
 #[cfg(all(test, feature = "std"))]

@@ -65,16 +65,14 @@ impl HeadRatio {
         } else {
             let clamped = ratio.clamp(0.0, 1.0);
             let s = format!("{clamped:.4}");
-            match s.strip_prefix("0.") {
-                Some(dec) => match dec.parse::<u32>() {
+            s.strip_prefix("0.")
+                .map_or(Self::BALANCED, |dec| match dec.parse::<u32>() {
                     Ok(val) => Self::new(val, 10_000),
                     Err(e) => {
                         tracing::debug!(error = %e, "failed to parse head ratio digits");
                         Self::BALANCED
                     }
-                },
-                None => Self::BALANCED,
-            }
+                })
         }
     }
 

@@ -158,8 +158,20 @@ impl TruncationPolicy {
         spill: &SpillDisposition,
     ) -> String {
         let omitted_str = omitted_bytes.to_string();
-        let mut marker = match &self.marker_template {
-            Some(template) => {
+        let mut marker = self.marker_template.as_ref().map_or_else(
+            || match spill {
+                SpillDisposition::Spilled(handle) => format!(
+                    "\n[TRUNCATED: {omitted_str} bytes omitted (bytes {offset_start}..{offset_end} of {original_bytes}). Full output retained as ref=\"{handle}\" — inspect with read_observation(ref, pattern, offset, length)]\n"
+                ),
+                SpillDisposition::Failed(error) => format!(
+                    "\n[TRUNCATED: {omitted_str} bytes omitted (bytes {offset_start}..{offset_end} of {original_bytes}).{notice}]\n",
+                    notice = spill_failure_notice(error)
+                ),
+                SpillDisposition::NotConfigured => {
+                    format!("\n[TRUNCATED: {omitted_str} bytes omitted]\n")
+                }
+            },
+            |template| {
                 let orig_str = original_bytes.to_string();
                 let start_str = offset_start.to_string();
                 let end_str = offset_end.to_string();
@@ -174,20 +186,8 @@ impl TruncationPolicy {
                     .replace(MarkerPlaceholder::DEPRECATED_COUNT, &omitted_str)
                     .replace(MarkerPlaceholder::DEPRECATED_BYTES, &omitted_str)
                     .replace(MarkerPlaceholder::DEPRECATED_N, &omitted_str)
-            }
-            None => match spill {
-                SpillDisposition::Spilled(handle) => format!(
-                    "\n[TRUNCATED: {omitted_str} bytes omitted (bytes {offset_start}..{offset_end} of {original_bytes}). Full output retained as ref=\"{handle}\" — inspect with read_observation(ref, pattern, offset, length)]\n"
-                ),
-                SpillDisposition::Failed(error) => format!(
-                    "\n[TRUNCATED: {omitted_str} bytes omitted (bytes {offset_start}..{offset_end} of {original_bytes}).{notice}]\n",
-                    notice = spill_failure_notice(error)
-                ),
-                SpillDisposition::NotConfigured => {
-                    format!("\n[TRUNCATED: {omitted_str} bytes omitted]\n")
-                }
             },
-        };
+        );
 
         // A custom template cannot be trusted to mention the failure, so append it.
         if let Some(error) = spill.error()
@@ -331,13 +331,13 @@ impl TruncationPolicy {
         input: &'a str,
         ctx: &SpillContext<'_>,
     ) -> Result<TruncationOutcome<'a>, SpillError> {
-        match Self::passthrough(input, self.max_bytes) {
-            Some(outcome) => Ok(outcome),
-            None => match self.resolve_spill(ctx, input) {
+        Self::passthrough(input, self.max_bytes).map_or_else(
+            || match self.resolve_spill(ctx, input) {
                 SpillDisposition::Failed(error) => Err(error),
                 spill => Ok(self.truncate_oversized_auto(input, &spill)),
             },
-        }
+            Ok,
+        )
     }
 
     /// Return the untouched input when it already fits within `max_bytes`.
@@ -356,13 +356,14 @@ impl TruncationPolicy {
 
     /// Attempt to retain the full output, classifying the result.
     fn resolve_spill(&self, ctx: &SpillContext<'_>, input: &str) -> SpillDisposition {
-        match &self.spill_sink {
-            Some(sink) => match sink.spill(ctx, input) {
-                Ok(handle) => SpillDisposition::Spilled(handle),
-                Err(error) => SpillDisposition::Failed(error),
-            },
-            None => SpillDisposition::NotConfigured,
-        }
+        self.spill_sink
+            .as_ref()
+            .map_or(SpillDisposition::NotConfigured, |sink| {
+                match sink.spill(ctx, input) {
+                    Ok(handle) => SpillDisposition::Spilled(handle),
+                    Err(error) => SpillDisposition::Failed(error),
+                }
+            })
     }
 
     fn resolve_spill_logged(&self, ctx: &SpillContext<'_>, input: &str) -> SpillDisposition {

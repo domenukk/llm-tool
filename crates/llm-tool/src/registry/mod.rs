@@ -11,12 +11,14 @@ pub use batch::{
 
 use super::{
     rust_tool::{ErasedTool, RustTool, definition_of},
-    types::{OutputSanitization, RegistryItem, ToolContext, ToolDefinition, ToolError, ToolOutput},
+    types::{
+        OutputSanitization, RegistryItem, ToolContext, ToolDefinition, ToolEffect, ToolError,
+        ToolOutput, ToolProvenance,
+    },
 };
 use crate::{
     compat::{HashMap, RwLock, read_lock_recover, write_lock_recover},
     rust_tool::BoxToolFuture,
-    types::ToolEffect,
 };
 
 /// Entry holding a cached [`ToolDefinition`] alongside the type-erased tool.
@@ -282,6 +284,12 @@ impl ToolRegistry {
     pub fn is_destructive(&self, name: &str) -> bool {
         self.definition(name)
             .is_some_and(|def| matches!(def.effect, ToolEffect::Destructive))
+    }
+
+    /// Return the [`ToolProvenance`] of the registered tool named `name`, or `None` if not registered.
+    #[must_use]
+    pub fn provenance(&self, name: &str) -> Option<ToolProvenance> {
+        self.definition(name).map(|def| def.provenance)
     }
 
     /// Remove a tool by name, returning `true` if it was present.

@@ -3,7 +3,7 @@
 use alloc::{borrow::ToOwned, boxed::Box, format, string::String, sync::Arc};
 use core::any::{Any, TypeId};
 
-use super::ToolError;
+use super::{SurrogateHandle, SurrogateVault, ToolError};
 use crate::compat::{HashMap, RwLock, read_lock, write_lock};
 
 /// A cheaply-cloneable handle to a tool's shared key-value state store.
@@ -297,5 +297,82 @@ impl ToolContext {
                 None
             }
         }
+    }
+
+    /// Attach a pre-constructed [`SurrogateVault`] to this context. Chainable.
+    #[must_use]
+    pub fn with_surrogate_vault(self, vault: SurrogateVault) -> Self {
+        match write_lock(&self.extensions) {
+            Ok(mut exts) => {
+                exts.insert(TypeId::of::<SurrogateVault>(), Box::new(vault));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "ToolContext::with_surrogate_vault: extensions lock poisoned"
+                );
+            }
+        }
+        self
+    }
+
+    /// Obtain the session's [`SurrogateVault`], lazily initializing and storing one in
+    /// [`extensions`](Self::get_ext) if not yet present.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError`] if the extensions lock is poisoned.
+    pub fn surrogate_vault(&self) -> Result<SurrogateVault, ToolError> {
+        if let Some(existing) = self.get_ext::<SurrogateVault>() {
+            return Ok(existing);
+        }
+        let mut exts = write_lock(&self.extensions).map_err(|e| {
+            let msg = format!("ToolContext::surrogate_vault: extensions lock poisoned: {e}");
+            tracing::warn!("{msg}");
+            ToolError::new(msg)
+        })?;
+        if let Some(existing) = exts
+            .get(&TypeId::of::<SurrogateVault>())
+            .and_then(|v| v.downcast_ref::<SurrogateVault>())
+        {
+            return Ok(existing.clone());
+        }
+        let vault = SurrogateVault::new();
+        exts.insert(TypeId::of::<SurrogateVault>(), Box::new(vault.clone()));
+        drop(exts);
+        Ok(vault)
+    }
+
+    /// Mint an opaque [`SurrogateHandle`] (`<surrogate:kind:id>`) in this context's [`SurrogateVault`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError`] if `kind` or `raw_value` is invalid or a lock is poisoned.
+    pub fn mint_surrogate(
+        &self,
+        kind: &str,
+        raw_value: impl Into<String>,
+    ) -> Result<SurrogateHandle, ToolError> {
+        self.surrogate_vault()?.mint(kind, raw_value)
+    }
+
+    /// Resolve all `<surrogate:kind:id>` tokens in `input` using this context's [`SurrogateVault`].
+    ///
+    /// Fails closed with [`ToolError`] if any surrogate token in `input` was not minted in this session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError`] if an unknown/malformed surrogate token is present or a lock is poisoned.
+    pub fn resolve_surrogates(&self, input: &str) -> Result<String, ToolError> {
+        self.surrogate_vault()?.resolve_in_str(input)
+    }
+
+    /// Redact any registered raw secret/handle values in `output` back to their `<surrogate:kind:id>` tokens.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError`] if a lock is poisoned.
+    pub fn redact_surrogates(&self, output: &str) -> Result<String, ToolError> {
+        self.surrogate_vault()?.redact_str(output)
     }
 }

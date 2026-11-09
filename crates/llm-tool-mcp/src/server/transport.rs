@@ -444,9 +444,21 @@ async fn write_outcome_async(
 
 const BATCH_START_CHAR: char = '[';
 
+#[derive(Debug, Clone, Copy)]
+struct PresentField;
+
+fn deserialize_present_field<'de, D>(deserializer: D) -> Result<Option<PresentField>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <serde::de::IgnoredAny as serde::Deserialize>::deserialize(deserializer)
+        .map(|_ignored| Some(PresentField))
+}
+
 #[derive(serde::Deserialize)]
 struct MethodProbe<'a> {
-    id: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "deserialize_present_field")]
+    id: Option<PresentField>,
     #[serde(borrow)]
     method: Option<&'a str>,
 }

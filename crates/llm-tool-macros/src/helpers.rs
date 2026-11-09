@@ -6,8 +6,48 @@ use crate::{
     TYPE_STR, TYPE_TOOL_CONTEXT, ToolAttr, desc, response_struct_gen,
 };
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum MacroToolProvenance {
+    #[default]
+    Trusted,
+    WorkspaceLocal,
+    PrivateData,
+    ExternalMcp,
+    UntrustedNetwork,
+}
+
+impl MacroToolProvenance {
+    pub const fn is_untrusted_source(self) -> bool {
+        matches!(self, Self::ExternalMcp | Self::UntrustedNetwork)
+    }
+
+    pub fn to_tokens(self, crate_path: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+        match self {
+            Self::Trusted => quote!(#crate_path::ToolProvenance::Trusted),
+            Self::WorkspaceLocal => quote!(#crate_path::ToolProvenance::WorkspaceLocal),
+            Self::PrivateData => quote!(#crate_path::ToolProvenance::PrivateData),
+            Self::ExternalMcp => quote!(#crate_path::ToolProvenance::ExternalMcp),
+            Self::UntrustedNetwork => quote!(#crate_path::ToolProvenance::UntrustedNetwork),
+        }
+    }
+}
+
+pub fn parse_provenance_str(s: &str, span: proc_macro2::Span) -> syn::Result<MacroToolProvenance> {
+    match s {
+        "trusted" | "Trusted" => Ok(MacroToolProvenance::Trusted),
+        "workspace_local" | "WorkspaceLocal" => Ok(MacroToolProvenance::WorkspaceLocal),
+        "private_data" | "PrivateData" => Ok(MacroToolProvenance::PrivateData),
+        "external_mcp" | "ExternalMcp" => Ok(MacroToolProvenance::ExternalMcp),
+        "untrusted_network" | "UntrustedNetwork" => Ok(MacroToolProvenance::UntrustedNetwork),
+        _ => Err(syn::Error::new(
+            span,
+            "expected `trusted`, `workspace_local`, `private_data`, `external_mcp`, or `untrusted_network`",
+        )),
+    }
+}
+
 /// Build the struct field types and any auto-borrow bindings for `&str` params.
-pub(crate) fn build_param_types_and_borrows(
+pub fn build_param_types_and_borrows(
     params: &[&ParamInfo],
 ) -> (Vec<proc_macro2::TokenStream>, Vec<proc_macro2::TokenStream>) {
     params
@@ -26,7 +66,7 @@ pub(crate) fn build_param_types_and_borrows(
 }
 
 /// Build `#[serde(default)]` annotations for `Option<T>` params.
-pub(crate) fn build_serde_defaults(params: &[&ParamInfo]) -> Vec<proc_macro2::TokenStream> {
+pub fn build_serde_defaults(params: &[&ParamInfo]) -> Vec<proc_macro2::TokenStream> {
     params
         .iter()
         .map(|p| {
@@ -51,7 +91,7 @@ pub(crate) fn build_serde_defaults(params: &[&ParamInfo]) -> Vec<proc_macro2::To
 /// struct attached as metadata.
 /// Wrap a sync or async function body returning either a `Result<T, E>` or a bare
 /// value `T`, binding the success value to `__v` and evaluating `ok_expr`.
-pub(crate) fn build_wrapped_body(
+pub fn build_wrapped_body(
     func: &ItemFn,
     return_info: &ReturnInfo,
     ok_expr: &proc_macro2::TokenStream,
@@ -98,7 +138,7 @@ pub(crate) fn build_wrapped_body(
     }
 }
 
-pub(crate) fn build_body_tokens(
+pub fn build_body_tokens(
     func: &ItemFn,
     return_info: &ReturnInfo,
     crate_path: &proc_macro2::TokenStream,
@@ -110,28 +150,27 @@ pub(crate) fn build_body_tokens(
 
 /// Build the Ok-branch conversion: either the standard `Wrap(v).__convert()`
 /// or template-based rendering when `response_template` is set.
-pub(crate) fn build_ok_branch(
+pub fn build_ok_branch(
     crate_path: &proc_macro2::TokenStream,
     response_info: &ResponseTemplateInfo,
 ) -> proc_macro2::TokenStream {
-    if let Some(ref render_tokens) = response_info.render_tokens {
-        render_tokens.clone()
-    } else {
-        quote! { #crate_path::__private::Wrap(__v).__convert() }
-    }
+    response_info.render_tokens.as_ref().map_or_else(
+        || quote! { #crate_path::__private::Wrap(__v).__convert() },
+        Clone::clone,
+    )
 }
 
 // ── Response Template Resolution ────────────────────────────────────────────
 
 /// Structured output from response template resolution.
-pub(crate) struct ResponseTemplateInfo {
+pub struct ResponseTemplateInfo {
     /// Cargo dependency-tracking tokens.
-    pub(crate) dep_tracking: proc_macro2::TokenStream,
+    pub dep_tracking: proc_macro2::TokenStream,
     /// Helper tokens (e.g. static `LazyLock` declarations).
-    pub(crate) helper_tokens: proc_macro2::TokenStream,
+    pub helper_tokens: proc_macro2::TokenStream,
     /// Token stream that converts `__v` into `Result<ToolOutput, ToolError>`
     /// via template rendering. `None` = use default `__convert()` path.
-    pub(crate) render_tokens: Option<proc_macro2::TokenStream>,
+    pub render_tokens: Option<proc_macro2::TokenStream>,
 }
 
 impl Default for ResponseTemplateInfo {
@@ -144,7 +183,7 @@ impl Default for ResponseTemplateInfo {
     }
 }
 
-pub(crate) fn resolve_response_template(
+pub fn resolve_response_template(
     attr: Option<&ToolAttr>,
     struct_name: &syn::Ident,
     fn_name: &syn::Ident,
@@ -167,7 +206,7 @@ pub(crate) fn resolve_response_template(
 /// If the relative path does not exist under `CARGO_MANIFEST_DIR` (e.g. inside `trybuild`
 /// runner crates located in `target/tests/trybuild/`), this function walks up parent
 /// directories to find the file in the workspace or subcrates.
-pub(crate) fn resolve_manifest_path(
+pub fn resolve_manifest_path(
     rel_path: &str,
     span: proc_macro2::Span,
 ) -> syn::Result<std::path::PathBuf> {
@@ -230,7 +269,7 @@ pub(crate) fn resolve_manifest_path(
 }
 
 /// Implementation of response template resolution from file.
-pub(crate) fn resolve_response_template_file(
+pub fn resolve_response_template_file(
     attr: &ToolAttr,
     response_path: &LitStr,
     struct_name: &syn::Ident,
@@ -272,21 +311,21 @@ pub(crate) fn resolve_response_template_file(
         })?;
 
     let response_struct_name_str = format!("{struct_name}Response");
-    let generated_idents = response_struct_gen::collect_generated_type_names(
-        &response_struct_name_str,
-        &fm.declarations,
-    );
+    let generated_idents =
+        response_struct_gen::collect_generated_type_names(&response_struct_name_str, &fm);
 
     let response_struct_name = format_ident!("{}", response_struct_name_str);
     let response_mod_name = format_ident!("__{}_response_mod", fn_name);
 
     let env_toks = desc::env_tokens(attr);
+    let reexport_doc = format!("Auto-generated response types for the [`{struct_name}`] tool.");
     let helper_tokens = quote! {
         ::llm_tool::__md_tmpl_macros::include_template!(
             #response_path as #response_struct_name => #response_mod_name,
             crate = ::llm_tool::__md_tmpl
             #env_toks
         );
+        #[doc = #reexport_doc]
         pub use #response_mod_name::{ #( #generated_idents ),* };
     };
 
@@ -312,7 +351,7 @@ pub(crate) fn resolve_response_template_file(
 }
 
 /// Implementation of response template resolution from inline string.
-pub(crate) fn resolve_response_template_inline(
+pub fn resolve_response_template_inline(
     attr: &ToolAttr,
     response_inline: &LitStr,
     struct_name: &syn::Ident,
@@ -337,21 +376,21 @@ pub(crate) fn resolve_response_template_inline(
     };
 
     let response_struct_name_str = format!("{struct_name}Response");
-    let generated_idents = response_struct_gen::collect_generated_type_names(
-        &response_struct_name_str,
-        &fm.declarations,
-    );
+    let generated_idents =
+        response_struct_gen::collect_generated_type_names(&response_struct_name_str, &fm);
 
     let response_struct_name = format_ident!("{}", response_struct_name_str);
     let response_mod_name = format_ident!("__{}_response_mod", fn_name);
 
     let env_toks = desc::env_tokens(attr);
+    let reexport_doc = format!("Auto-generated response types for the [`{struct_name}`] tool.");
     let helper_tokens = quote! {
         ::llm_tool::__md_tmpl_macros::template!(
             #source as #response_struct_name => #response_mod_name,
             crate = ::llm_tool::__md_tmpl
             #env_toks
         );
+        #[doc = #reexport_doc]
         pub use #response_mod_name::{ #( #generated_idents ),* };
     };
 
@@ -377,7 +416,7 @@ pub(crate) fn resolve_response_template_inline(
 }
 
 /// Check whether `ty` is `Option<T>` (or `std::option::Option<T>` / `core::option::Option<T>`).
-pub(crate) fn is_option_type(ty: &syn::Type) -> bool {
+pub fn is_option_type(ty: &syn::Type) -> bool {
     let Type::Path(type_path) = ty else {
         return false;
     };
@@ -409,7 +448,7 @@ pub(crate) fn is_option_type(ty: &syn::Type) -> bool {
 
 /// Check whether `ty` is `ToolContext`, `&ToolContext`, or a qualified path
 /// ending in `ToolContext`.
-pub(crate) fn is_tool_context_type(ty: &syn::Type) -> bool {
+pub fn is_tool_context_type(ty: &syn::Type) -> bool {
     let mut inner = ty;
     while let Type::Reference(r) = inner {
         inner = r.elem.as_ref();
@@ -439,7 +478,7 @@ pub(crate) fn is_tool_context_type(ty: &syn::Type) -> bool {
 }
 
 /// Check whether `ty` is `&str`.
-pub(crate) fn is_str_ref(ty: &syn::Type) -> bool {
+pub fn is_str_ref(ty: &syn::Type) -> bool {
     let Type::Reference(ref_type) = ty else {
         return false;
     };
@@ -456,7 +495,7 @@ pub(crate) fn is_str_ref(ty: &syn::Type) -> bool {
         .is_some_and(|seg| seg.ident == TYPE_STR && seg.arguments.is_none())
 }
 
-pub(crate) fn is_explicit_context_attr(attr: &syn::Attribute) -> syn::Result<bool> {
+pub fn is_explicit_context_attr(attr: &syn::Attribute) -> syn::Result<bool> {
     if !attr.path().is_ident(MACRO_LLM_TOOL) {
         return Ok(false);
     }
@@ -472,7 +511,7 @@ pub(crate) fn is_explicit_context_attr(attr: &syn::Attribute) -> syn::Result<boo
     Ok(is_context)
 }
 
-pub(crate) fn extract_params(func: &ItemFn, macro_name: &str) -> syn::Result<Vec<ParamInfo>> {
+pub fn extract_params(func: &ItemFn, macro_name: &str) -> syn::Result<Vec<ParamInfo>> {
     let mut params = Vec::new();
     for arg in &func.sig.inputs {
         match arg {
@@ -532,7 +571,7 @@ pub(crate) fn extract_params(func: &ItemFn, macro_name: &str) -> syn::Result<Vec
 /// zero-generic unit struct. A generic signature would expand to code that
 /// references undeclared type/lifetime parameters, yielding confusing errors
 /// pointing at generated code. Fail early with a clear, spanned message.
-pub(crate) fn reject_generic_signature(func: &ItemFn, macro_name: &str) -> syn::Result<()> {
+pub fn reject_generic_signature(func: &ItemFn, macro_name: &str) -> syn::Result<()> {
     let generics = &func.sig.generics;
     if let Some(where_clause) = &generics.where_clause {
         return Err(syn::Error::new_spanned(
@@ -552,7 +591,7 @@ pub(crate) fn reject_generic_signature(func: &ItemFn, macro_name: &str) -> syn::
     Ok(())
 }
 
-pub(crate) fn extract_doc_string(attrs: &[syn::Attribute]) -> String {
+pub fn extract_doc_string(attrs: &[syn::Attribute]) -> String {
     let lines: Vec<String> = attrs
         .iter()
         .filter_map(|attr| {
@@ -578,7 +617,7 @@ pub(crate) fn extract_doc_string(attrs: &[syn::Attribute]) -> String {
 }
 
 /// Parse the return type — either `Result<T, E>` or a bare type `T`.
-pub(crate) fn parse_return_type(func: &ItemFn, macro_name: &str) -> syn::Result<ReturnInfo> {
+pub fn parse_return_type(func: &ItemFn, macro_name: &str) -> syn::Result<ReturnInfo> {
     let syn::ReturnType::Type(_, ty) = &func.sig.output else {
         return Err(syn::Error::new_spanned(
             &func.sig,
@@ -597,7 +636,7 @@ pub(crate) fn parse_return_type(func: &ItemFn, macro_name: &str) -> syn::Result<
 
 /// Try to extract `T` and `E` from a `Result<T, E>` return type.
 /// Returns `None` if the type is not a `Result`.
-pub(crate) fn try_extract_result_types(ty: &syn::Type) -> syn::Result<Option<ReturnInfo>> {
+pub fn try_extract_result_types(ty: &syn::Type) -> syn::Result<Option<ReturnInfo>> {
     let Type::Path(type_path) = ty else {
         return Ok(None);
     };

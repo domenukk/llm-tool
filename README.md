@@ -1,26 +1,22 @@
 # llm-tool
 
-Typed Rust tool definitions for LLM agents and
-[MCP](https://modelcontextprotocol.io/) servers.
+Define tools for LLM agents in Rust.
 
 ## Overview
 
-- **`#[llm_tool]`:** Generates a typed parameter struct, JSON Schema, and
-  `RustTool` implementation from a plain function.
-- **Parameter Validation:** Deserializes and validates tool arguments before
-  calling the function.
-- **Registry:** `ToolRegistry` provides JSON Schemas and dispatches calls by
-  name.
-- **MCP Server:** `llm-tool-mcp` exposes tools, prompts, and resources over
+- **`#[llm_tool]`:** Turns a Rust function into a tool.
+- **Validation:** Checks tool arguments before calling the function.
+- **Registry:** Lists tools and calls them by name.
+- **MCP Server:** `llm-tool-mcp` serves tools, prompts, and resources over
   stdio, TCP, or Unix sockets.
-- **`no_std` Support:** Core types build on `no_std` + `alloc` targets.
+- **`no_std`:** Core types work without the standard library.
 
 ## Quick Start
 
 ```toml
 [dependencies]
-llm-tool = "0.10.3"
-llm-tool-mcp = "0.10.3" # Optional: MCP server support
+llm-tool = "0.10.6"
+llm-tool-mcp = "0.10.6" # Optional: MCP server support
 ```
 
 ### Define a Tool
@@ -136,11 +132,9 @@ Load descriptions from `.tmpl.md` template files (`description_file = "..."`)
 with compile-time variable substitution and validation. See the
 [`md-tmpl` docs](https://docs.rs/md-tmpl) for details.
 
-### Middle-Out Truncation & Observation Recall
+### Output Truncation
 
-When tools return large payloads (file dumps, logs, shell output),
-`TruncationPolicy` bounds output size while preserving both the prefix and the
-tail:
+Keep the start and end of large tool outputs within a size limit:
 
 ```rust
 use llm_tool::{TruncationPolicy, TruncationAlignment, truncate_middle};
@@ -153,11 +147,10 @@ let truncated = truncate_middle("line 1\nline 2\nline 3\nline 4\nline 5\n", &pol
 assert!(truncated.len() <= 100);
 ```
 
-#### Observation Spilling
+#### Saving Full Output
 
-To retain the full output before truncation, attach an [`OutputSpillSink`]. A
-typed [`SpillRef`] handle is embedded into the truncation marker for recall
-tools:
+Attach an [`OutputSpillSink`] to save the full output before truncation. A
+[`SpillRef`] ID is added to the truncation notice so recall tools can fetch it:
 
 ```rust
 use std::sync::Arc;
@@ -181,43 +174,65 @@ assert!(outcome.is_truncated());
 assert_eq!(outcome.spill_ref.unwrap().as_str(), "obs-12345");
 ```
 
-#### Spill Failure Semantics
+#### Error Handling When Saving Fails
 
-| API                                     | On spill failure                                                                                                          |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| [`TruncationPolicy::truncate_detailed`] | Returns `Err(SpillError)`; the caller decides.                                                                            |
-| [`TruncationPolicy::truncate`]          | Never fails. Logs the error and renders it **into the marker**, so the model is told the omitted bytes are unrecoverable. |
+| API                                     | On failure                                                                                   |
+| --------------------------------------- | -------------------------------------------------------------------------------------------- |
+| [`TruncationPolicy::truncate_detailed`] | Returns `Err(SpillError)`.                                                                   |
+| [`TruncationPolicy::truncate`]          | Logs the error and notes in the truncation marker that the omitted bytes could not be saved. |
 
-The in-band warning is appended even to custom marker templates that do not
-mention it, and truncation drops content before the marker so `max_bytes` always
-includes an explicit notice.
+### Output Sanitization
 
-### Prompt-Injection Defense
+Sanitizes untrusted tool output so special model control tokens cannot inject
+instructions into the prompt.
 
-Sanitize untrusted tool outputs to neutralize `ChatML`, Llama, Harmony, and
-`DeepSeek` control tokens, preventing indirect prompt injection attacks.
+#### Defaults
 
-#### Secure by Default
+Every tool output is sanitized unless you opt out:
 
-Every tool output is sanitized unless you opt out. Tools default to
-`OutputSanitization::SanitizeTokens` (control tokens neutralized in place), and
-`ToolRegistry` enforces the same minimum on every dispatch, so a single tool
-that opts out still gets sanitized:
-
-| Goal                                  | Setting                                                                                    |
-| ------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Default (neutralize control tokens)   | nothing to do                                                                              |
-| Wrap untrusted content in an envelope | `#[llm_tool(quarantine)]` or `#[llm_tool(sanitize = "tag")]`                               |
-| Raise the minimum for all tools       | `ToolRegistry::new().with_output_floor(OutputSanitization::Quarantine)`                    |
-| Raw output (trusted content only)     | `#[llm_tool(sanitization = "none")]` **and** `with_output_floor(OutputSanitization::None)` |
+| Goal                                  | Setting                                                                                                 |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Default (neutralize control tokens)   | nothing to do                                                                                           |
+| Wrap untrusted content in an envelope | `#[llm_tool(quarantine)]` or `#[llm_tool(sanitize = "tag")]`                                            |
+| Classify tool data provenance         | `#[llm_tool(provenance = "untrusted_network")]` (auto-quarantines `external_mcp` / `untrusted_network`) |
+| Raise the minimum for all tools       | `ToolRegistry::new().with_output_floor(OutputSanitization::Quarantine)`                                 |
+| Raw output (trusted content only)     | `#[llm_tool(sanitization = "none")]` **and** `with_output_floor(OutputSanitization::None)`              |
 
 Manual `RustTool` impls can keep using the `SANITIZE_OUTPUT` /
 `QUARANTINE_OUTPUT` shorthands; `SANITIZE_OUTPUT` now defaults to `true`.
 
-#### Declarative Output Sanitization
+#### Data Sources & Secret Tokens
 
-Wrap untrusted external data with `#[llm_tool(sanitize = "tag")]` (wraps in
-`<tag>` with an explicit boundary notice) or `#[llm_tool(quarantine)]`:
+Set where a tool's data comes from with `#[llm_tool(provenance = "...")]`
+(`"trusted"`, `"workspace_local"`, `"private_data"`, `"external_mcp"`, or
+`"untrusted_network"`). External and network tools wrap their output in
+`<untrusted_tool_output>` tags by default.
+
+Use [`SurrogateVault`] with [`ToolContext`] to replace secret values with
+`<surrogate:kind:id>` placeholders so raw secrets are not sent to the model:
+
+```rust
+use llm_tool::{SurrogateVault, ToolContext};
+
+let vault = SurrogateVault::new();
+let ctx = ToolContext::new().with_surrogate_vault(vault);
+
+let token = ctx.mint_surrogate("api_key", "sk-live-secret-123").unwrap();
+assert_eq!(token.token(), "<surrogate:api_key:1>");
+assert_eq!(
+    ctx.resolve_surrogates(&format!("Bearer {}", token.token())).unwrap(),
+    "Bearer sk-live-secret-123"
+);
+assert_eq!(
+    ctx.redact_surrogates("leaked sk-live-secret-123 in log").unwrap(),
+    "leaked <surrogate:api_key:1> in log"
+);
+```
+
+#### Wrapping Untrusted Output
+
+Wrap untrusted tool output with `#[llm_tool(sanitize = "tag")]` or
+`#[llm_tool(quarantine)]`:
 
 ```rust
 use llm_tool::{llm_tool, ToolContext, ToolRegistry};
@@ -244,10 +259,11 @@ assert!(out.content().contains("&lt;/untrusted_page&gt;"));
 # });
 ```
 
-#### Template-Level Sanitization via `md-tmpl`
+#### Response Templates
 
-In `response` or `response_file` templates, use `| sanitize` (or
-`| sanitize("tag")`) to sanitize untrusted fields and escape enclosing XML tags:
+In `response` or `response_file` templates, `str` parameters are sanitized by
+default. Use `| sanitize("tag")` to wrap a field in an XML tag, or `trusted str`
+for trusted text:
 
 ```rust
 use llm_tool::{llm_tool, ToolContext, ToolRegistry};
@@ -301,13 +317,12 @@ assert!(output.is_sanitized_with("untrusted_data"));
 assert!(!output.content().contains("<|im_start|>"));
 ```
 
-### Tool Effects & Safe Parallel Batch Dispatch
+### Tool Effects & Batch Calls
 
-Classify tools with
-`#[llm_tool(effect = "read_only" | "mutating" | "destructive")]` (alias
-`idempotent = true` maps to `ReadOnly`). `ToolRegistry::dispatch_batch` executes
-batches concurrently with [`BatchExecutionMode::Parallel`] while automatically
-blocking `Destructive` tools unless explicitly confirmed via
+Mark tools with `#[llm_tool(effect = "read_only" | "mutating" | "destructive")]`
+(`idempotent = true` is an alias for `ReadOnly`). `ToolRegistry::dispatch_batch`
+runs batches in parallel with [`BatchExecutionMode::Parallel`] and blocks
+`Destructive` tools unless allowed via
 [`BatchExecutionMode::ParallelAllowDestructive`] or [`AllowDestructiveBatch`]:
 
 ```rust

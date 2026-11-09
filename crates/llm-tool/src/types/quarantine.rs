@@ -270,7 +270,37 @@ pub fn quarantine_tool_output(raw: &str) -> String {
         .expect("TOOL_OUTPUT_QUARANTINE_TAG is a valid XML tag")
 }
 
+fn sanitize_json_value_in_place(val: &mut serde_json::Value) {
+    match val {
+        serde_json::Value::String(s) => {
+            if !is_quarantined_output(s)
+                && let Cow::Owned(clean) =
+                    md_tmpl_core::sanitize_untrusted_str(s, TOOL_OUTPUT_QUARANTINE_TAG)
+            {
+                *s = clean;
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                sanitize_json_value_in_place(item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values_mut() {
+                sanitize_json_value_in_place(v);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
 impl ToolOutput {
+    fn sanitize_metadata_in_place(&mut self) {
+        for val in self.metadata.values_mut() {
+            sanitize_json_value_in_place(val);
+        }
+    }
+
     /// Return a sanitized copy of this [`ToolOutput`], neutralizing control
     /// delimiters ([`DELIMITER_RULES`]) and `<tool_output_quarantine>` breakout tags
     /// in a single pass without wrapping in outer XML tags.
@@ -285,6 +315,7 @@ impl ToolOutput {
         {
             self.content = clean;
         }
+        self.sanitize_metadata_in_place();
         self
     }
 
@@ -303,6 +334,7 @@ impl ToolOutput {
     #[must_use]
     pub fn quarantined(mut self) -> Self {
         self.content = quarantine_tool_output(&self.content);
+        self.sanitize_metadata_in_place();
         self
     }
 
@@ -327,6 +359,7 @@ impl ToolOutput {
             self.content =
                 sanitize_block_str(&self.content, Some(tag), None).expect("tag is a valid XML tag");
         }
+        self.sanitize_metadata_in_place();
         self
     }
 
@@ -344,6 +377,7 @@ impl ToolOutput {
             self.content = sanitize_block_str(&self.content, Some(tag), Some(notice))
                 .expect("tag is a valid XML tag");
         }
+        self.sanitize_metadata_in_place();
         self
     }
 
@@ -417,6 +451,7 @@ impl ToolOutput {
     #[must_use]
     pub fn sanitized_truncated(mut self, policy: &TruncationPolicy) -> Self {
         self.content = policy.truncate_sanitized(&self.content).into_owned();
+        self.sanitize_metadata_in_place();
         self
     }
 
@@ -427,6 +462,7 @@ impl ToolOutput {
     #[must_use]
     pub fn quarantined_truncated(mut self, policy: &TruncationPolicy) -> Self {
         self.content = policy.truncate_quarantined(&self.content);
+        self.sanitize_metadata_in_place();
         self
     }
 }

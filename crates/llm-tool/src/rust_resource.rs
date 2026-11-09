@@ -225,14 +225,14 @@ pub fn match_uri_template(
 }
 
 /// Type-erased future returned by [`ErasedResource::read_with_vars`].
-pub(crate) type BoxResourceFuture<'a> =
+pub type BoxResourceFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ResourceOutput, ToolError>> + Send + 'a>>;
 
 /// Type-erased wrapper enabling heterogeneous resource storage.
 ///
 /// This is an internal implementation detail of [`ResourceRegistry`]; callers
 /// interact with resources through the registry rather than this trait.
-pub(crate) trait ErasedResource: Send + Sync {
+pub trait ErasedResource: Send + Sync {
     /// Execute `read` given pre-extracted borrowed `(key, value)` URI variables.
     fn read_with_vars<'a>(
         &'a self,

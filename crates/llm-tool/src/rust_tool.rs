@@ -5,6 +5,7 @@ use core::{future::Future, pin::Pin};
 
 use super::types::{
     OutputSanitization, ToolContext, ToolDefinition, ToolEffect, ToolError, ToolOutput,
+    ToolProvenance,
 };
 
 /// Convenience type for tools that take no parameters.
@@ -78,6 +79,13 @@ pub trait RustTool: Send + Sync {
     /// Whether the tool is idempotent / read-only safe for concurrent wave execution.
     const IDEMPOTENT: bool = false;
 
+    /// Data-provenance and trust classification of the tool.
+    ///
+    /// Defaults to [`ToolProvenance::Trusted`]. Tools with [`ToolProvenance::ExternalMcp`]
+    /// or [`ToolProvenance::UntrustedNetwork`] automatically default [`Self::OUTPUT_SANITIZATION`]
+    /// to [`OutputSanitization::Quarantine`] unless overridden.
+    const PROVENANCE: ToolProvenance = ToolProvenance::Trusted;
+
     /// Shorthand: neutralize control tokens in this tool's output.
     ///
     /// Defaults to `true` (secure by default). Set to `false` to opt out, or prefer
@@ -92,22 +100,29 @@ pub trait RustTool: Send + Sync {
 
     /// Automatic prompt-injection sanitization policy applied to this tool's output.
     ///
-    /// Derived from the shorthands: [`OutputSanitization::Quarantine`] if
-    /// [`Self::QUARANTINE_OUTPUT`], else [`OutputSanitization::SanitizeTokens`] if
-    /// [`Self::SANITIZE_OUTPUT`] (the default), else [`OutputSanitization::None`].
+    /// Derived from the shorthands and provenance: [`OutputSanitization::Quarantine`] if
+    /// [`Self::QUARANTINE_OUTPUT`] or [`Self::PROVENANCE`] is an untrusted external source,
+    /// else [`OutputSanitization::SanitizeTokens`] if [`Self::SANITIZE_OUTPUT`] (the default),
+    /// else [`OutputSanitization::None`].
     /// Override it to pick a tagged envelope, or [`OutputSanitization::None`] only for
     /// output you fully control.
-    const OUTPUT_SANITIZATION: OutputSanitization = if Self::QUARANTINE_OUTPUT {
-        OutputSanitization::Quarantine
-    } else if Self::SANITIZE_OUTPUT {
-        OutputSanitization::SanitizeTokens
-    } else {
-        OutputSanitization::None
-    };
+    const OUTPUT_SANITIZATION: OutputSanitization =
+        if Self::QUARANTINE_OUTPUT || Self::PROVENANCE.is_untrusted_source() {
+            OutputSanitization::Quarantine
+        } else if Self::SANITIZE_OUTPUT {
+            OutputSanitization::SanitizeTokens
+        } else {
+            OutputSanitization::None
+        };
 
     /// Return the execution effect of the tool.
     fn effect(&self) -> ToolEffect {
         Self::EFFECT
+    }
+
+    /// Return the data-provenance tier of the tool.
+    fn provenance(&self) -> ToolProvenance {
+        Self::PROVENANCE
     }
 
     /// Return whether the tool is idempotent (read-only).
@@ -188,12 +203,17 @@ impl<T: RustTool> RustTool for alloc::sync::Arc<T> {
     const DESCRIPTION: &'static str = T::DESCRIPTION;
     const EFFECT: ToolEffect = T::EFFECT;
     const IDEMPOTENT: bool = T::IDEMPOTENT;
+    const PROVENANCE: ToolProvenance = T::PROVENANCE;
     const SANITIZE_OUTPUT: bool = T::SANITIZE_OUTPUT;
     const QUARANTINE_OUTPUT: bool = T::QUARANTINE_OUTPUT;
     const OUTPUT_SANITIZATION: OutputSanitization = T::OUTPUT_SANITIZATION;
 
     fn effect(&self) -> ToolEffect {
         (**self).effect()
+    }
+
+    fn provenance(&self) -> ToolProvenance {
+        (**self).provenance()
     }
 
     fn is_idempotent(&self) -> bool {
@@ -223,12 +243,17 @@ impl<T: RustTool> RustTool for SharedRustTool<T> {
     const DESCRIPTION: &'static str = T::DESCRIPTION;
     const EFFECT: ToolEffect = T::EFFECT;
     const IDEMPOTENT: bool = T::IDEMPOTENT;
+    const PROVENANCE: ToolProvenance = T::PROVENANCE;
     const SANITIZE_OUTPUT: bool = T::SANITIZE_OUTPUT;
     const QUARANTINE_OUTPUT: bool = T::QUARANTINE_OUTPUT;
     const OUTPUT_SANITIZATION: OutputSanitization = T::OUTPUT_SANITIZATION;
 
     fn effect(&self) -> ToolEffect {
         self.0.effect()
+    }
+
+    fn provenance(&self) -> ToolProvenance {
+        self.0.provenance()
     }
 
     fn is_idempotent(&self) -> bool {
@@ -277,6 +302,7 @@ pub fn definition_of<T: RustTool>(tool: &T) -> Result<ToolDefinition, ToolError>
         parameter_schema,
         tool.effect(),
     )
+    .with_provenance(tool.provenance())
     .with_output_sanitization(tool.output_sanitization()))
 }
 
@@ -290,20 +316,28 @@ pub fn definition_of<T: RustTool>(tool: &T) -> Result<ToolDefinition, ToolError>
 /// first non-`"null"` element. For example:
 /// - `["string", "null"]` → `"string"`
 /// - `["integer", "null"]` → `"integer"`
+const SCHEMA_TYPE_KEY: &str = "type";
+const SCHEMA_NULL_TYPE: &str = "null";
+
 fn sanitize_schema_types(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
             // If "type" is an array (e.g. ["string", "null"]), pick the first
             // non-"null" element and replace with it as a scalar type.
-            let replacement = match map.get("type") {
+            let replacement = match map.get(SCHEMA_TYPE_KEY) {
                 Some(serde_json::Value::Array(arr)) => {
-                    let non_null = arr.iter().find(|v| v.as_str() != Some("null")).cloned();
+                    let non_null = arr
+                        .iter()
+                        .find(
+                            |v| !matches!(v, serde_json::Value::String(s) if s == SCHEMA_NULL_TYPE),
+                        )
+                        .cloned();
                     non_null.or_else(|| arr.first().cloned())
                 }
                 _ => None,
             };
             if let Some(val) = replacement {
-                map.insert("type".to_string(), val);
+                map.insert(SCHEMA_TYPE_KEY.to_string(), val);
             }
             for val in map.values_mut() {
                 sanitize_schema_types(val);
@@ -329,7 +363,7 @@ pub type BoxToolFuture<'a> =
 ///
 /// Boxes the future from [`RustTool::call`] so we can store different tool
 /// types in the same `HashMap<String, Box<dyn ErasedTool>>`.
-pub(crate) trait ErasedTool: Send + Sync {
+pub trait ErasedTool: Send + Sync {
     /// Deserialize `args` and call the handler, returning a boxed future.
     fn call_erased<'a>(
         &'a self,

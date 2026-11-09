@@ -141,6 +141,7 @@ pub fn prompt_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<TokenS
         #[derive(::serde::Deserialize, ::schemars::JsonSchema)]
         #vis struct #params_name {
             #(
+                #[doc = #param_descriptions]
                 #[schemars(description = #param_descriptions)]
                 #serde_defaults
                 pub #param_names: #param_struct_types,
