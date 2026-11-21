@@ -1,10 +1,17 @@
 //! Truncation policy definition and core middle-out execution logic.
 
+mod envelope;
+
 use alloc::{
     borrow::Cow,
     format,
     string::{String, ToString},
     sync::Arc,
+};
+
+use envelope::{
+    DetectedEnvelope, detect_verified_envelope, snap_head_outside_surrogate,
+    snap_tail_outside_surrogate,
 };
 
 use super::{
@@ -18,7 +25,7 @@ use crate::types::{
     ToolOutput,
     quarantine::{
         CLOSE_FRAME, FRAME_OVERHEAD, OPEN_FRAME, TOOL_OUTPUT_QUARANTINE_TAG,
-        unquarantine_tool_output,
+        quarantine_tool_output, unquarantine_tool_output,
     },
 };
 
@@ -29,21 +36,19 @@ pub const SPILL_FAILURE_NOTICE_PREFIX: &str = " WARNING: full output could NOT b
 pub const SPILL_FAILURE_NOTICE_SUFFIX: &str = "); the omitted bytes are unrecoverable.";
 
 /// Marker used when `max_bytes` is too small to hold the fully informative marker.
-///
-/// Truncation is never allowed to be silent, so content is sacrificed before the
-/// notice is: a reader must always be able to tell that bytes are missing.
 pub const MINIMAL_TRUNCATION_MARKER: &str = "\n[TRUNCATED: bytes omitted]\n";
 
 /// Minimal marker variant used when a configured [`OutputSpillSink`] failed.
 pub const MINIMAL_TRUNCATION_MARKER_SPILL_FAILED: &str =
     "\n[TRUNCATED: bytes omitted; NOT retained]\n";
 
-/// Compact single-line truncation notice used inside `<tool_output_quarantine>` when
+/// Compact single-line truncation notice used inside XML envelopes when
 /// the inner budget is smaller than [`MINIMAL_TRUNCATION_MARKER`].
-const COMPACT_TRUNCATION_MARKER: &str = "[TRUNCATED: bytes omitted]";
+pub(super) const COMPACT_TRUNCATION_MARKER: &str = "[TRUNCATED: bytes omitted]";
 
-/// Compact single-line spill-failed truncation notice used inside `<tool_output_quarantine>`.
-const COMPACT_TRUNCATION_MARKER_SPILL_FAILED: &str = "[TRUNCATED: bytes omitted; NOT retained]";
+/// Compact single-line spill-failed truncation notice used inside XML envelopes.
+pub(super) const COMPACT_TRUNCATION_MARKER_SPILL_FAILED: &str =
+    "[TRUNCATED: bytes omitted; NOT retained]";
 
 /// Render the human- and model-readable notice describing a failed spill.
 fn spill_failure_notice(error: &SpillError) -> String {
@@ -111,10 +116,6 @@ impl TruncationPolicy {
     }
 
     /// Set a custom marker template.
-    ///
-    /// Placeholders `{omitted_bytes}`, `{original_bytes}`, `{offset_start}`,
-    /// `{offset_end}`, and `{ref}` will be substituted. Legacy aliases `{count}`,
-    /// `{bytes}`, and `<N>` are also supported.
     #[must_use]
     pub fn with_marker(mut self, marker: impl Into<String>) -> Self {
         self.marker_template = Some(marker.into());
@@ -129,8 +130,6 @@ impl TruncationPolicy {
     }
 
     /// Format the marker string for the given omitted bytes without sink reference.
-    ///
-    /// Preserved for backwards compatibility with existing callers.
     #[must_use]
     pub fn format_marker(&self, omitted_bytes: usize) -> String {
         self.format_marker_detailed(
@@ -144,10 +143,8 @@ impl TruncationPolicy {
 
     /// Format marker with full metadata substitutions including offsets and spill disposition.
     ///
-    /// When `spill` is [`SpillDisposition::Failed`], the rendered marker always carries
-    /// an in-band warning that the omitted bytes are unrecoverable — including for custom
-    /// templates that do not mention the failure themselves — so retention loss can never
-    /// pass unnoticed by the model reading the output.
+    /// Escapes any XML/attribute special characters in [`SpillRef`] handles via
+    /// [`md_tmpl_core::escape_xml_str`].
     #[must_use]
     pub fn format_marker_detailed(
         &self,
@@ -160,9 +157,12 @@ impl TruncationPolicy {
         let omitted_str = omitted_bytes.to_string();
         let mut marker = self.marker_template.as_ref().map_or_else(
             || match spill {
-                SpillDisposition::Spilled(handle) => format!(
-                    "\n[TRUNCATED: {omitted_str} bytes omitted (bytes {offset_start}..{offset_end} of {original_bytes}). Full output retained as ref=\"{handle}\" — inspect with read_observation(ref, pattern, offset, length)]\n"
-                ),
+                SpillDisposition::Spilled(handle) => {
+                    let escaped_ref = md_tmpl_core::escape_xml_str(handle.as_str());
+                    format!(
+                        "\n[TRUNCATED: {omitted_str} bytes omitted (bytes {offset_start}..{offset_end} of {original_bytes}). Full output retained as ref=\"{escaped_ref}\" — inspect with read_observation(ref, pattern, offset, length)]\n"
+                    )
+                }
                 SpillDisposition::Failed(error) => format!(
                     "\n[TRUNCATED: {omitted_str} bytes omitted (bytes {offset_start}..{offset_end} of {original_bytes}).{notice}]\n",
                     notice = spill_failure_notice(error)
@@ -175,21 +175,22 @@ impl TruncationPolicy {
                 let orig_str = original_bytes.to_string();
                 let start_str = offset_start.to_string();
                 let end_str = offset_end.to_string();
-                let ref_str = spill.spill_ref().map_or("", SpillRef::as_str);
+                let escaped_ref: Cow<'_, str> = spill
+                    .spill_ref()
+                    .map_or(Cow::Borrowed(""), |r| md_tmpl_core::escape_xml_str(r.as_str()));
 
                 template
                     .replace(MarkerPlaceholder::TOKEN_OMITTED_BYTES, &omitted_str)
                     .replace(MarkerPlaceholder::TOKEN_ORIGINAL_BYTES, &orig_str)
                     .replace(MarkerPlaceholder::TOKEN_OFFSET_START, &start_str)
                     .replace(MarkerPlaceholder::TOKEN_OFFSET_END, &end_str)
-                    .replace(MarkerPlaceholder::TOKEN_SPILL_REF, ref_str)
+                    .replace(MarkerPlaceholder::TOKEN_SPILL_REF, &escaped_ref)
                     .replace(MarkerPlaceholder::DEPRECATED_COUNT, &omitted_str)
                     .replace(MarkerPlaceholder::DEPRECATED_BYTES, &omitted_str)
                     .replace(MarkerPlaceholder::DEPRECATED_N, &omitted_str)
             },
         );
 
-        // A custom template cannot be trusted to mention the failure, so append it.
         if let Some(error) = spill.error()
             && self.marker_template.is_some()
         {
@@ -202,16 +203,9 @@ impl TruncationPolicy {
     /// Truncate `input` using this policy, returning a borrowed `Cow` when no truncation
     /// is needed, or an owned string when middle-out truncation occurs.
     ///
-    /// If `input` is a verified `<tool_output_quarantine>` envelope, the outer XML
-    /// quarantine tags are preserved and only the inner payload is truncated. If `input`
-    /// was already sanitized (contains no raw control tokens or breakout tags), any
-    /// split token formed across the head/marker/tail cut boundary is neutralized.
-    ///
-    /// If a configured [`OutputSpillSink`] fails, this method does **not** fail: the
-    /// error is logged and rendered into the truncation marker, so the loss of the
-    /// omitted bytes is visible to both the operator and the model. Callers that need
-    /// to handle spill failure programmatically should use
-    /// [`TruncationPolicy::truncate_detailed`], which returns the [`SpillError`].
+    /// Preserves verified `<tool_output_quarantine>`, `SanitizeTagged`, and `SanitizeWithNotice`
+    /// envelopes across middle-out truncation without dropping closing tags or allowing splice
+    /// breakouts, and avoids bisecting `<surrogate:kind:nonce>` handles.
     #[must_use]
     pub fn truncate<'a>(&self, input: &'a str) -> Cow<'a, str> {
         self.truncate_lossy_with_context(input, &SpillContext::ANONYMOUS)
@@ -219,9 +213,8 @@ impl TruncationPolicy {
     }
 
     /// Sanitize and truncate `input` in a single pass, neutralizing all known LLM
-    /// control tokens ([`DELIMITER_RULES`](crate::DELIMITER_RULES)) and breakout tags
-    /// (including any split tokens formed across the head/marker/tail cut boundary)
-    /// while ensuring the final sanitized result fits within `self.max_bytes`.
+    /// control tokens and breakout tags (including before spilling to any configured
+    /// [`OutputSpillSink`]) while fitting the result within `self.max_bytes`.
     #[must_use]
     pub fn truncate_sanitized<'a>(&self, input: &'a str) -> Cow<'a, str> {
         self.truncate_sanitized_lossy_with_context(input, &SpillContext::ANONYMOUS)
@@ -255,33 +248,47 @@ impl TruncationPolicy {
     }
 
     /// Infallible sanitize + truncate with caller-provided [`SpillContext`].
+    ///
+    /// Sanitizes `input` **before** spilling to any configured [`OutputSpillSink`] so raw
+    /// prompt-injection delimiters are never persisted into external observation stores.
     #[must_use]
     pub fn truncate_sanitized_lossy_with_context<'a>(
         &self,
         input: &'a str,
         ctx: &SpillContext<'_>,
     ) -> TruncationOutcome<'a> {
-        if unquarantine_tool_output(input).is_some() {
+        if detect_verified_envelope(input).is_some() {
             return self.truncate_lossy_with_context(input, ctx);
         }
 
-        if input.len() <= self.max_bytes {
-            let sanitized = md_tmpl_core::sanitize_untrusted_str(input, TOOL_OUTPUT_QUARANTINE_TAG);
-            if sanitized.len() <= self.max_bytes {
-                return TruncationOutcome {
-                    text: sanitized,
-                    original_len: input.len(),
-                    omitted: None,
-                    spill_ref: None,
-                };
-            }
+        let sanitized = md_tmpl_core::sanitize_untrusted_str(input, TOOL_OUTPUT_QUARANTINE_TAG);
+        if sanitized.len() <= self.max_bytes {
+            return TruncationOutcome {
+                text: sanitized,
+                original_len: input.len(),
+                omitted: None,
+                spill_ref: None,
+            };
         }
 
-        let spill = self.resolve_spill_logged(ctx, input);
-        self.truncate_oversized_sanitized(input, &spill)
+        let spill = self.resolve_spill_logged(ctx, &sanitized);
+        let outcome = self.truncate_oversized_sanitized_with_tags(
+            &sanitized,
+            &spill,
+            TOOL_OUTPUT_QUARANTINE_TAG,
+        );
+        TruncationOutcome {
+            text: Cow::Owned(outcome.text.into_owned()),
+            original_len: input.len(),
+            omitted: outcome.omitted,
+            spill_ref: outcome.spill_ref,
+        }
     }
 
     /// Infallible quarantine + truncate with caller-provided [`SpillContext`].
+    ///
+    /// Quarantines and neutralizes `input` **before** spilling to any configured
+    /// [`OutputSpillSink`].
     #[must_use]
     pub fn truncate_quarantined_lossy_with_context<'a>(
         &self,
@@ -305,8 +312,17 @@ impl TruncationPolicy {
             }
         }
 
-        let spill = self.resolve_spill_logged(ctx, input);
-        self.truncate_and_wrap_quarantine(input, input.len(), 0, &spill)
+        let quarantined_full = quarantine_tool_output(input);
+        let spill = self.resolve_spill_logged(ctx, &quarantined_full);
+        let inner_sanitized =
+            unquarantine_tool_output(&quarantined_full).unwrap_or(quarantined_full.as_str());
+        let env = DetectedEnvelope {
+            tag: TOOL_OUTPUT_QUARANTINE_TAG,
+            notice: None,
+            payload: inner_sanitized,
+            offset_bias: 0,
+        };
+        self.truncate_and_wrap_envelope(&env, input.len(), &spill)
     }
 
     /// Truncate `input` using an anonymous spill context, returning a detailed [`TruncationOutcome`].
@@ -340,10 +356,6 @@ impl TruncationPolicy {
         )
     }
 
-    /// Return the untouched input when it already fits within `max_bytes`.
-    ///
-    /// Checked before any spill is attempted: content that is not truncated loses
-    /// nothing, so it must not consume observation-store capacity.
     fn passthrough(input: &str, max_bytes: usize) -> Option<TruncationOutcome<'_>> {
         let total_bytes = input.len();
         (total_bytes <= max_bytes).then_some(TruncationOutcome {
@@ -354,7 +366,6 @@ impl TruncationPolicy {
         })
     }
 
-    /// Attempt to retain the full output, classifying the result.
     fn resolve_spill(&self, ctx: &SpillContext<'_>, input: &str) -> SpillDisposition {
         self.spill_sink
             .as_ref()
@@ -378,93 +389,34 @@ impl TruncationPolicy {
         spill
     }
 
-    /// Dispatch oversized truncation while preserving quarantine envelopes and
-    /// sanitization invariants if `input` was already quarantined or sanitized.
+    /// Dispatch oversized truncation while preserving `<tool_output_quarantine>`,
+    /// `SanitizeTagged`, and `SanitizeWithNotice` envelopes and sanitization invariants.
     fn truncate_oversized_auto<'a>(
         &self,
         input: &'a str,
         spill: &SpillDisposition,
     ) -> TruncationOutcome<'a> {
-        if let Some(inner) = unquarantine_tool_output(input) {
-            return self.truncate_and_wrap_quarantine(inner, input.len(), OPEN_FRAME.len(), spill);
+        if let Some(env) = detect_verified_envelope(input) {
+            return self.truncate_and_wrap_envelope(&env, input.len(), spill);
         }
         if !md_tmpl_core::has_untrusted_breakout(input, TOOL_OUTPUT_QUARANTINE_TAG) {
-            return self.truncate_oversized_sanitized(input, spill);
+            return self.truncate_oversized_sanitized_with_tags(
+                input,
+                spill,
+                TOOL_OUTPUT_QUARANTINE_TAG,
+            );
         }
         self.truncate_oversized(input, spill)
     }
 
-    /// Truncate `inner` and wrap the result in `<tool_output_quarantine>\n...\n</tool_output_quarantine>`,
-    /// guaranteeing that the quarantine envelope is never broken even under tiny `max_bytes`.
-    fn truncate_and_wrap_quarantine<'a>(
-        &self,
-        inner: &str,
-        outer_original_len: usize,
-        offset_bias: usize,
-        spill: &SpillDisposition,
-    ) -> TruncationOutcome<'a> {
-        let inner_len = inner.len();
-        let spill_ref = spill.spill_ref().cloned();
-        let inner_budget = self.max_bytes.saturating_sub(FRAME_OVERHEAD);
-
-        if inner_budget < MINIMAL_TRUNCATION_MARKER.len() {
-            let notice = match spill {
-                SpillDisposition::Failed(_) => COMPACT_TRUNCATION_MARKER_SPILL_FAILED,
-                SpillDisposition::NotConfigured | SpillDisposition::Spilled(_) => {
-                    COMPACT_TRUNCATION_MARKER
-                }
-            };
-            let mut head_end = inner_budget.saturating_sub(notice.len()).min(inner_len);
-            while head_end > 0 && !inner.is_char_boundary(head_end) {
-                head_end -= 1;
-            }
-            let mut body = String::with_capacity(head_end + notice.len());
-            body.push_str(&inner[..head_end]);
-            body.push_str(notice);
-            let sanitized_body =
-                md_tmpl_core::sanitize_untrusted_str(&body, TOOL_OUTPUT_QUARANTINE_TAG);
-            let final_body = if head_end > 0 && sanitized_body.len() > inner_budget {
-                notice
-            } else {
-                sanitized_body.as_ref()
-            };
-            return TruncationOutcome {
-                text: Cow::Owned(format!("{OPEN_FRAME}{final_body}{CLOSE_FRAME}")),
-                original_len: outer_original_len,
-                omitted: Some(offset_bias..(offset_bias + inner_len)),
-                spill_ref,
-            };
-        }
-
-        let inner_policy = Self {
-            max_bytes: inner_budget,
-            head_ratio: self.head_ratio,
-            alignment: self.alignment,
-            marker_template: self.marker_template.clone(),
-            spill_sink: None,
-        };
-        let inner_outcome = inner_policy.truncate_oversized_sanitized(inner, spill);
-        let omitted = inner_outcome
-            .omitted
-            .map(|r| (r.start + offset_bias)..(r.end + offset_bias))
-            .or(Some(offset_bias..(offset_bias + inner_len)));
-
-        TruncationOutcome {
-            text: Cow::Owned(format!("{OPEN_FRAME}{}{CLOSE_FRAME}", inner_outcome.text)),
-            original_len: outer_original_len,
-            omitted,
-            spill_ref,
-        }
-    }
-
     /// Perform middle-out elision on `input` while neutralizing any control tokens
-    /// or breakout tags in the surviving head, marker, tail, or across their splice
-    /// boundary, converging `head_end` and `tail_start` so the sanitized string fits
-    /// within `self.max_bytes`.
-    fn truncate_oversized_sanitized<'a>(
+    /// or breakout tags matching `tag_spec` across head, marker, tail, and their splice
+    /// boundaries, using proportional step-back (`O(n log max_bytes)`) to converge.
+    pub(super) fn truncate_oversized_sanitized_with_tags<'a>(
         &self,
         input: &'a str,
         spill: &SpillDisposition,
+        tag_spec: &str,
     ) -> TruncationOutcome<'a> {
         let total_bytes = input.len();
         let spill_ref = spill.spill_ref().cloned();
@@ -482,11 +434,11 @@ impl TruncationPolicy {
         let sample_marker =
             self.format_marker_detailed(est_omitted, total_bytes, 0, est_omitted, spill);
         let sample_marker_sanitized =
-            md_tmpl_core::sanitize_untrusted_str(&sample_marker, TOOL_OUTPUT_QUARANTINE_TAG);
+            md_tmpl_core::sanitize_untrusted_str(&sample_marker, tag_spec);
         let marker_len = sample_marker_sanitized.len();
 
         if self.max_bytes <= marker_len {
-            return self.truncate_with_fallback_marker_sanitized(input, spill, spill_ref);
+            return self.truncate_with_fallback_marker_sanitized(input, spill, spill_ref, tag_spec);
         }
 
         let content_budget = self.max_bytes.saturating_sub(marker_len);
@@ -494,8 +446,7 @@ impl TruncationPolicy {
             self.compute_initial_boundaries(input, total_bytes, content_budget);
 
         if head_end >= tail_start {
-            let sanitized_full =
-                md_tmpl_core::sanitize_untrusted_str(input, TOOL_OUTPUT_QUARANTINE_TAG);
+            let sanitized_full = md_tmpl_core::sanitize_untrusted_str(input, tag_spec);
             if sanitized_full.len() <= self.max_bytes {
                 return TruncationOutcome {
                     text: sanitized_full,
@@ -508,22 +459,21 @@ impl TruncationPolicy {
             while mid > 0 && !input.is_char_boundary(mid) {
                 mid -= 1;
             }
-            head_end = mid;
-            tail_start = mid;
+            head_end = snap_head_outside_surrogate(input, mid);
+            tail_start = snap_tail_outside_surrogate(input, mid);
         }
 
         let (mut head_end, mut tail_start, mut marker, _) =
             self.converge_boundaries(input, total_bytes, head_end, tail_start, spill);
 
         loop {
-            let mut candidate =
-                String::with_capacity(head_end + marker.len() + (total_bytes - tail_start));
+            let tail_len = total_bytes - tail_start;
+            let mut candidate = String::with_capacity(head_end + marker.len() + tail_len);
             candidate.push_str(&input[..head_end]);
             candidate.push_str(&marker);
             candidate.push_str(&input[tail_start..]);
 
-            let sanitized =
-                md_tmpl_core::sanitize_untrusted_str(&candidate, TOOL_OUTPUT_QUARANTINE_TAG);
+            let sanitized = md_tmpl_core::sanitize_untrusted_str(&candidate, tag_spec);
             if sanitized.len() <= self.max_bytes {
                 return TruncationOutcome {
                     text: Cow::Owned(sanitized.into_owned()),
@@ -533,18 +483,26 @@ impl TruncationPolicy {
                 };
             }
 
-            if head_end == 0 && tail_start >= total_bytes {
-                return self.truncate_with_fallback_marker_sanitized(input, spill, spill_ref);
+            let kept = head_end + tail_len;
+            if kept == 0 {
+                return self
+                    .truncate_with_fallback_marker_sanitized(input, spill, spill_ref, tag_spec);
             }
 
-            if head_end > 0 && (tail_start == total_bytes || head_end >= (total_bytes - tail_start))
-            {
-                head_end = self.shrink_head_boundary(input, head_end);
-            } else if tail_start < total_bytes {
-                tail_start = self.expand_tail_boundary(input, total_bytes, tail_start);
-            } else {
-                return self.truncate_with_fallback_marker_sanitized(input, spill, spill_ref);
-            }
+            let excess = sanitized.len() - self.max_bytes;
+            let drop_total =
+                usize::try_from((kept as u128 * excess as u128).div_ceil(sanitized.len() as u128))
+                    .unwrap_or(excess)
+                    .max(excess / 2)
+                    .max(1);
+
+            self.step_back_boundaries_by(
+                input,
+                total_bytes,
+                &mut head_end,
+                &mut tail_start,
+                drop_total,
+            );
 
             let omitted_bytes = tail_start.saturating_sub(head_end);
             marker = self.format_marker_detailed(
@@ -557,8 +515,6 @@ impl TruncationPolicy {
         }
     }
 
-    /// Perform middle-out elision on input already known to exceed `max_bytes`,
-    /// with the spill attempt already resolved.
     fn truncate_oversized<'a>(
         &self,
         input: &'a str,
@@ -576,7 +532,6 @@ impl TruncationPolicy {
             };
         }
 
-        // Estimate marker length using approximate omitted byte count.
         let est_omitted = total_bytes.saturating_sub(self.max_bytes);
         let sample_marker =
             self.format_marker_detailed(est_omitted, total_bytes, 0, est_omitted, spill);
@@ -590,7 +545,6 @@ impl TruncationPolicy {
         let (head_end, tail_start) =
             self.compute_initial_boundaries(input, total_bytes, content_budget);
 
-        // If boundaries overlap or touch, no truncation is necessary
         if head_end >= tail_start {
             return TruncationOutcome {
                 text: Cow::Borrowed(input),
@@ -624,10 +578,10 @@ impl TruncationPolicy {
         }
     }
 
-    /// Choose the most informative marker that fits inside `max_bytes`.
     fn fallback_marker(spill: &SpillDisposition, max_bytes: usize) -> String {
         if let SpillDisposition::Spilled(handle) = spill {
-            let with_ref = format!("\n[TRUNCATED: bytes omitted; ref=\"{handle}\"]\n");
+            let escaped_ref = md_tmpl_core::escape_xml_str(handle.as_str());
+            let with_ref = format!("\n[TRUNCATED: bytes omitted; ref=\"{escaped_ref}\"]\n");
             if with_ref.len() <= max_bytes {
                 return with_ref;
             }
@@ -645,10 +599,11 @@ impl TruncationPolicy {
         input: &str,
         spill: &SpillDisposition,
         spill_ref: Option<SpillRef>,
+        tag_spec: &str,
     ) -> TruncationOutcome<'a> {
         let total_bytes = input.len();
         let raw_marker = Self::fallback_marker(spill, self.max_bytes);
-        let marker = md_tmpl_core::sanitize_untrusted_str(&raw_marker, TOOL_OUTPUT_QUARANTINE_TAG);
+        let marker = md_tmpl_core::sanitize_untrusted_str(&raw_marker, tag_spec);
 
         if marker.len() >= self.max_bytes {
             let mut cut = self.max_bytes;
@@ -656,7 +611,7 @@ impl TruncationPolicy {
                 cut -= 1;
             }
             let slice = &marker[..cut];
-            let clean = md_tmpl_core::sanitize_untrusted_str(slice, TOOL_OUTPUT_QUARANTINE_TAG);
+            let clean = md_tmpl_core::sanitize_untrusted_str(slice, tag_spec);
             return TruncationOutcome {
                 text: Cow::Owned(clean.into_owned()),
                 original_len: total_bytes,
@@ -665,16 +620,17 @@ impl TruncationPolicy {
             };
         }
 
-        let mut head_end = self.max_bytes - marker.len();
+        let mut head_end = (self.max_bytes - marker.len()).min(total_bytes);
         while head_end > 0 && !input.is_char_boundary(head_end) {
             head_end -= 1;
         }
+        head_end = snap_head_outside_surrogate(input, head_end);
 
         loop {
             let mut text = String::with_capacity(head_end + marker.len());
             text.push_str(&input[..head_end]);
             text.push_str(&marker);
-            let sanitized = md_tmpl_core::sanitize_untrusted_str(&text, TOOL_OUTPUT_QUARANTINE_TAG);
+            let sanitized = md_tmpl_core::sanitize_untrusted_str(&text, tag_spec);
             if sanitized.len() <= self.max_bytes {
                 return TruncationOutcome {
                     text: Cow::Owned(sanitized.into_owned()),
@@ -695,19 +651,21 @@ impl TruncationPolicy {
                     spill_ref,
                 };
             }
-            head_end -= 1;
+            let excess = sanitized.len() - self.max_bytes;
+            let drop_bytes = usize::try_from(
+                (head_end as u128 * excess as u128).div_ceil(sanitized.len() as u128),
+            )
+            .unwrap_or(excess)
+            .max(excess / 2)
+            .max(1);
+            head_end = head_end.saturating_sub(drop_bytes);
             while head_end > 0 && !input.is_char_boundary(head_end) {
                 head_end -= 1;
             }
+            head_end = snap_head_outside_surrogate(input, head_end);
         }
     }
 
-    /// Truncate when `max_bytes` cannot hold the fully informative marker.
-    ///
-    /// Content is sacrificed before the marker is, so the reader can always tell
-    /// that bytes are missing; a budget too small even for the minimal marker
-    /// yields a truncated marker rather than a bare, deceptively complete-looking
-    /// slice of the input.
     fn truncate_with_fallback_marker<'a>(
         &self,
         input: &str,
@@ -730,10 +688,11 @@ impl TruncationPolicy {
             };
         }
 
-        let mut head_end = self.max_bytes - marker.len();
+        let mut head_end = (self.max_bytes - marker.len()).min(total_bytes);
         while head_end > 0 && !input.is_char_boundary(head_end) {
             head_end -= 1;
         }
+        head_end = snap_head_outside_surrogate(input, head_end);
 
         let mut text = String::with_capacity(head_end + marker.len());
         text.push_str(&input[..head_end]);
@@ -756,20 +715,17 @@ impl TruncationPolicy {
         let head_budget = self.head_ratio.compute_head_budget(content_budget);
         let tail_budget = content_budget.saturating_sub(head_budget);
 
-        // Floor to valid char boundary for head
         let mut head_end = head_budget.min(total_bytes);
         while head_end > 0 && !input.is_char_boundary(head_end) {
             head_end -= 1;
         }
 
-        // Ceil to valid char boundary for tail
         let tail_target = total_bytes.saturating_sub(tail_budget);
         let mut tail_start = tail_target.min(total_bytes);
         while tail_start < total_bytes && !input.is_char_boundary(tail_start) {
             tail_start += 1;
         }
 
-        // Apply line boundary alignment if configured
         if self.alignment == TruncationAlignment::LineBoundary {
             let head_scan_start = head_end.saturating_sub(MAX_LINE_SCAN_WINDOW);
             if let Some(rel_nl) = input[head_scan_start..head_end].rfind('\n') {
@@ -782,43 +738,101 @@ impl TruncationPolicy {
             }
         }
 
+        head_end = snap_head_outside_surrogate(input, head_end);
+        tail_start = snap_tail_outside_surrogate(input, tail_start);
         (head_end, tail_start)
     }
 
-    fn shrink_head_boundary(&self, input: &str, mut head_end: usize) -> usize {
+    fn shrink_head_by(&self, input: &str, head_end: usize, drop_bytes: usize) -> usize {
+        if head_end == 0 {
+            return 0;
+        }
+        let target = head_end.saturating_sub(drop_bytes.max(1));
         if self.alignment == TruncationAlignment::LineBoundary {
-            let scan_start = head_end.saturating_sub(MAX_LINE_SCAN_WINDOW);
-            if let Some(rel_nl) = input[scan_start..head_end.saturating_sub(1)].rfind('\n') {
-                return scan_start + rel_nl + 1;
+            let scan_start = target.saturating_sub(MAX_LINE_SCAN_WINDOW);
+            if let Some(rel_nl) =
+                input[scan_start..target.min(head_end.saturating_sub(1))].rfind('\n')
+            {
+                return snap_head_outside_surrogate(input, scan_start + rel_nl + 1);
             }
         }
-        head_end = head_end.saturating_sub(1);
-        while head_end > 0 && !input.is_char_boundary(head_end) {
-            head_end -= 1;
+        let mut next = target;
+        while next > 0 && !input.is_char_boundary(next) {
+            next -= 1;
         }
-        head_end
+        snap_head_outside_surrogate(input, next)
     }
 
-    fn expand_tail_boundary(
+    fn expand_tail_by(
         &self,
         input: &str,
         total_bytes: usize,
-        mut tail_start: usize,
+        tail_start: usize,
+        drop_bytes: usize,
     ) -> usize {
+        if tail_start >= total_bytes {
+            return total_bytes;
+        }
+        let target = tail_start
+            .saturating_add(drop_bytes.max(1))
+            .min(total_bytes);
         if self.alignment == TruncationAlignment::LineBoundary {
-            let scan_start = tail_start.saturating_add(1).min(total_bytes);
-            let scan_end = (tail_start + MAX_LINE_SCAN_WINDOW).min(total_bytes);
-            if scan_start < scan_end
-                && let Some(rel_nl) = input[scan_start..scan_end].find('\n')
+            let scan_end = target.saturating_add(MAX_LINE_SCAN_WINDOW).min(total_bytes);
+            if target < scan_end
+                && let Some(rel_nl) = input[target..scan_end].find('\n')
             {
-                return scan_start + rel_nl + 1;
+                return snap_tail_outside_surrogate(input, target + rel_nl + 1);
             }
         }
-        tail_start = tail_start.saturating_add(1);
-        while tail_start < total_bytes && !input.is_char_boundary(tail_start) {
-            tail_start += 1;
+        let mut next = target;
+        while next < total_bytes && !input.is_char_boundary(next) {
+            next += 1;
         }
-        tail_start
+        snap_tail_outside_surrogate(input, next)
+    }
+
+    fn step_back_boundaries_by(
+        &self,
+        input: &str,
+        total_bytes: usize,
+        head_end: &mut usize,
+        tail_start: &mut usize,
+        drop_total: usize,
+    ) {
+        let tail_len = total_bytes.saturating_sub(*tail_start);
+        if drop_total <= 1 {
+            if *head_end > 0 && (tail_len == 0 || *head_end >= tail_len) {
+                *head_end = self.shrink_head_by(input, *head_end, 1);
+            } else if *tail_start < total_bytes {
+                *tail_start = self.expand_tail_by(input, total_bytes, *tail_start, 1);
+            }
+            return;
+        }
+
+        let kept = *head_end + tail_len;
+        if kept == 0 {
+            return;
+        }
+        let head_drop = usize::try_from((*head_end as u128 * drop_total as u128) / kept as u128)
+            .unwrap_or(drop_total / 2);
+        let tail_drop = drop_total.saturating_sub(head_drop);
+
+        let prev_head = *head_end;
+        let prev_tail = *tail_start;
+        if head_drop > 0 && *head_end > 0 {
+            *head_end = self.shrink_head_by(input, *head_end, head_drop);
+        }
+        if tail_drop > 0 && *tail_start < total_bytes {
+            *tail_start = self.expand_tail_by(input, total_bytes, *tail_start, tail_drop);
+        }
+        // Guarantee strict progress even under extreme head/tail imbalance.
+        if *head_end == prev_head && *tail_start == prev_tail {
+            if *head_end > 0 {
+                *head_end = self.shrink_head_by(input, *head_end, 1);
+            } else if *tail_start < total_bytes {
+                *tail_start = self.expand_tail_by(input, total_bytes, *tail_start, 1);
+            }
+        }
     }
 
     fn converge_boundaries(
@@ -835,14 +849,14 @@ impl TruncationPolicy {
         let mut current_total = head_end + marker.len() + (total_bytes - tail_start);
 
         while current_total > self.max_bytes && (head_end > 0 || tail_start < total_bytes) {
-            if head_end > 0 && (tail_start == total_bytes || head_end >= (total_bytes - tail_start))
-            {
-                head_end = self.shrink_head_boundary(input, head_end);
-            } else if tail_start < total_bytes {
-                tail_start = self.expand_tail_boundary(input, total_bytes, tail_start);
-            } else {
-                break;
-            }
+            let excess = current_total - self.max_bytes;
+            self.step_back_boundaries_by(
+                input,
+                total_bytes,
+                &mut head_end,
+                &mut tail_start,
+                excess,
+            );
 
             omitted_bytes = tail_start.saturating_sub(head_end);
             marker = self.format_marker_detailed(
@@ -891,8 +905,12 @@ pub fn truncate_middle_detailed_with_context<'a>(
 }
 
 /// Helper function to truncate a [`ToolOutput`] in-place according to `policy`.
+///
+/// Zero heap allocations when `output.content.len() <= policy.max_bytes`.
 pub fn truncate_output(output: &mut ToolOutput, policy: &TruncationPolicy) {
-    output.content = policy.truncate(&output.content).into_owned();
+    if let Cow::Owned(truncated) = policy.truncate(&output.content) {
+        output.content = truncated;
+    }
 }
 
 /// Detailed in-place truncation of [`ToolOutput`].
@@ -918,11 +936,16 @@ pub fn truncate_output_detailed_with_context(
     ctx: &SpillContext<'_>,
 ) -> Result<TruncationOutcome<'static>, SpillError> {
     let outcome = policy.truncate_detailed_with_context(&output.content, ctx)?;
-    let text = outcome.text.into_owned();
     let original_len = outcome.original_len;
     let omitted = outcome.omitted;
     let spill_ref = outcome.spill_ref;
-    output.content.clone_from(&text);
+    let text = match outcome.text {
+        Cow::Borrowed(_) => output.content.clone(),
+        Cow::Owned(truncated) => {
+            output.content.clone_from(&truncated);
+            truncated
+        }
+    };
     Ok(TruncationOutcome {
         text: Cow::Owned(text),
         original_len,

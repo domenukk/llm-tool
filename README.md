@@ -15,8 +15,8 @@ Define tools for LLM agents in Rust.
 
 ```toml
 [dependencies]
-llm-tool = "0.10.6"
-llm-tool-mcp = "0.10.6" # Optional: MCP server support
+llm-tool = "0.10.7"
+llm-tool-mcp = "0.10.7" # Optional: MCP server support
 ```
 
 ### Define a Tool
@@ -105,13 +105,95 @@ assert_eq!(registry.definitions()[0].name, "restart_server");
 Return `Result<T, E>` or `T`:
 
 - **Auto-Serialization**: Any `T: Serialize` is serialized to JSON.
+- **Any `Display` Error**: `E` can be `ToolError`, `std::io::Error`,
+  `serde_json::Error`, `String`, or any custom error type implementing
+  `std::fmt::Display` (no `.map_err(...)` boilerplate required).
 - **Structured Metadata**: Attach metadata to `ToolOutput` or `ToolError`
   (logged for caller inspection, not sent to the model).
 
-### Context
+```rust
+use std::fmt;
+use llm_tool::{llm_tool, ToolContext, ToolRegistry};
 
-Add `ctx: &ToolContext` to a tool function to access shared state, conversation
-IDs, or typed extensions without exposing it in the JSON Schema.
+#[derive(Debug)]
+struct ParseIdError(&'static str);
+
+impl fmt::Display for ParseIdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+/// Look up an item by positive ID.
+#[llm_tool(effect = "read_only")]
+fn lookup_item(
+    /// Positive numeric ID.
+    id: i64,
+) -> Result<String, ParseIdError> {
+    if id <= 0 {
+        return Err(ParseIdError("id must be positive"));
+    }
+    Ok(format!("item-{id}"))
+}
+
+# futures::executor::block_on(async {
+let registry = ToolRegistry::new().with_tool(LookupItem);
+let err = registry
+    .dispatch("lookup_item", serde_json::json!({"id": -1}), &ToolContext::new())
+    .await
+    .unwrap_err();
+assert_eq!(err.message, "id must be positive");
+# });
+```
+
+### Stateful Struct Tools & Typed Extensions
+
+Attach `#[llm_tool]` to an `impl` block to expose methods on a
+`Clone + Send + Sync` service struct while keeping them callable as ordinary
+Rust methods, or use `#[llm_tool(ext)]` to inject typed extensions from
+`ToolContext`:
+
+```rust
+use std::sync::Arc;
+use llm_tool::{llm_tool, ToolContext};
+
+#[derive(Clone)]
+struct CounterService {
+    prefix: String,
+}
+
+#[derive(Clone)]
+struct TenantId(String);
+
+#[llm_tool]
+impl CounterService {
+    /// Format a labeled value for the active tenant.
+    #[llm_tool(effect = "read_only")]
+    pub async fn format_value(
+        &self,
+        /// Numeric value to format.
+        #[llm_tool(default = 1)]
+        value: i64,
+        #[llm_tool(ext)] tenant: Arc<TenantId>,
+    ) -> String {
+        format!("{}:{}:{value}", tenant.0, self.prefix)
+    }
+}
+
+# futures::executor::block_on(async {
+let svc = CounterService { prefix: "metric".into() };
+let registry = svc.tool_registry();
+
+let ctx = ToolContext::new();
+ctx.set_ext(Arc::new(TenantId("acme".into()))).unwrap();
+
+let out = registry
+    .dispatch("format_value", serde_json::json!({}), &ctx)
+    .await
+    .unwrap();
+assert_eq!(out.content(), "acme:metric:1");
+# });
+```
 
 ### Custom Descriptions
 
@@ -206,10 +288,10 @@ Manual `RustTool` impls can keep using the `SANITIZE_OUTPUT` /
 Set where a tool's data comes from with `#[llm_tool(provenance = "...")]`
 (`"trusted"`, `"workspace_local"`, `"private_data"`, `"external_mcp"`, or
 `"untrusted_network"`). External and network tools wrap their output in
-`<untrusted_tool_output>` tags by default.
+`<tool_output_quarantine>` tags by default.
 
 Use [`SurrogateVault`] with [`ToolContext`] to replace secret values with
-`<surrogate:kind:id>` placeholders so raw secrets are not sent to the model:
+`<surrogate:kind:nonce>` placeholders so raw secrets are not sent to the model:
 
 ```rust
 use llm_tool::{SurrogateVault, ToolContext};
@@ -218,14 +300,14 @@ let vault = SurrogateVault::new();
 let ctx = ToolContext::new().with_surrogate_vault(vault);
 
 let token = ctx.mint_surrogate("api_key", "sk-live-secret-123").unwrap();
-assert_eq!(token.token(), "<surrogate:api_key:1>");
+assert!(token.token().starts_with("<surrogate:api_key:"));
 assert_eq!(
     ctx.resolve_surrogates(&format!("Bearer {}", token.token())).unwrap(),
     "Bearer sk-live-secret-123"
 );
 assert_eq!(
     ctx.redact_surrogates("leaked sk-live-secret-123 in log").unwrap(),
-    "leaked <surrogate:api_key:1> in log"
+    format!("leaked {} in log", token.token())
 );
 ```
 
@@ -346,6 +428,60 @@ assert_eq!(
     ToolEffect::Destructive
 );
 assert!(registry.is_destructive("drop_table"));
+```
+
+### Registry Projections, Pipelines, and Provider Schemas
+
+Clone, filter, or merge registries per agent role, attach a registry-wide
+`TruncationPolicy` (executed automatically in
+`SurrogateVault::redact -> OutputSanitization -> TruncationPolicy` order), and
+project normalized schemas for `OpenAI`, Anthropic, or Gemini:
+
+```rust
+use llm_tool::{llm_tool, ToolContext, ToolProvenance, ToolRegistry, TruncationPolicy};
+
+/// Read a local note.
+#[llm_tool(effect = "read_only", provenance = "workspace_local")]
+fn read_note(
+    /// Note name.
+    name: Option<&str>,
+) -> String {
+    format!("note={}", name.unwrap_or("index"))
+}
+
+/// Delete a local note.
+#[llm_tool(effect = "destructive", provenance = "workspace_local")]
+fn delete_note(
+    /// Note name.
+    name: String,
+) -> String {
+    format!("deleted {name}")
+}
+
+# futures::executor::block_on(async {
+let full = ToolRegistry::new()
+    .with_tool(ReadNote)
+    .with_tool(DeleteNote)
+    .with_surrogate_redaction(true)
+    .with_truncation_policy(TruncationPolicy::new(4096));
+
+let plan_mode = full
+    .read_only()
+    .with_max_provenance(ToolProvenance::WorkspaceLocal);
+assert_eq!(plan_mode.len(), 1);
+assert!(plan_mode.contains("read_note"));
+
+let merged = plan_mode.clone().merge(ToolRegistry::new());
+assert_eq!(merged.to_gemini_declarations().len(), 1);
+assert_eq!(merged.to_openai_tools().len(), 1);
+assert_eq!(merged.to_anthropic_tools().len(), 1);
+
+let out = merged
+    .dispatch("read_note", serde_json::json!({}), &ToolContext::new())
+    .await
+    .unwrap();
+assert_eq!(out.content(), "note=index");
+# });
 ```
 
 ---

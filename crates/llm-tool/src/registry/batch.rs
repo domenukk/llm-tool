@@ -100,9 +100,11 @@ impl ToolRegistry {
                                 tool = %call.name,
                                 "Destructive tool rejected in parallel batch execution without explicit confirmation"
                             );
-                            let fut: BoxToolFuture<'_> = Box::pin(future::ready(Err(
-                                ToolError::destructive_in_parallel_batch(&call.name),
-                            )));
+                            let err = self
+                                .effective_output_sanitization(&call.name)
+                                .unwrap_or(self.output_floor)
+                                .apply_error(ToolError::destructive_in_parallel_batch(&call.name));
+                            let fut: BoxToolFuture<'_> = Box::pin(future::ready(Err(err)));
                             return fut;
                         }
                         match self.dispatch_boxed(&call.name, call.arguments.clone(), ctx) {
@@ -179,9 +181,11 @@ impl ToolRegistry {
                                 tool = %call.name,
                                 "Destructive tool rejected in parallel batch execution without explicit confirmation"
                             );
-                            let fut: BoxToolFuture<'_> = Box::pin(future::ready(Err(
-                                ToolError::destructive_in_parallel_batch(call.name),
-                            )));
+                            let err = self
+                                .effective_output_sanitization(call.name)
+                                .unwrap_or(self.output_floor)
+                                .apply_error(ToolError::destructive_in_parallel_batch(call.name));
+                            let fut: BoxToolFuture<'_> = Box::pin(future::ready(Err(err)));
                             return fut;
                         }
                         match self.dispatch_boxed_str(call.name, call.arguments_json, ctx) {

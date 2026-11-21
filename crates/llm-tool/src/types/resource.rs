@@ -4,8 +4,10 @@ use alloc::string::{String, ToString};
 
 use serde::{Deserialize, Serialize};
 
+use super::quarantine::sanitize_string_if_needed;
+
 /// Describes a resource or resource template available in the registry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceDefinition {
     /// Resource URI (e.g. `file:///path` or `config://app`) or template pattern.
@@ -19,6 +21,54 @@ pub struct ResourceDefinition {
     /// Optional MIME type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
+}
+
+impl ResourceDefinition {
+    /// Construct a sanitized [`ResourceDefinition`].
+    #[must_use]
+    pub fn new(
+        uri_template: impl Into<String>,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        mime_type: Option<String>,
+    ) -> Self {
+        let raw_uri = uri_template.into();
+        let raw_name = name.into();
+        let raw_desc = description.into();
+        let clean_mime = mime_type.map(|m| sanitize_string_if_needed(&m).unwrap_or(m));
+        Self {
+            uri_template: sanitize_string_if_needed(&raw_uri).unwrap_or(raw_uri),
+            name: sanitize_string_if_needed(&raw_name).unwrap_or(raw_name),
+            description: sanitize_string_if_needed(&raw_desc).unwrap_or(raw_desc),
+            mime_type: clean_mime,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ResourceDefinition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RawResourceDef {
+            #[serde(rename = "uriTemplate")]
+            uri_template: String,
+            name: String,
+            #[serde(default)]
+            description: String,
+            mime_type: Option<String>,
+        }
+
+        let raw = RawResourceDef::deserialize(deserializer)?;
+        Ok(Self::new(
+            raw.uri_template,
+            raw.name,
+            raw.description,
+            raw.mime_type,
+        ))
+    }
 }
 
 /// Backwards-compatible type alias for [`ResourceDefinition`].

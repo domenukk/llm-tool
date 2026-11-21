@@ -1,22 +1,20 @@
-//! Transport selection and the blocking / async run loops for [`McpServer`].
+//! Transport selection and bounded blocking / async run loops for [`McpServer`].
 
-use std::io::{self, BufRead, Write};
+use std::{
+    io::{self, BufRead, Read, Write},
+    sync::Arc,
+};
 
+use tokio::{
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
+    sync::Semaphore,
+};
 use tracing::{debug, error, info};
 
-use super::{Connection, McpServer};
+use super::{Connection, McpServer, RpcOutcome};
+use crate::protocol::{self, JsonRpcResponse};
 
 /// A transport for the blocking [`McpServer::serve`] entry point.
-///
-/// Lets a binary select stdio, TCP, or a Unix domain socket at runtime (e.g.
-/// from CLI args) and hand it to [`serve`](McpServer::serve) in a single call,
-/// instead of matching over transports and calling the individual blocking
-/// runners itself.
-///
-/// This drives the **blocking** convenience runners. Tokio applications should
-/// prefer the async [`run_async`](McpServer::run_async),
-/// [`listen_tcp`](McpServer::listen_tcp), and
-/// [`listen_unix`](McpServer::listen_unix) methods directly.
 ///
 /// # Example
 ///
@@ -24,8 +22,6 @@ use super::{Connection, McpServer};
 /// use llm_tool_mcp::Transport;
 ///
 /// let tcp = Transport::Tcp("127.0.0.1:3000".parse().unwrap());
-/// // A binary might build one of these from `--stdio` / `--tcp <addr>` flags,
-/// // then call `server.serve(transport)`.
 /// assert!(matches!(tcp, Transport::Tcp(_)));
 /// ```
 #[derive(Debug, Clone)]
@@ -39,23 +35,113 @@ pub enum Transport {
     Unix(std::path::PathBuf),
 }
 
-impl McpServer {
-    // ── Public entry points ─────────────────────────────────────────
+enum BoundedLine<'a> {
+    Eof,
+    Line(&'a str),
+    Oversized,
+    InvalidUtf8(std::str::Utf8Error),
+}
 
+fn strip_newline_len(buf: &[u8]) -> usize {
+    let without_lf = buf.strip_suffix(b"\n").unwrap_or(buf);
+    without_lf.strip_suffix(b"\r").unwrap_or(without_lf).len()
+}
+
+fn drain_until_newline_sync(reader: &mut impl BufRead) -> io::Result<()> {
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(());
+        }
+        if let Some(nl_idx) = available.iter().position(|&b| b == b'\n') {
+            reader.consume(nl_idx + 1);
+            return Ok(());
+        }
+        let len = available.len();
+        reader.consume(len);
+    }
+}
+
+async fn drain_until_newline_async(reader: &mut (impl AsyncBufRead + Unpin)) -> io::Result<()> {
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(());
+        }
+        if let Some(nl_idx) = available.iter().position(|&b| b == b'\n') {
+            reader.consume(nl_idx + 1);
+            return Ok(());
+        }
+        let len = available.len();
+        reader.consume(len);
+    }
+}
+
+fn read_bounded_line_sync<'a>(
+    reader: &mut impl BufRead,
+    buf: &'a mut Vec<u8>,
+    max_line_bytes: usize,
+) -> io::Result<BoundedLine<'a>> {
+    buf.clear();
+    let take_limit = (max_line_bytes as u64).saturating_add(2);
+    let n = reader.by_ref().take(take_limit).read_until(b'\n', buf)?;
+    if n == 0 {
+        return Ok(BoundedLine::Eof);
+    }
+    let ended_with_nl = buf.last() == Some(&b'\n');
+    let content_len = strip_newline_len(buf);
+    if !ended_with_nl && content_len > max_line_bytes {
+        buf.clear();
+        drain_until_newline_sync(reader)?;
+        return Ok(BoundedLine::Oversized);
+    }
+    if content_len > max_line_bytes {
+        buf.clear();
+        return Ok(BoundedLine::Oversized);
+    }
+    match std::str::from_utf8(&buf[..content_len]) {
+        Ok(line) => Ok(BoundedLine::Line(line)),
+        Err(err) => Ok(BoundedLine::InvalidUtf8(err)),
+    }
+}
+
+async fn read_bounded_line_async<'a>(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    buf: &'a mut Vec<u8>,
+    max_line_bytes: usize,
+) -> io::Result<BoundedLine<'a>> {
+    buf.clear();
+    let take_limit = (max_line_bytes as u64).saturating_add(2);
+    let n = (&mut *reader)
+        .take(take_limit)
+        .read_until(b'\n', buf)
+        .await?;
+    if n == 0 {
+        return Ok(BoundedLine::Eof);
+    }
+    let ended_with_nl = buf.last() == Some(&b'\n');
+    let content_len = strip_newline_len(buf);
+    if !ended_with_nl && content_len > max_line_bytes {
+        buf.clear();
+        drain_until_newline_async(reader).await?;
+        return Ok(BoundedLine::Oversized);
+    }
+    if content_len > max_line_bytes {
+        buf.clear();
+        return Ok(BoundedLine::Oversized);
+    }
+    match std::str::from_utf8(&buf[..content_len]) {
+        Ok(line) => Ok(BoundedLine::Line(line)),
+        Err(err) => Ok(BoundedLine::InvalidUtf8(err)),
+    }
+}
+
+impl McpServer {
     /// Run the server on stdin/stdout, blocking until stdin is closed.
-    ///
-    /// This is a blocking convenience for the common "just serve" binary: it
-    /// builds a tokio runtime internally so `main` needs no `async`. If you are
-    /// already inside a tokio application, drive the server with the async
-    /// [`run_async`](Self::run_async) instead.
-    ///
-    /// Reads JSON-RPC lines from stdin, dispatches them, and writes
-    /// responses to stdout.
     ///
     /// # Panics
     ///
     /// Panics if called from within an existing tokio runtime.
-    /// Use [`run_async`](Self::run_async) instead for async contexts.
     ///
     /// # Errors
     ///
@@ -66,28 +152,13 @@ impl McpServer {
 
     /// Serve MCP over TCP, blocking forever (until a fatal accept error).
     ///
-    /// Blocking convenience mirroring [`run_stdio`](Self::run_stdio) for the
-    /// TCP transport: it builds a **multi-threaded** tokio runtime internally
-    /// (each accepted connection is served on its own task) and blocks on
-    /// [`listen_tcp`](Self::listen_tcp). Use it for simple standalone binaries
-    /// that only need to serve TCP.
-    ///
-    /// For tokio applications, prefer the async [`listen_tcp`](Self::listen_tcp)
-    /// (or [`run_tcp_listener`](Self::run_tcp_listener)) so the server shares
-    /// your existing runtime rather than spinning up a second one.
-    ///
-    /// - Localhost only: `server.run_tcp("127.0.0.1:3000")?`
-    /// - External / Docker: `server.run_tcp("0.0.0.0:8080")?`
-    ///
     /// # Panics
     ///
-    /// Panics if called from within an existing tokio runtime; use
-    /// [`listen_tcp`](Self::listen_tcp) in that case.
+    /// Panics if called from within an existing tokio runtime.
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the tokio runtime cannot be created or binding to the
-    /// TCP address fails.
+    /// Returns `Err` if the tokio runtime cannot be created or binding fails.
     pub fn run_tcp(&self, addr: impl tokio::net::ToSocketAddrs) -> io::Result<()> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -95,28 +166,15 @@ impl McpServer {
         rt.block_on(self.listen_tcp(addr))
     }
 
-    /// Serve MCP over a Unix domain socket, blocking forever (until a fatal
-    /// accept error).
-    ///
-    /// Blocking convenience mirroring [`run_stdio`](Self::run_stdio) for the
-    /// Unix-socket transport: it builds a **multi-threaded** tokio runtime
-    /// internally (each accepted connection is served on its own task) and
-    /// blocks on [`listen_unix`](Self::listen_unix). Use it for simple
-    /// standalone IPC binaries.
-    ///
-    /// For tokio applications, prefer the async
-    /// [`listen_unix`](Self::listen_unix) so the server shares your existing
-    /// runtime.
+    /// Serve MCP over a Unix domain socket, blocking forever (until a fatal accept error).
     ///
     /// # Panics
     ///
-    /// Panics if called from within an existing tokio runtime; use
-    /// [`listen_unix`](Self::listen_unix) in that case.
+    /// Panics if called from within an existing tokio runtime.
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the tokio runtime cannot be created or binding to the
-    /// domain socket path fails.
+    /// Returns `Err` if the tokio runtime cannot be created or binding fails.
     #[cfg(unix)]
     pub fn run_unix(&self, path: impl AsRef<std::path::Path>) -> io::Result<()> {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -127,32 +185,13 @@ impl McpServer {
 
     /// Serve MCP over the given [`Transport`], blocking until it finishes.
     ///
-    /// A one-call blocking dispatcher that collapses a stdio-vs-TCP-vs-Unix
-    /// selection into a single line — ideal for a binary that picks its
-    /// transport from CLI args or config:
-    ///
-    /// ```no_run
-    /// # use llm_tool::ToolRegistry;
-    /// # use llm_tool_mcp::{McpServer, Transport};
-    /// let server = McpServer::new("srv", "0.1.0", ToolRegistry::new());
-    /// let transport = Transport::Tcp("127.0.0.1:3000".parse().unwrap());
-    /// server.serve(transport).expect("server failed");
-    /// ```
-    ///
-    /// This is a blocking convenience built on [`run_stdio`](Self::run_stdio),
-    /// [`run_tcp`](Self::run_tcp) and [`run_unix`](Self::run_unix). Tokio
-    /// applications should instead drive the async
-    /// [`run_async`](Self::run_async) / [`listen_tcp`](Self::listen_tcp) /
-    /// [`listen_unix`](Self::listen_unix) methods directly.
-    ///
     /// # Panics
     ///
     /// Panics if called from within an existing tokio runtime.
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the tokio runtime cannot be created or the underlying
-    /// transport fails to bind / serve.
+    /// Returns `Err` if the tokio runtime cannot be created or the underlying transport fails.
     pub fn serve(&self, transport: Transport) -> io::Result<()> {
         match transport {
             Transport::Stdio => self.run_stdio(),
@@ -164,20 +203,13 @@ impl McpServer {
 
     /// Run the server on arbitrary reader/writer streams.
     ///
-    /// Creates a single-threaded tokio runtime for async tool dispatch
-    /// and reuses it for every request.  The runtime is dropped when the
-    /// reader is exhausted.
-    ///
     /// # Panics
     ///
     /// Panics if called from within an existing tokio runtime.
-    /// Use [`run_async`](Self::run_async) instead for async contexts, or use
-    /// [`run`](Self::run) inside [`tokio::task::spawn_blocking`].
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the tokio runtime cannot be created or a fatal
-    /// write error occurs.
+    /// Returns `Err` if the tokio runtime cannot be created or a fatal write error occurs.
     pub fn run(&self, reader: impl BufRead, mut writer: impl Write) -> io::Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -188,36 +220,49 @@ impl McpServer {
 
     /// Run the server using an externally-provided tokio runtime.
     ///
-    /// Use this when you already have a runtime and want to avoid the
-    /// nested-runtime panic.  For the common case (standalone binary),
-    /// prefer [`run_stdio`](Self::run_stdio) or [`run`](Self::run).
-    ///
     /// # Errors
     ///
-    /// Returns `Err` on fatal write errors.
+    /// Returns `Err` on fatal read/write errors.
     pub fn run_with_runtime(
         &self,
         rt: &tokio::runtime::Runtime,
-        reader: impl BufRead,
+        mut reader: impl BufRead,
         writer: &mut impl Write,
     ) -> io::Result<()> {
-        // Reused across messages so response serialization amortizes to zero
-        // allocations on the hot path.
+        let mut line_buf: Vec<u8> = Vec::new();
         let mut out_buf: Vec<u8> = Vec::new();
-        // Per-connection caller identity, negotiated at `initialize`. `None`
-        // until then (and always, unless per-connection identity is enabled),
-        // in which case the shared server context is used.
-        let mut conn = Connection::default();
-        for line_result in reader.lines() {
-            let line = line_result?;
+        let conn = Connection::default();
 
-            if line.trim().is_empty() {
-                continue;
-            }
+        loop {
+            let outcome_opt =
+                match read_bounded_line_sync(&mut reader, &mut line_buf, self.max_line_bytes)? {
+                    BoundedLine::Eof => break,
+                    BoundedLine::Oversized => Some(RpcOutcome::Single(JsonRpcResponse::error(
+                        None,
+                        protocol::INVALID_REQUEST,
+                        format!(
+                            "JSON-RPC message exceeds maximum length of {} bytes",
+                            self.max_line_bytes
+                        ),
+                    ))),
+                    BoundedLine::InvalidUtf8(err) => {
+                        Some(RpcOutcome::Single(JsonRpcResponse::error(
+                            None,
+                            protocol::PARSE_ERROR,
+                            format!("invalid UTF-8 in JSON-RPC message: {err}"),
+                        )))
+                    }
+                    BoundedLine::Line(line) => {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        debug!(request = %line, "mcp request");
+                        let parsed = self.parse_message(line);
+                        rt.block_on(self.dispatch_parsed_conn(parsed, &conn))
+                    }
+                };
 
-            debug!(request = %line, "mcp request");
-
-            let Some(outcome) = rt.block_on(self.handle_message_conn(&line, &mut conn)) else {
+            let Some(outcome) = outcome_opt else {
                 debug!("dropping notification response");
                 continue;
             };
@@ -235,112 +280,98 @@ impl McpServer {
         Ok(())
     }
 
-    /// Run the server asynchronously on Tokio reader/writer streams.
-    ///
-    /// Reads line-delimited JSON-RPC requests from an async reader, dispatches
-    /// them asynchronously without blocking threads or spinning up nested runtimes,
-    /// and writes serialized responses back to an async writer.
-    ///
-    /// Ideal for integrating into existing Tokio applications, network servers,
-    /// or when running inside an existing async runtime.
+    /// Run the server asynchronously on Tokio reader/writer streams with bounded line framing
+    /// and bounded per-connection concurrency.
     ///
     /// # Errors
     ///
     /// Returns `Err` on fatal I/O errors reading requests or writing responses.
     pub async fn run_async(
         &self,
-        reader: impl tokio::io::AsyncBufRead + Unpin,
+        mut reader: impl AsyncBufRead + Unpin,
         mut writer: impl tokio::io::AsyncWrite + Unpin,
     ) -> io::Result<()> {
-        use tokio::io::AsyncBufReadExt;
-
-        let mut lines = reader.lines();
-        // Reused across messages so response serialization amortizes to zero
-        // allocations on the hot path.
+        let mut line_buf: Vec<u8> = Vec::new();
         let mut out_buf: Vec<u8> = Vec::new();
-        // Per-connection caller identity and active request registry.
-        let mut conn = Connection::default();
-        let mut in_flight_tasks: tokio::task::JoinSet<Option<super::RpcOutcome>> =
+        let conn = Connection::default();
+        let in_flight_sem = Arc::new(Semaphore::new(self.max_in_flight_per_conn));
+        let mut in_flight_tasks: tokio::task::JoinSet<Option<RpcOutcome>> =
             tokio::task::JoinSet::new();
 
         loop {
             tokio::select! {
-                line_res = lines.next_line() => {
-                    let Some(line) = line_res? else {
-                        break;
-                    };
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-
-                    debug!(request = %line, "mcp request");
-
-                    let probe = probe_line(&line);
-                    // Process `initialize` synchronously after draining prior tasks so
-                    // per-connection identity / registry view is established before any
-                    // subsequent requests dispatch.
-                    if is_initialize_line(&line, probe.as_ref()) {
-                        while let Some(res) = in_flight_tasks.join_next().await {
-                            match res {
-                                Ok(Some(outcome)) => {
-                                    write_outcome_async(&mut writer, &mut out_buf, &outcome).await?;
-                                }
-                                Ok(None) => debug!("dropping notification response"),
-                                Err(e) => error!(error = %e, "request handler task panicked"),
-                            }
+                read_res = read_bounded_line_async(&mut reader, &mut line_buf, self.max_line_bytes) => {
+                    let parsed = match read_res? {
+                        BoundedLine::Eof => break,
+                        BoundedLine::Oversized => {
+                            let err_out = RpcOutcome::Single(JsonRpcResponse::error(
+                                None,
+                                protocol::INVALID_REQUEST,
+                                format!(
+                                    "JSON-RPC message exceeds maximum length of {} bytes",
+                                    self.max_line_bytes
+                                ),
+                            ));
+                            write_outcome_async(&mut writer, &mut out_buf, &err_out).await?;
+                            continue;
                         }
-                        if let Some(outcome) = self.handle_message_conn(&line, &mut conn).await {
+                        BoundedLine::InvalidUtf8(err) => {
+                            let err_out = RpcOutcome::Single(JsonRpcResponse::error(
+                                None,
+                                protocol::PARSE_ERROR,
+                                format!("invalid UTF-8 in JSON-RPC message: {err}"),
+                            ));
+                            write_outcome_async(&mut writer, &mut out_buf, &err_out).await?;
+                            continue;
+                        }
+                        BoundedLine::Line(line) => {
+                            if line.trim().is_empty() {
+                                continue;
+                            }
+                            debug!(request = %line, "mcp request");
+                            self.parse_message(line)
+                        }
+                    };
+
+                    if parsed.contains_initialize() {
+                        drain_in_flight(&mut in_flight_tasks, &mut writer, &mut out_buf).await?;
+                        if let Some(outcome) = self.dispatch_parsed_conn(parsed, &conn).await {
                             write_outcome_async(&mut writer, &mut out_buf, &outcome).await?;
                         }
-                    } else if probe.as_ref().is_some_and(|p| p.id.is_none() && p.method.is_some()) {
-                        // Notifications produce no wire response. Handling them inline in the
-                        // read loop immediately triggers cancellation or lifecycle updates without
-                        // JoinSet scheduling overhead.
-                        let outcome = self.handle_message_conn(&line, &mut conn).await;
-                        if let Some(unexpected) = outcome {
+                    } else if parsed.is_single_notification() {
+                        // Notifications (such as `notifications/cancelled`) run inline without
+                        // acquiring an in-flight request slot so cancellation never deadlocks.
+                        if let Some(unexpected) = self.dispatch_parsed_conn(parsed, &conn).await {
                             write_outcome_async(&mut writer, &mut out_buf, &unexpected).await?;
                         }
                     } else {
+                        let permit = acquire_in_flight_permit(
+                            &in_flight_sem,
+                            &mut in_flight_tasks,
+                            &mut writer,
+                            &mut out_buf,
+                        )
+                        .await?;
                         let server = self.clone();
-                        let mut conn_clone = conn.clone();
+                        let conn_clone = conn.clone();
                         in_flight_tasks.spawn(async move {
-                            server.handle_message_conn(&line, &mut conn_clone).await
+                            let _permit = permit;
+                            server.dispatch_parsed_conn(parsed, &conn_clone).await
                         });
                     }
                 }
                 Some(res) = in_flight_tasks.join_next(), if !in_flight_tasks.is_empty() => {
-                    match res {
-                        Ok(Some(outcome)) => {
-                            write_outcome_async(&mut writer, &mut out_buf, &outcome).await?;
-                        }
-                        Ok(None) => debug!("dropping notification response"),
-                        Err(e) => error!(error = %e, "request handler task panicked"),
-                    }
+                    handle_joined_task(res, &mut writer, &mut out_buf).await?;
                 }
             }
         }
 
-        while let Some(res) = in_flight_tasks.join_next().await {
-            match res {
-                Ok(Some(outcome)) => {
-                    write_outcome_async(&mut writer, &mut out_buf, &outcome).await?;
-                }
-                Ok(None) => debug!("dropping notification response"),
-                Err(e) => error!(error = %e, "request handler task panicked"),
-            }
-        }
-
+        drain_in_flight(&mut in_flight_tasks, &mut writer, &mut out_buf).await?;
         info!("input stream closed — shutting down");
         Ok(())
     }
 
     /// Listen for TCP connections and serve MCP requests asynchronously on each connection.
-    ///
-    /// This allows remote clients, IDEs, or multi-client agents to connect over TCP:
-    /// - Localhost only: `server.listen_tcp("127.0.0.1:3000").await?`
-    /// - External / Docker: `server.listen_tcp("0.0.0.0:8080").await?`
-    ///
-    /// For each incoming connection, a new Tokio task is spawned running [`run_async`](Self::run_async).
     ///
     /// # Errors
     ///
@@ -351,18 +382,24 @@ impl McpServer {
         self.run_tcp_listener(listener).await
     }
 
-    /// Serve MCP requests asynchronously on an existing [`tokio::net::TcpListener`].
+    /// Serve MCP requests asynchronously on an existing [`tokio::net::TcpListener`],
+    /// bounded by the server's concurrent connection semaphore.
     ///
     /// # Errors
     ///
     /// Returns `Err` on fatal accept loop errors.
     pub async fn run_tcp_listener(&self, listener: tokio::net::TcpListener) -> io::Result<()> {
         loop {
+            let permit = Arc::clone(&self.connection_semaphore)
+                .acquire_owned()
+                .await
+                .map_err(|e| io::Error::other(format!("connection semaphore closed: {e}")))?;
             let (mut socket, peer_addr) = listener.accept().await?;
             info!(peer = %peer_addr, "accepted MCP TCP connection");
 
             let server = self.clone();
             tokio::spawn(async move {
+                let _permit = permit;
                 let (reader, writer) = socket.split();
                 let reader = tokio::io::BufReader::new(reader);
                 if let Err(e) = server.run_async(reader, writer).await {
@@ -376,46 +413,73 @@ impl McpServer {
     #[cfg(unix)]
     /// Listen on a Unix domain socket and serve MCP requests asynchronously on each connection.
     ///
-    /// This allows local IPC clients to connect over a filesystem domain socket
-    /// (e.g. `/tmp/my-agent.sock`).
+    /// Verifies via [`std::fs::symlink_metadata`] that any pre-existing path is a Unix domain
+    /// socket before unlinking stale socket files (failing with [`io::ErrorKind::AlreadyExists`]
+    /// if `path` is a regular file, directory, or symlink).
     ///
     /// # Errors
     ///
-    /// Returns `Err` if binding to the domain socket path fails.
+    /// Returns `Err` if `path` is a non-socket filesystem entry, already actively bound, or binding fails.
     pub async fn listen_unix(&self, path: impl AsRef<std::path::Path>) -> io::Result<()> {
+        use std::os::unix::fs::FileTypeExt;
+
         let path = path.as_ref();
-        if path.exists() {
-            if tokio::net::UnixStream::connect(path).await.is_ok() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AddrInUse,
-                    format!(
-                        "another process is already listening on Unix socket {}",
-                        path.display()
-                    ),
-                ));
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) => {
+                if !meta.file_type().is_socket() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("refusing to unlink non-socket path {}", path.display()),
+                    ));
+                }
+                match tokio::net::UnixStream::connect(path).await {
+                    Ok(_active_stream) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::AddrInUse,
+                            format!(
+                                "another process is already listening on Unix socket {}",
+                                path.display()
+                            ),
+                        ));
+                    }
+                    Err(connect_err) => {
+                        debug!(
+                            path = ?path,
+                            error = %connect_err,
+                            "existing Unix socket is stale; unlinking before bind"
+                        );
+                    }
+                }
+                std::fs::remove_file(path)?;
             }
-            if let Err(e) = std::fs::remove_file(path) {
-                tracing::warn!(path = ?path, error = %e, "failed to remove stale socket file");
-            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
         }
+
         let listener = tokio::net::UnixListener::bind(path)?;
         info!(path = ?path, "listening on Unix domain socket for MCP connections");
         self.run_unix_listener(listener).await
     }
 
     #[cfg(unix)]
-    /// Serve MCP requests asynchronously on an existing [`tokio::net::UnixListener`].
+    /// Serve MCP requests asynchronously on an existing [`tokio::net::UnixListener`],
+    /// bounded by the server's concurrent connection semaphore.
     ///
     /// # Errors
     ///
     /// Returns `Err` on fatal accept loop errors.
     pub async fn run_unix_listener(&self, listener: tokio::net::UnixListener) -> io::Result<()> {
         loop {
+            let permit = Arc::clone(&self.connection_semaphore)
+                .acquire_owned()
+                .await
+                .map_err(|e| io::Error::other(format!("connection semaphore closed: {e}")))?;
             let (mut socket, _) = listener.accept().await?;
             info!("accepted MCP Unix domain socket connection");
 
             let server = self.clone();
             tokio::spawn(async move {
+                let _permit = permit;
                 let (reader, writer) = socket.split();
                 let reader = tokio::io::BufReader::new(reader);
                 if let Err(e) = server.run_async(reader, writer).await {
@@ -427,80 +491,68 @@ impl McpServer {
     }
 }
 
+async fn acquire_in_flight_permit(
+    sem: &Arc<Semaphore>,
+    in_flight_tasks: &mut tokio::task::JoinSet<Option<RpcOutcome>>,
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    out_buf: &mut Vec<u8>,
+) -> io::Result<tokio::sync::OwnedSemaphorePermit> {
+    match Arc::clone(sem).try_acquire_owned() {
+        Ok(permit) => return Ok(permit),
+        Err(err) => {
+            debug!(error = %err, "per-connection in-flight slots full; awaiting task completion");
+        }
+    }
+    loop {
+        tokio::select! {
+            permit_res = Arc::clone(sem).acquire_owned() => {
+                return permit_res.map_err(|e| io::Error::other(format!("in-flight semaphore closed: {e}")));
+            }
+            Some(res) = in_flight_tasks.join_next(), if !in_flight_tasks.is_empty() => {
+                handle_joined_task(res, writer, out_buf).await?;
+            }
+        }
+    }
+}
+
+async fn drain_in_flight(
+    in_flight_tasks: &mut tokio::task::JoinSet<Option<RpcOutcome>>,
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    out_buf: &mut Vec<u8>,
+) -> io::Result<()> {
+    while let Some(res) = in_flight_tasks.join_next().await {
+        handle_joined_task(res, writer, out_buf).await?;
+    }
+    Ok(())
+}
+
+async fn handle_joined_task(
+    res: Result<Option<RpcOutcome>, tokio::task::JoinError>,
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    out_buf: &mut Vec<u8>,
+) -> io::Result<()> {
+    match res {
+        Ok(Some(outcome)) => write_outcome_async(writer, out_buf, &outcome).await,
+        Ok(None) => {
+            debug!("dropping notification response");
+            Ok(())
+        }
+        Err(e) => {
+            error!(error = %e, "request handler task panicked");
+            Ok(())
+        }
+    }
+}
+
 async fn write_outcome_async(
     writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     out_buf: &mut Vec<u8>,
-    outcome: &super::RpcOutcome,
+    outcome: &RpcOutcome,
 ) -> io::Result<()> {
-    use tokio::io::AsyncWriteExt;
-
     out_buf.clear();
     outcome.write_json(out_buf);
     debug!(response = %String::from_utf8_lossy(out_buf), "mcp response");
     out_buf.push(b'\n');
     writer.write_all(out_buf).await?;
     writer.flush().await
-}
-
-const BATCH_START_CHAR: char = '[';
-
-#[derive(Debug, Clone, Copy)]
-struct PresentField;
-
-fn deserialize_present_field<'de, D>(deserializer: D) -> Result<Option<PresentField>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    <serde::de::IgnoredAny as serde::Deserialize>::deserialize(deserializer)
-        .map(|_ignored| Some(PresentField))
-}
-
-#[derive(serde::Deserialize)]
-struct MethodProbe<'a> {
-    #[serde(default, deserialize_with = "deserialize_present_field")]
-    id: Option<PresentField>,
-    #[serde(borrow)]
-    method: Option<&'a str>,
-}
-
-fn probe_line(line: &str) -> Option<MethodProbe<'_>> {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with(BATCH_START_CHAR) {
-        return None;
-    }
-    match serde_json::from_str::<MethodProbe>(line) {
-        Ok(probe) => Some(probe),
-        Err(e) => {
-            debug!(error = %e, "probe_line: line is not a single request object");
-            None
-        }
-    }
-}
-
-fn is_initialize_line(line: &str, probe: Option<&MethodProbe<'_>>) -> bool {
-    if !line.contains(crate::protocol::METHOD_INITIALIZE) {
-        return false;
-    }
-    if let Some(p) = probe {
-        return p.method == Some(crate::protocol::METHOD_INITIALIZE);
-    }
-    let trimmed = line.trim_start();
-    if trimmed.starts_with(BATCH_START_CHAR) {
-        #[derive(serde::Deserialize)]
-        struct BatchMethodProbe<'a> {
-            #[serde(borrow)]
-            method: Option<&'a str>,
-        }
-        match serde_json::from_str::<Vec<BatchMethodProbe>>(line) {
-            Ok(arr) => arr
-                .iter()
-                .any(|p| p.method == Some(crate::protocol::METHOD_INITIALIZE)),
-            Err(e) => {
-                debug!(error = %e, "is_initialize_line: batch probe failed");
-                false
-            }
-        }
-    } else {
-        false
-    }
 }

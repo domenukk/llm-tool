@@ -15,11 +15,36 @@ mod rust_resource;
 mod rust_tool;
 mod types;
 
-/// Re-export `md_tmpl` so generated code can
-/// reference `::llm_tool::__md_tmpl::` without requiring the user
-/// to add `md-tmpl` as a direct dependency.
+/// Re-export `md_tmpl` items so generated code can reference `::llm_tool::__md_tmpl::`
+/// without requiring the user to add `md-tmpl` as a direct dependency, while routing
+/// `#cp::__private::TypedBuilder` through [`llm_tool_macros::ResponseStructBuilder`]
+/// so generated structs do not emit uninhabited enums under `clippy::empty_enums`.
 #[doc(hidden)]
-pub use md_tmpl as __md_tmpl;
+pub mod __md_tmpl {
+    pub use md_tmpl::{
+        CompileOptions, Context, PrecompiledTemplateData, SanitizeSpec, Template, TemplateError,
+        Value, VarDecl, VarType, VariantDecl, compiled, consts, escape_json_str,
+        escape_xml_attr_str, escape_xml_body_str, escape_xml_str, fence_str, from_value,
+        quarantine_str, quarantine_untrusted_idempotent_str, quarantine_untrusted_str,
+        sanitize_block_idempotent_into, sanitize_block_idempotent_str, sanitize_block_into,
+        sanitize_block_str, sanitize_quarantine_payload, sanitize_role_tokens_str, sanitize_str,
+        sanitize_tokens_str, sanitize_untrusted_str, strip_invisible_str, to_sanitized_value,
+        to_value, truncate_middle_list, truncate_middle_str,
+    };
+
+    #[doc(hidden)]
+    pub mod __private {
+        pub use llm_tool_macros::ResponseStructBuilder as TypedBuilder;
+        pub use md_tmpl::__private::{
+            Arc, Box, Cow, HashMap, LazyLock, StaticScalar, String, Vec, cmp_int_float, fnv1a_hash,
+            format, i64_to_f64, inject_enum_type_constants, make_enum_namespace_value,
+            make_scalar_list_value, make_scalar_struct_list_value, make_scalar_struct_value,
+            make_str_value, render_str_filters, run_static_analysis, sanitize_inline_into,
+            typed_builder, vec, write_fixed_float, write_fixed_int, write_float, write_int,
+            write_lower, write_upper,
+        };
+    }
+}
 /// Public re-export of `md_tmpl` for use in `context = fn` functions.
 ///
 /// Use `llm_tool::md_tmpl::Context` when writing a context function

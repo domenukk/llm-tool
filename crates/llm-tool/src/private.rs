@@ -5,10 +5,8 @@
 
 #[doc(hidden)]
 pub mod __private {
-    // Re-exports for generated code to work in no_std contexts.
     #[cfg(not(feature = "std"))]
     pub use alloc::borrow::Cow;
-    #[cfg(not(feature = "std"))]
     use alloc::{
         format,
         string::{String, ToString},
@@ -26,14 +24,11 @@ pub mod __private {
     #[cfg(not(feature = "std"))]
     pub use spin::LazyLock as Lazy;
 
-    use crate::types::{Json, Sanitized, ToolError, ToolOutput, Untrusted};
+    use crate::types::{
+        Json, PromptOutput, ResourceOutput, Sanitized, ToolError, ToolOutput, Untrusted,
+    };
 
     /// Report a runtime tool-description template render failure.
-    ///
-    /// Called by `#[llm_tool(..., context = ...)]`-generated `description()`
-    /// code: on a render error the tool falls back to its static description
-    /// body rather than panicking. Logs to stderr under `std`; a no-op under
-    /// `no_std` (where no logger is available).
     #[cfg(feature = "std")]
     pub fn log_description_render_error(tool: &str, err: &dyn core::fmt::Display) {
         tracing::warn!(
@@ -48,154 +43,299 @@ pub mod __private {
     #[inline]
     pub fn log_description_render_error(_tool: &str, _err: &dyn core::fmt::Display) {}
 
-    /// Wrapper enabling compile-time method dispatch for tool output conversion.
+    // ── Autoref Error Conversion (`WrapErr<E>`) ──
+
+    /// Wrapper enabling compile-time method dispatch for `Result<Out, E>` error conversion.
+    ///
+    /// Preserves structured metadata for [`ToolError`], [`std::io::Error`], and
+    /// [`serde_json::Error`], moves [`String`] without reallocating, and falls back
+    /// to [`core::fmt::Display`] for any custom error type (`thiserror`, `anyhow::Error`,
+    /// `ParseIntError`, etc.).
+    pub struct WrapErr<E>(pub E);
+
+    impl WrapErr<ToolError> {
+        #[must_use]
+        pub fn __convert_err(self) -> ToolError {
+            self.0
+        }
+    }
+
+    impl WrapErr<String> {
+        #[must_use]
+        pub fn __convert_err(self) -> ToolError {
+            ToolError::new(self.0)
+        }
+    }
+
+    impl WrapErr<&str> {
+        #[must_use]
+        pub fn __convert_err(self) -> ToolError {
+            ToolError::new(self.0)
+        }
+    }
+
+    #[cfg(feature = "std")]
+    impl WrapErr<std::io::Error> {
+        #[must_use]
+        pub fn __convert_err(self) -> ToolError {
+            ToolError::from(self.0)
+        }
+    }
+
+    impl WrapErr<serde_json::Error> {
+        #[must_use]
+        pub fn __convert_err(self) -> ToolError {
+            ToolError::from(self.0)
+        }
+    }
+
+    impl WrapErr<core::convert::Infallible> {
+        #[must_use]
+        pub const fn __convert_err(self) -> ToolError {
+            match self.0 {}
+        }
+    }
+
+    /// Autoref fallback converting any `E: Display` into a [`ToolError`].
+    pub trait DisplayErrorFallback {
+        /// Format `self` via [`core::fmt::Display`] into a [`ToolError`].
+        fn __convert_err(self) -> ToolError;
+    }
+
+    impl<E: core::fmt::Display> DisplayErrorFallback for &WrapErr<E> {
+        fn __convert_err(self) -> ToolError {
+            ToolError::new(self.0.to_string())
+        }
+    }
+
+    // ── Output Conversion (`Wrap<T>`) ──
+
+    /// Wrapper enabling compile-time method dispatch for tool, prompt, and resource outputs.
     pub struct Wrap<T>(pub T);
 
-    // ── Inherent methods (highest priority in method resolution) ──
-
     impl Wrap<ToolOutput> {
-        /// `ToolOutput` → identity pass-through.
         pub fn __convert(self) -> Result<ToolOutput, ToolError> {
             Ok(self.0)
         }
     }
 
     impl Wrap<String> {
-        /// `String` → wrap as plain text (no JSON encoding).
         pub fn __convert(self) -> Result<ToolOutput, ToolError> {
             Ok(ToolOutput::new(self.0))
         }
-        pub fn __convert_prompt(self) -> Result<crate::types::PromptOutput, ToolError> {
-            Ok(crate::types::PromptOutput::user(self.0))
+        pub fn __convert_prompt(self) -> Result<PromptOutput, ToolError> {
+            Ok(PromptOutput::user(self.0))
         }
         pub fn __convert_resource(
             self,
             uri: &str,
             mime_type: Option<&str>,
-        ) -> Result<crate::types::ResourceOutput, ToolError> {
-            Ok(crate::types::ResourceOutput::text(uri, mime_type, self.0))
+        ) -> Result<ResourceOutput, ToolError> {
+            Ok(ResourceOutput::text(uri, mime_type, self.0))
         }
     }
 
     impl Wrap<&str> {
-        /// `&str` → wrap as plain text (no JSON encoding).
         pub fn __convert(self) -> Result<ToolOutput, ToolError> {
             Ok(ToolOutput::new(self.0))
         }
-        pub fn __convert_prompt(self) -> Result<crate::types::PromptOutput, ToolError> {
-            Ok(crate::types::PromptOutput::user(self.0))
+        pub fn __convert_prompt(self) -> Result<PromptOutput, ToolError> {
+            Ok(PromptOutput::user(self.0))
         }
         pub fn __convert_resource(
             self,
             uri: &str,
             mime_type: Option<&str>,
-        ) -> Result<crate::types::ResourceOutput, ToolError> {
-            Ok(crate::types::ResourceOutput::text(uri, mime_type, self.0))
+        ) -> Result<ResourceOutput, ToolError> {
+            Ok(ResourceOutput::text(uri, mime_type, self.0))
         }
     }
 
     impl Wrap<Sanitized<ToolOutput>> {
-        /// `Sanitized<ToolOutput>` → neutralize control tokens on the inner `ToolOutput`.
         pub fn __convert(self) -> Result<ToolOutput, ToolError> {
             Ok(self.0.0.sanitized())
         }
     }
 
+    impl Wrap<Sanitized<PromptOutput>> {
+        pub fn __convert_prompt(self) -> Result<PromptOutput, ToolError> {
+            Ok(self.0.0.sanitized())
+        }
+    }
+
+    impl Wrap<Sanitized<ResourceOutput>> {
+        pub fn __convert_resource(
+            self,
+            _uri: &str,
+            _mime_type: Option<&str>,
+        ) -> Result<ResourceOutput, ToolError> {
+            Ok(self.0.0.sanitized())
+        }
+    }
+
     impl Wrap<Sanitized<String>> {
-        /// `Sanitized<String>` → wrap as plain text and neutralize control tokens.
         pub fn __convert(self) -> Result<ToolOutput, ToolError> {
             Ok(ToolOutput::new(self.0.0).sanitized())
+        }
+        pub fn __convert_prompt(self) -> Result<PromptOutput, ToolError> {
+            Ok(PromptOutput::user(self.0.0).sanitized())
+        }
+        pub fn __convert_resource(
+            self,
+            uri: &str,
+            mime_type: Option<&str>,
+        ) -> Result<ResourceOutput, ToolError> {
+            Ok(ResourceOutput::text(uri, mime_type, self.0.0).sanitized())
         }
     }
 
     impl Wrap<Sanitized<&str>> {
-        /// `Sanitized<&str>` → wrap as plain text and neutralize control tokens.
         pub fn __convert(self) -> Result<ToolOutput, ToolError> {
             Ok(ToolOutput::new(self.0.0).sanitized())
+        }
+        pub fn __convert_prompt(self) -> Result<PromptOutput, ToolError> {
+            Ok(PromptOutput::user(self.0.0).sanitized())
+        }
+        pub fn __convert_resource(
+            self,
+            uri: &str,
+            mime_type: Option<&str>,
+        ) -> Result<ResourceOutput, ToolError> {
+            Ok(ResourceOutput::text(uri, mime_type, self.0.0).sanitized())
         }
     }
 
     impl Wrap<Untrusted<ToolOutput>> {
-        /// `Untrusted<ToolOutput>` → quarantine the inner `ToolOutput`.
         pub fn __convert(self) -> Result<ToolOutput, ToolError> {
             Ok(self.0.0.quarantined())
         }
     }
 
-    impl Wrap<Untrusted<String>> {
-        /// `Untrusted<String>` → wrap as plain text and quarantine.
-        pub fn __convert(self) -> Result<ToolOutput, ToolError> {
-            Ok(ToolOutput::new(self.0.0).quarantined())
+    impl Wrap<Untrusted<PromptOutput>> {
+        pub fn __convert_prompt(self) -> Result<PromptOutput, ToolError> {
+            Ok(self.0.0.quarantined())
         }
     }
 
-    impl Wrap<Untrusted<&str>> {
-        /// `Untrusted<&str>` → wrap as plain text and quarantine.
-        pub fn __convert(self) -> Result<ToolOutput, ToolError> {
-            Ok(ToolOutput::new(self.0.0).quarantined())
-        }
-    }
-
-    impl Wrap<crate::types::PromptOutput> {
-        pub fn __convert_prompt(self) -> Result<crate::types::PromptOutput, ToolError> {
-            Ok(self.0)
-        }
-    }
-
-    impl Wrap<crate::types::ResourceOutput> {
+    impl Wrap<Untrusted<ResourceOutput>> {
         pub fn __convert_resource(
             self,
             _uri: &str,
             _mime_type: Option<&str>,
-        ) -> Result<crate::types::ResourceOutput, ToolError> {
+        ) -> Result<ResourceOutput, ToolError> {
+            Ok(self.0.0.quarantined())
+        }
+    }
+
+    impl Wrap<Untrusted<String>> {
+        pub fn __convert(self) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::new(self.0.0).quarantined())
+        }
+        pub fn __convert_prompt(self) -> Result<PromptOutput, ToolError> {
+            Ok(PromptOutput::user(self.0.0).quarantined())
+        }
+        pub fn __convert_resource(
+            self,
+            uri: &str,
+            mime_type: Option<&str>,
+        ) -> Result<ResourceOutput, ToolError> {
+            Ok(ResourceOutput::text(uri, mime_type, self.0.0).quarantined())
+        }
+    }
+
+    impl Wrap<Untrusted<&str>> {
+        pub fn __convert(self) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::new(self.0.0).quarantined())
+        }
+        pub fn __convert_prompt(self) -> Result<PromptOutput, ToolError> {
+            Ok(PromptOutput::user(self.0.0).quarantined())
+        }
+        pub fn __convert_resource(
+            self,
+            uri: &str,
+            mime_type: Option<&str>,
+        ) -> Result<ResourceOutput, ToolError> {
+            Ok(ResourceOutput::text(uri, mime_type, self.0.0).quarantined())
+        }
+    }
+
+    impl Wrap<PromptOutput> {
+        pub fn __convert_prompt(self) -> Result<PromptOutput, ToolError> {
             Ok(self.0)
         }
     }
 
-    fn serialize_to_tool_output<T: serde::Serialize>(val: &T) -> Result<ToolOutput, ToolError> {
-        let json_value = serde_json::to_value(val)
-            .map_err(|e| ToolError::new(format!("serialization failed: {e}")))?;
+    impl Wrap<ResourceOutput> {
+        pub fn __convert_resource(
+            self,
+            _uri: &str,
+            _mime_type: Option<&str>,
+        ) -> Result<ResourceOutput, ToolError> {
+            Ok(self.0)
+        }
+    }
+
+    /// Human-readable JSON type name for error messages.
+    #[must_use]
+    pub const fn other_type_name(value: &serde_json::Value) -> &'static str {
+        match value {
+            serde_json::Value::Null => "null",
+            serde_json::Value::Bool(_) => "bool",
+            serde_json::Value::Number(_) => "number",
+            serde_json::Value::String(_) => "string",
+            serde_json::Value::Array(_) => "array",
+            serde_json::Value::Object(_) => "object",
+        }
+    }
+
+    /// Shared serializer converting any `T: Serialize` into a [`ToolOutput`], attaching
+    /// top-level JSON object fields as `metadata`.
+    pub fn serialize_value_to_tool_output<T: serde::Serialize>(
+        value: &T,
+        require_object: bool,
+        err_prefix: &str,
+    ) -> Result<ToolOutput, ToolError> {
+        let json_value = serde_json::to_value(value)
+            .map_err(|e| ToolError::new(format!("{err_prefix}: {e}")))?;
         let content = json_value.to_string();
         match json_value {
             serde_json::Value::Object(map) => Ok(ToolOutput {
                 content,
                 metadata: map.into_iter().collect(),
             }),
+            other if require_object => Err(ToolError::new(format!(
+                "metadata must serialize to a JSON object, got {}",
+                other_type_name(&other),
+            ))),
             _ => Ok(ToolOutput::new(content)),
         }
     }
 
+    fn serialize_to_tool_output<T: serde::Serialize>(val: &T) -> Result<ToolOutput, ToolError> {
+        serialize_value_to_tool_output(val, false, "serialization failed")
+    }
+
     impl<T: serde::Serialize> Wrap<Json<T>> {
-        /// `Json<T>` → serialize to JSON string.
         pub fn __convert(self) -> Result<ToolOutput, ToolError> {
             serialize_to_tool_output(&self.0.0)
         }
     }
 
     impl<T: serde::Serialize> Wrap<Sanitized<Json<T>>> {
-        /// `Sanitized<Json<T>>` → serialize to JSON string and neutralize control tokens.
         pub fn __convert(self) -> Result<ToolOutput, ToolError> {
             serialize_to_tool_output(&Sanitized(self.0.0.0)).map(ToolOutput::sanitized)
         }
     }
 
     impl<T: serde::Serialize> Wrap<Untrusted<Json<T>>> {
-        /// `Untrusted<Json<T>>` → serialize to JSON string and quarantine.
         pub fn __convert(self) -> Result<ToolOutput, ToolError> {
-            serialize_to_tool_output(&self.0.0.0).map(ToolOutput::quarantined)
+            serialize_to_tool_output(&Sanitized(self.0.0.0)).map(ToolOutput::quarantined)
         }
     }
 
     // ── Trait fallback (lower priority in method resolution) ──
 
     /// Fallback conversion for any `T: Serialize` not covered by inherent methods.
-    ///
-    /// Method resolution checks:
-    /// 1. Inherent methods on `Wrap<...>` (`ToolOutput`, `String`, `&str`, `Json<T>`,
-    ///    and their `Sanitized<...>` / `Untrusted<...>` counterparts).
-    /// 2. Value-receiver `SerializeFallback` impls on `Wrap<Sanitized<T>>` and
-    ///    `Wrap<Untrusted<T>>` for arbitrary `T: Serialize`.
-    /// 3. Autoref-receiver `SerializeFallback` impl on `&Wrap<T>` for arbitrary `T: Serialize`.
     pub trait SerializeFallback {
         /// Serialize `self` to JSON and wrap as [`ToolOutput`].
         fn __convert(self) -> Result<ToolOutput, ToolError>;
@@ -209,7 +349,7 @@ pub mod __private {
 
     impl<T: serde::Serialize> SerializeFallback for Wrap<Untrusted<T>> {
         fn __convert(self) -> Result<ToolOutput, ToolError> {
-            serialize_to_tool_output(&self.0.0).map(ToolOutput::quarantined)
+            serialize_to_tool_output(&Sanitized(self.0.0)).map(ToolOutput::quarantined)
         }
     }
 

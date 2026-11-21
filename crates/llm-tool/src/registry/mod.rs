@@ -1,19 +1,21 @@
-//! Tool registry: registry and concurrent dispatch of named tools.
+//! Tool registry: registry, safety pipeline, projections, and concurrent dispatch of named tools.
 
 mod batch;
+mod projection;
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{borrow::Cow, boxed::Box, sync::Arc, vec::Vec};
 
 pub use batch::{
     AllowDestructiveBatch, BatchExecutionMode, BatchToolCall, BatchToolCallOutcome,
     BatchToolCallStr,
 };
+pub use projection::DynamicToolHandler;
 
 use super::{
     rust_tool::{ErasedTool, RustTool, definition_of},
     types::{
-        OutputSanitization, RegistryItem, ToolContext, ToolDefinition, ToolEffect, ToolError,
-        ToolOutput, ToolProvenance,
+        OutputSanitization, RegistryItem, SpillContext, SurrogateVault, ToolContext,
+        ToolDefinition, ToolEffect, ToolError, ToolOutput, ToolProvenance, TruncationPolicy,
     },
 };
 use crate::{
@@ -21,28 +23,43 @@ use crate::{
     rust_tool::BoxToolFuture,
 };
 
-/// Entry holding a cached [`ToolDefinition`] alongside the type-erased tool.
-///
-/// The definition is computed once at registration time so that
-/// [`ToolRegistry::definitions`] and [`ToolRegistry::iter`] never
-/// regenerate JSON schemas.
+/// Entry holding a cached [`ToolDefinition`] alongside a cheaply-cloneable type-erased tool.
+#[derive(Clone)]
 struct RegisteredTool {
     definition: ToolDefinition,
-    erased: Box<dyn ErasedTool>,
+    erased: Arc<dyn ErasedTool>,
 }
 
 /// A registry of named tools available for dynamic dispatch.
 ///
-/// Holds type-erased tool implementations and cached [`ToolDefinition`](super::types::ToolDefinition)
-/// schemas for fast lookup and execution.
+/// Holds type-erased tool implementations and cached [`ToolDefinition`] schemas
+/// behind [`Arc`] handles so cloning, subsetting, role-filtering, and merging
+/// registries across subagent scopes is cheap (`O(tools)` pointer clones, zero
+/// JSON Schema regeneration).
 ///
-/// Every dispatched output is sanitized with at least the registry's
-/// [`output_floor`](Self::output_floor) (default [`OutputSanitization::SanitizeTokens`]),
-/// even if an individual tool opted out.
+/// When configured with [`with_surrogate_redaction`](Self::with_surrogate_redaction)
+/// and/or [`with_truncation_policy`](Self::with_truncation_policy), every dispatched
+/// call executes the defense pipeline in strict order:
+/// `1. SurrogateVault::redact -> 2. OutputSanitization -> 3. TruncationPolicy`.
 pub struct ToolRegistry {
-    tools: HashMap<&'static str, RegisteredTool>,
+    tools: HashMap<Cow<'static, str>, RegisteredTool>,
     cached_definitions: RwLock<Option<Arc<[ToolDefinition]>>>,
-    output_floor: OutputSanitization,
+    pub(super) output_floor: OutputSanitization,
+    pub(super) truncation_policy: Option<TruncationPolicy>,
+    pub(super) surrogate_redaction: bool,
+}
+
+impl Clone for ToolRegistry {
+    fn clone(&self) -> Self {
+        let cached = read_lock_recover(&self.cached_definitions).clone();
+        Self {
+            tools: self.tools.clone(),
+            cached_definitions: RwLock::new(cached),
+            output_floor: self.output_floor,
+            truncation_policy: self.truncation_policy.clone(),
+            surrogate_redaction: self.surrogate_redaction,
+        }
+    }
 }
 
 impl core::fmt::Debug for ToolRegistry {
@@ -56,6 +73,8 @@ impl core::fmt::Debug for ToolRegistry {
             .field("tool_count", &self.tools.len())
             .field("tool_names", &names)
             .field("output_floor", &self.output_floor)
+            .field("has_truncation_policy", &self.truncation_policy.is_some())
+            .field("surrogate_redaction", &self.surrogate_redaction)
             .finish_non_exhaustive()
     }
 }
@@ -66,6 +85,62 @@ impl Default for ToolRegistry {
     }
 }
 
+fn redact_json_value_in_place(
+    vault: &SurrogateVault,
+    val: &mut serde_json::Value,
+) -> Result<(), ToolError> {
+    match val {
+        serde_json::Value::String(s) => {
+            *s = vault.redact_str(s)?;
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_json_value_in_place(vault, item)?;
+            }
+        }
+        serde_json::Value::Object(map) => {
+            let entries = core::mem::take(map);
+            let mut rebuilt = serde_json::Map::with_capacity(entries.len());
+            for (k, mut v) in entries {
+                let clean_key = vault.redact_str(&k)?;
+                redact_json_value_in_place(vault, &mut v)?;
+                rebuilt.insert(clean_key, v);
+            }
+            *map = rebuilt;
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+    Ok(())
+}
+
+fn redact_tool_output(
+    vault: &SurrogateVault,
+    mut output: ToolOutput,
+) -> Result<ToolOutput, ToolError> {
+    output.content = vault.redact_str(&output.content)?;
+    if !output.metadata.is_empty() {
+        let entries = core::mem::take(&mut output.metadata);
+        let mut rebuilt = HashMap::with_capacity(entries.len());
+        for (k, mut v) in entries {
+            let clean_key = vault.redact_str(&k)?;
+            redact_json_value_in_place(vault, &mut v)?;
+            rebuilt.insert(clean_key, v);
+        }
+        output.metadata = rebuilt;
+    }
+    Ok(output)
+}
+
+fn redact_tool_error(vault: &SurrogateVault, mut err: ToolError) -> ToolError {
+    match vault.redact_str(&err.message) {
+        Ok(redacted) => err.message = redacted,
+        Err(redact_err) => {
+            tracing::warn!(error = %redact_err, "ToolRegistry: failed to redact surrogates in ToolError");
+        }
+    }
+    err
+}
+
 impl ToolRegistry {
     /// Create an empty registry.
     #[must_use]
@@ -74,14 +149,12 @@ impl ToolRegistry {
             tools: HashMap::new(),
             cached_definitions: RwLock::new(None),
             output_floor: OutputSanitization::default(),
+            truncation_policy: None,
+            surrogate_redaction: false,
         }
     }
 
     /// Set the minimum [`OutputSanitization`] enforced on every dispatched tool output.
-    ///
-    /// The effective policy per call is the tool's own policy raised to at least this
-    /// floor ([`OutputSanitization::at_least`]). Lowering it to
-    /// [`OutputSanitization::None`] restores raw passthrough for tools that opt out.
     #[must_use]
     pub const fn with_output_floor(mut self, floor: OutputSanitization) -> Self {
         self.output_floor = floor;
@@ -100,44 +173,93 @@ impl ToolRegistry {
         self.output_floor
     }
 
-    /// The policy actually applied to `name`'s output: its own policy raised to the floor.
+    /// Configure a registry-wide [`TruncationPolicy`] applied automatically after sanitization
+    /// (and after optional surrogate redaction) on every dispatched tool output.
+    #[must_use]
+    pub fn with_truncation_policy(mut self, policy: TruncationPolicy) -> Self {
+        self.truncation_policy = Some(policy);
+        self
+    }
+
+    /// In-place variant of [`with_truncation_policy`](Self::with_truncation_policy).
+    pub fn set_truncation_policy(&mut self, policy: TruncationPolicy) -> &mut Self {
+        self.truncation_policy = Some(policy);
+        self
+    }
+
+    /// Remove any configured registry-wide [`TruncationPolicy`].
+    #[must_use]
+    pub fn without_truncation_policy(mut self) -> Self {
+        self.truncation_policy = None;
+        self
+    }
+
+    /// Borrow the configured [`TruncationPolicy`], if any.
+    #[must_use]
+    pub const fn truncation_policy(&self) -> Option<&TruncationPolicy> {
+        self.truncation_policy.as_ref()
+    }
+
+    /// Enable or disable automatic [`SurrogateVault::redact_str`] execution prior to
+    /// output sanitization and truncation when a [`SurrogateVault`] is present in [`ToolContext`].
     ///
-    /// Returns `None` if no tool named `name` is registered.
+    /// Defaults to `false` so callers manually managing secret resolution/redaction keep
+    /// exact control unless opted in.
+    #[must_use]
+    pub const fn with_surrogate_redaction(mut self, enabled: bool) -> Self {
+        self.surrogate_redaction = enabled;
+        self
+    }
+
+    /// In-place variant of [`with_surrogate_redaction`](Self::with_surrogate_redaction).
+    pub const fn set_surrogate_redaction(&mut self, enabled: bool) -> &mut Self {
+        self.surrogate_redaction = enabled;
+        self
+    }
+
+    /// Return whether automatic surrogate redaction is enabled on this registry.
+    #[must_use]
+    pub const fn surrogate_redaction(&self) -> bool {
+        self.surrogate_redaction
+    }
+
+    /// Compute the effective [`OutputSanitization`] for a registered [`ToolDefinition`].
+    #[must_use]
+    pub(crate) const fn effective_policy_for_def(
+        &self,
+        def: &ToolDefinition,
+    ) -> OutputSanitization {
+        let tool_policy = if def.output_sanitization.is_none() {
+            OutputSanitization::None
+        } else {
+            def.output_sanitization
+                .at_least(def.provenance.default_sanitization())
+        };
+        tool_policy.at_least(self.output_floor)
+    }
+
+    /// The policy actually applied to `name`'s output: its own policy raised to the registry floor.
     #[must_use]
     pub fn effective_output_sanitization(&self, name: &str) -> Option<OutputSanitization> {
         self.definition(name)
-            .map(|def| def.output_sanitization.at_least(self.output_floor))
+            .map(|def| self.effective_policy_for_def(def))
     }
 
-    /// Raise `future`'s output to the registry floor when the tool's own policy is weaker.
-    fn enforce_output_floor<'a>(
-        &self,
-        tool_policy: OutputSanitization,
-        future: BoxToolFuture<'a>,
-    ) -> BoxToolFuture<'a> {
-        let effective = tool_policy.at_least(self.output_floor);
-        if effective == tool_policy {
-            return future;
-        }
-        Box::pin(async move { future.await.map(|output| effective.apply(output)) })
+    fn not_found_error(&self, name: &str) -> ToolError {
+        let err = ToolError::not_found(RegistryItem::Tool, name);
+        self.output_floor.apply_error(err)
     }
 
-    fn invalidate_cache(&self) {
+    pub(super) fn invalidate_cache(&self) {
         let mut guard = write_lock_recover(&self.cached_definitions);
         *guard = None;
     }
 
     /// Register a [`RustTool`]. Returns `&mut Self` for chaining.
     ///
-    /// The tool's [`ToolDefinition`] (including JSON schema) is computed once
-    /// here and cached for the lifetime of the registration.
-    ///
-    /// If a tool with the same name was already registered, it is replaced.
-    ///
     /// # Panics
     ///
-    /// Panics if the tool's JSON schema cannot be serialized. This indicates a
-    /// bug in the tool's `Params` type (e.g. a broken `JsonSchema` impl). Use
+    /// Panics if the tool's JSON schema cannot be serialized. Use
     /// [`try_register`](Self::try_register) for the non-panicking variant.
     pub fn register<T: RustTool + 'static>(&mut self, tool: T) -> &mut Self {
         if let Err(e) = self.try_register(tool) {
@@ -149,22 +271,16 @@ impl ToolRegistry {
     /// Register a [`RustTool`], returning an error instead of panicking if the
     /// tool's JSON schema cannot be built.
     ///
-    /// This is the fallible counterpart to [`register`](Self::register); prefer
-    /// it when tool types are supplied dynamically and a broken `JsonSchema`
-    /// impl should not abort the process. If a tool with the same name was
-    /// already registered, it is replaced.
-    ///
     /// # Errors
     ///
-    /// Returns [`ToolError`] if the tool's `Params` type fails to produce a
-    /// JSON schema.
+    /// Returns [`ToolError`] if the tool's `Params` type fails to produce a JSON schema.
     pub fn try_register<T: RustTool + 'static>(&mut self, tool: T) -> Result<&mut Self, ToolError> {
         let definition = definition_of(&tool)?;
         self.tools.insert(
-            T::NAME,
+            Cow::Borrowed(T::NAME),
             RegisteredTool {
                 definition,
-                erased: Box::new(tool),
+                erased: Arc::new(tool),
             },
         );
         self.invalidate_cache();
@@ -203,11 +319,51 @@ impl ToolRegistry {
     }
 
     /// Collect [`ToolDefinition`]s for all registered tools.
-    ///
-    /// Returns clones of the cached definitions computed at registration time.
     #[must_use]
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.definitions_slice().to_vec()
+    }
+
+    fn execute_pipeline<'a>(
+        &'a self,
+        tool_name: &'a str,
+        raw_fut: BoxToolFuture<'a>,
+        ctx: &'a ToolContext,
+        effective: OutputSanitization,
+    ) -> BoxToolFuture<'a> {
+        Box::pin(async move {
+            let vault_opt = if self.surrogate_redaction {
+                ctx.get_ext::<SurrogateVault>()
+            } else {
+                None
+            };
+
+            let mut output = match raw_fut.await {
+                Ok(out) => out,
+                Err(mut err) => {
+                    if let Some(ref vault) = vault_opt {
+                        err = redact_tool_error(vault, err);
+                    }
+                    return Err(effective.apply_error(err));
+                }
+            };
+
+            // Stage 1: SurrogateVault::redact
+            if let Some(ref vault) = vault_opt {
+                output = redact_tool_output(vault, output).map_err(|e| effective.apply_error(e))?;
+            }
+
+            // Stage 2 + Stage 3: OutputSanitization -> TruncationPolicy
+            if let Some(ref trunc_policy) = self.truncation_policy {
+                let mut spill_ctx = SpillContext::new(tool_name);
+                if let Some(conv_id) = ctx.conversation_id() {
+                    spill_ctx = spill_ctx.with_tag(conv_id);
+                }
+                Ok(effective.apply_truncated_with_context(output, trunc_policy, &spill_ctx))
+            } else {
+                Ok(effective.apply(output))
+            }
+        })
     }
 
     /// Dispatch a tool call by name with raw JSON arguments and a context,
@@ -222,11 +378,17 @@ impl ToolRegistry {
         args: serde_json::Value,
         ctx: &'a ToolContext,
     ) -> Result<BoxToolFuture<'a>, ToolError> {
-        let Some(entry) = self.tools.get(name) else {
-            return Err(ToolError::not_found(RegistryItem::Tool, name));
+        let Some((stored_key, entry)) = self.tools.get_key_value(name) else {
+            return Err(self.not_found_error(name));
         };
-        let future = entry.erased.call_erased(args, ctx);
-        Ok(self.enforce_output_floor(entry.definition.output_sanitization, future))
+        let effective = self.effective_policy_for_def(&entry.definition);
+        if !self.surrogate_redaction && self.truncation_policy.is_none() {
+            return Ok(entry.erased.call_erased_with_policy(args, ctx, effective));
+        }
+        let raw_fut = entry
+            .erased
+            .call_erased_with_policy(args, ctx, OutputSanitization::None);
+        Ok(self.execute_pipeline(stored_key.as_ref(), raw_fut, ctx, effective))
     }
 
     /// Dispatch a tool call by name with a raw JSON arguments string,
@@ -241,20 +403,28 @@ impl ToolRegistry {
         args_json: &'a str,
         ctx: &'a ToolContext,
     ) -> Result<BoxToolFuture<'a>, ToolError> {
-        let Some(entry) = self.tools.get(name) else {
-            return Err(ToolError::not_found(RegistryItem::Tool, name));
+        let Some((stored_key, entry)) = self.tools.get_key_value(name) else {
+            return Err(self.not_found_error(name));
         };
-        let future = entry.erased.call_erased_str(args_json, ctx);
-        Ok(self.enforce_output_floor(entry.definition.output_sanitization, future))
+        let effective = self.effective_policy_for_def(&entry.definition);
+        if !self.surrogate_redaction && self.truncation_policy.is_none() {
+            return Ok(entry
+                .erased
+                .call_erased_str_with_policy(args_json, ctx, effective));
+        }
+        let raw_fut =
+            entry
+                .erased
+                .call_erased_str_with_policy(args_json, ctx, OutputSanitization::None);
+        Ok(self.execute_pipeline(stored_key.as_ref(), raw_fut, ctx, effective))
     }
 
     /// Dispatch a tool call by name with raw JSON arguments and a context.
     ///
     /// # Errors
     ///
-    /// Returns [`ToolError::not_found`] if no tool named `name` is registered
-    /// (carrying `error_kind = "not_registered"` metadata), or the tool's own
-    /// error if argument deserialization fails or the handler returns an error.
+    /// Returns [`ToolError::not_found`] if no tool named `name` is registered,
+    /// or the tool's own error if argument deserialization or execution fails.
     pub async fn dispatch(
         &self,
         name: &str,
@@ -326,17 +496,12 @@ impl ToolRegistry {
     }
 
     /// Borrow the cached [`ToolDefinition`] for a registered tool by name.
-    ///
-    /// Returns `None` if no tool named `name` is registered. Unlike
-    /// [`definitions`](Self::definitions), this clones nothing.
     #[must_use]
     pub fn definition(&self, name: &str) -> Option<&ToolDefinition> {
         self.tools.get(name).map(|entry| &entry.definition)
     }
 
     /// Iterate over `(name, definition)` pairs for every registered tool.
-    ///
-    /// Yields clones of the cached definitions computed at registration time.
     #[must_use]
     pub fn iter(&self) -> ToolDefinitions<'_> {
         ToolDefinitions {
@@ -345,23 +510,18 @@ impl ToolRegistry {
     }
 }
 
-/// Borrowing iterator over `(name, definition)` pairs, yielded by
-/// [`ToolRegistry::iter`] and by `&ToolRegistry`'s [`IntoIterator`] impl.
-///
-/// Unlike a boxed trait object, this named iterator allocates nothing to
-/// construct and forwards `size_hint`/`len` from the underlying map iterator.
-/// Each cached [`ToolDefinition`] is cloned lazily as it is yielded.
+/// Borrowing iterator over `(name, definition)` pairs, yielded by [`ToolRegistry::iter`].
 pub struct ToolDefinitions<'a> {
-    inner: crate::compat::HashMapIter<'a, &'static str, RegisteredTool>,
+    inner: crate::compat::HashMapIter<'a, Cow<'static, str>, RegisteredTool>,
 }
 
-impl Iterator for ToolDefinitions<'_> {
-    type Item = (&'static str, ToolDefinition);
+impl<'a> Iterator for ToolDefinitions<'a> {
+    type Item = (&'a str, ToolDefinition);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.inner
             .next()
-            .map(|(name, entry)| (*name, entry.definition.clone()))
+            .map(|(name, entry)| (name.as_ref(), entry.definition.clone()))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -375,11 +535,8 @@ impl ExactSizeIterator for ToolDefinitions<'_> {
     }
 }
 
-/// Iterate over `(name, definition)` pairs for every registered tool.
-///
-/// Yields `(&'static str, ToolDefinition)` for each tool in the registry.
 impl<'a> IntoIterator for &'a ToolRegistry {
-    type Item = (&'static str, ToolDefinition);
+    type Item = (&'a str, ToolDefinition);
     type IntoIter = ToolDefinitions<'a>;
 
     fn into_iter(self) -> Self::IntoIter {

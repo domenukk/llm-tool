@@ -4,12 +4,15 @@ use alloc::{string::String, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
-use super::OutputSanitization;
+use super::{
+    OutputSanitization,
+    quarantine::{normalize_parameter_schema, sanitize_string_if_needed},
+};
 use crate::compat::OnceLock;
 
 /// Effect classification for a tool.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ToolEffect {
@@ -91,13 +94,19 @@ impl ToolProvenance {
 
     /// Recommended default [`OutputSanitization`] for this provenance tier.
     #[must_use]
-    pub const fn default_output_sanitization(self) -> OutputSanitization {
+    pub const fn default_sanitization(self) -> OutputSanitization {
         match self {
             Self::ExternalMcp | Self::UntrustedNetwork => OutputSanitization::Quarantine,
             Self::Trusted | Self::WorkspaceLocal | Self::PrivateData => {
                 OutputSanitization::SanitizeTokens
             }
         }
+    }
+
+    /// Alias for [`default_sanitization`](Self::default_sanitization) preserved for compatibility.
+    #[must_use]
+    pub const fn default_output_sanitization(self) -> OutputSanitization {
+        self.default_sanitization()
     }
 }
 
@@ -168,23 +177,32 @@ impl<'de> Deserialize<'de> for ToolDefinition {
             #[serde(default)]
             provenance: ToolProvenance,
             #[serde(default)]
-            output_sanitization: OutputSanitization,
+            output_sanitization: Option<OutputSanitization>,
         }
 
-        let raw = RawDef::deserialize(deserializer)?;
+        let mut raw = RawDef::deserialize(deserializer)?;
         let effect = match (raw.effect, raw.idempotent) {
             (Some(eff), _) => eff,
             (None, Some(true)) => ToolEffect::ReadOnly,
             (None, Some(false) | None) => ToolEffect::Mutating,
         };
+        let output_sanitization = match raw.output_sanitization {
+            Some(OutputSanitization::None) => OutputSanitization::None,
+            Some(explicit) => explicit.at_least(raw.provenance.default_sanitization()),
+            None => OutputSanitization::default().at_least(raw.provenance.default_sanitization()),
+        };
+
+        let name = sanitize_string_if_needed(&raw.name).unwrap_or(raw.name);
+        let description = sanitize_string_if_needed(&raw.description).unwrap_or(raw.description);
+        normalize_parameter_schema(&mut raw.parameter_schema);
 
         Ok(Self {
-            name: raw.name,
-            description: raw.description,
+            name,
+            description,
             parameter_schema: raw.parameter_schema,
             effect,
             provenance: raw.provenance,
-            output_sanitization: raw.output_sanitization,
+            output_sanitization,
             parameter_schema_json: OnceLock::new(),
         })
     }
@@ -202,7 +220,8 @@ impl ToolDefinition {
         Self::with_effect(name, description, parameter_schema, ToolEffect::Mutating)
     }
 
-    /// Construct a [`ToolDefinition`] directly from a parameter struct `T` implementing [`schemars::JsonSchema`].
+    /// Construct a normalized [`ToolDefinition`] directly from a parameter struct `T`
+    /// implementing [`schemars::JsonSchema`].
     ///
     /// # Errors
     ///
@@ -211,21 +230,28 @@ impl ToolDefinition {
         name: impl Into<String>,
         description: impl Into<String>,
     ) -> Result<Self, serde_json::Error> {
-        let parameter_schema = serde_json::to_value(schemars::schema_for!(T))?;
+        let mut parameter_schema = serde_json::to_value(schemars::schema_for!(T))?;
+        normalize_parameter_schema(&mut parameter_schema);
         Ok(Self::new(name, description, parameter_schema))
     }
 
-    /// Construct a [`ToolDefinition`] with an explicit [`ToolEffect`].
+    /// Construct a [`ToolDefinition`] with an explicit [`ToolEffect`], sanitizing
+    /// `name`, `description`, and `parameter_schema` in-place.
     #[must_use]
     pub fn with_effect(
         name: impl Into<String>,
         description: impl Into<String>,
-        parameter_schema: serde_json::Value,
+        mut parameter_schema: serde_json::Value,
         effect: ToolEffect,
     ) -> Self {
+        let raw_name = name.into();
+        let raw_desc = description.into();
+        let clean_name = sanitize_string_if_needed(&raw_name).unwrap_or(raw_name);
+        let clean_desc = sanitize_string_if_needed(&raw_desc).unwrap_or(raw_desc);
+        normalize_parameter_schema(&mut parameter_schema);
         Self {
-            name: name.into(),
-            description: description.into(),
+            name: clean_name,
+            description: clean_desc,
             parameter_schema,
             effect,
             provenance: ToolProvenance::default(),
@@ -234,10 +260,15 @@ impl ToolDefinition {
         }
     }
 
-    /// Attach a [`ToolProvenance`] tier to this [`ToolDefinition`]. Chainable.
+    /// Attach a [`ToolProvenance`] tier to this [`ToolDefinition`], upgrading
+    /// `output_sanitization` via [`OutputSanitization::at_least`] to at least
+    /// `provenance.default_sanitization()`.
     #[must_use]
     pub const fn with_provenance(mut self, provenance: ToolProvenance) -> Self {
         self.provenance = provenance;
+        self.output_sanitization = self
+            .output_sanitization
+            .at_least(provenance.default_sanitization());
         self
     }
 
@@ -248,8 +279,10 @@ impl ToolDefinition {
         self
     }
 
-    /// Update `parameter_schema` and invalidate any cached JSON serialization.
-    pub fn set_parameter_schema(&mut self, parameter_schema: serde_json::Value) {
+    /// Update `parameter_schema` (normalizing and sanitizing strings/keys) and invalidate
+    /// any cached JSON serialization.
+    pub fn set_parameter_schema(&mut self, mut parameter_schema: serde_json::Value) {
+        normalize_parameter_schema(&mut parameter_schema);
         self.parameter_schema = parameter_schema;
         self.parameter_schema_json = OnceLock::new();
     }
@@ -275,7 +308,11 @@ impl ToolDefinition {
             match serde_json::to_string(&self.parameter_schema) {
                 Ok(s) => Arc::from(s),
                 Err(err) => {
-                    tracing::warn!(error = %err, tool = %self.name, "Failed to serialize parameter_schema to JSON");
+                    tracing::warn!(
+                        error = %err,
+                        tool = %self.name,
+                        "Failed to serialize parameter_schema to JSON"
+                    );
                     Arc::from("{}")
                 }
             }
@@ -283,8 +320,6 @@ impl ToolDefinition {
     }
 
     /// Whether repeated invocations with identical arguments are side-effect free / idempotent.
-    ///
-    /// Preserved for backward compatibility.
     #[must_use]
     pub const fn is_idempotent(&self) -> bool {
         matches!(self.effect, ToolEffect::ReadOnly)
@@ -304,11 +339,13 @@ mod tests {
     }
 
     #[test]
-    fn from_schema_derives_typed_parameter_schema() {
+    fn from_schema_derives_normalized_typed_parameter_schema() {
         let def = ToolDefinition::from_schema::<LookupParams>("lookup", "Look up a file")
             .expect("schema serializes");
         assert_eq!(def.name, "lookup");
         assert_eq!(def.description, "Look up a file");
+        assert!(def.parameter_schema.get("$schema").is_none());
+        assert!(def.parameter_schema.get("title").is_none());
         let props = def.parameter_schema["properties"]
             .as_object()
             .expect("object schema has properties");
@@ -332,6 +369,29 @@ mod tests {
         assert!(ToolProvenance::PrivateData.is_private_data());
         assert!(ToolProvenance::ExternalMcp.is_untrusted_source());
         assert!(ToolProvenance::UntrustedNetwork.is_untrusted_source());
+
+        let manual_def = ToolDefinition::new("web", "desc", serde_json::json!({}))
+            .with_provenance(ToolProvenance::UntrustedNetwork);
+        assert_eq!(
+            manual_def.output_sanitization,
+            OutputSanitization::Quarantine
+        );
+
+        let deser_def: ToolDefinition = serde_json::from_str(
+            r#"{"name":"mcp_tool","description":"d","parameter_schema":{},"provenance":"external_mcp"}"#,
+        )
+        .expect("deserialize ToolDefinition");
+        assert_eq!(deser_def.provenance, ToolProvenance::ExternalMcp);
+        assert_eq!(
+            deser_def.output_sanitization,
+            OutputSanitization::Quarantine
+        );
+
+        let deser_opt_out: ToolDefinition = serde_json::from_str(
+            r#"{"name":"mcp_raw","description":"d","parameter_schema":{},"provenance":"external_mcp","output_sanitization":"none"}"#,
+        )
+        .expect("deserialize explicit none");
+        assert_eq!(deser_opt_out.output_sanitization, OutputSanitization::None);
 
         /// Fetches an untrusted web page.
         #[crate::llm_tool(provenance = "untrusted_network", effect = "read_only")]

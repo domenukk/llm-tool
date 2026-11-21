@@ -841,3 +841,14 @@ async fn response_template_reexports_optional_and_list_enums_without_alias_colli
 
     assert_eq!(output.content().trim(), "Fail:Alpha,Beta:src/lib.rs");
 }
+
+#[test]
+fn response_template_generated_struct_builder_works() {
+    let built = InspectOptionalAndListEnumsResponse::builder()
+        .verdict(InspectOptionalAndListEnumsResponseVerdict::Pass)
+        .status(None)
+        .build();
+    assert_eq!(built.matches.len(), 0);
+    assert_eq!(built.tags.len(), 0);
+    assert_eq!(built.render().expect("renders").trim(), "Pass::");
+}

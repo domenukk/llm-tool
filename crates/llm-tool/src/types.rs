@@ -38,19 +38,7 @@ pub use llm_tool_macros::{llm_prompt, llm_resource, llm_tool};
 pub use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::compat::HashMap;
-
-/// Human-readable JSON type name for error messages.
-const fn other_type_name(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "bool",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
-    }
-}
+use crate::{compat::HashMap, private::__private::other_type_name};
 
 /// The return value of a Rust tool execution.
 ///
@@ -193,21 +181,11 @@ impl ToolOutput {
     /// assert_eq!(out.metadata()["temp_f"], 72);
     /// ```
     pub fn from_metadata<T: serde::Serialize>(value: &T) -> Result<Self, ToolError> {
-        let json_value = serde_json::to_value(value)
-            .map_err(|e| ToolError::new(format!("metadata serialization failed: {e}")))?;
-        // Serialize to string *before* destructuring so we borrow the Value
-        // instead of cloning the inner Map.
-        let content = json_value.to_string();
-        match json_value {
-            serde_json::Value::Object(map) => Ok(Self {
-                content,
-                metadata: map.into_iter().collect(),
-            }),
-            other => Err(ToolError::new(format!(
-                "metadata must serialize to a JSON object, got {}",
-                other_type_name(&other),
-            ))),
-        }
+        crate::private::__private::serialize_value_to_tool_output(
+            value,
+            true,
+            "metadata serialization failed",
+        )
     }
 
     /// Attach a single metadata key-value pair. Chainable.
@@ -394,20 +372,77 @@ impl From<serde_json::Value> for ToolOutput {
 /// .into();
 /// assert!(output.content().contains("72"));
 /// ```
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(transparent)]
 pub struct Json<T>(pub T);
+
+impl<T> Json<T> {
+    /// Wrap `value` for JSON serialization as tool output.
+    #[must_use]
+    pub const fn new(value: T) -> Self {
+        Self(value)
+    }
+
+    /// Consume the wrapper and return the inner value.
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+
+    /// Borrow the inner value.
+    #[must_use]
+    pub const fn as_inner(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> AsRef<T> for Json<T> {
+    fn as_ref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> core::ops::Deref for Json<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> core::ops::DerefMut for Json<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<T> From<T> for Json<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
 
 impl<T: serde::Serialize> From<Json<T>> for ToolOutput {
     fn from(json: Json<T>) -> Self {
-        let json_value = serde_json::to_value(&json.0)
-            .expect("Json<T> serialization failed — this is a bug in the Serialize impl");
-        let content = json_value.to_string();
-        match json_value {
-            serde_json::Value::Object(map) => Self {
-                content,
-                metadata: map.into_iter().collect(),
-            },
-            _ => Self::new(content),
-        }
+        crate::private::__private::serialize_value_to_tool_output(
+            &json.0,
+            false,
+            "Json<T> serialization failed",
+        )
+        .expect("Json<T> serialization failed — this is a bug in the Serialize impl")
     }
 }
 
@@ -492,7 +527,7 @@ pub struct ToolError {
     /// Structured metadata for hooks / policies / logging.
     /// NOT sent to the model.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    metadata: HashMap<String, serde_json::Value>,
+    pub(crate) metadata: HashMap<String, serde_json::Value>,
 }
 
 /// Structured category metadata attached to built-in [`ToolError`] constructors.
@@ -713,8 +748,10 @@ pub mod prompt;
 pub mod quarantine;
 pub mod resource;
 pub mod sanitized;
+mod sanitized_de;
 pub mod surrogate;
 pub mod truncation;
+pub mod wire;
 
 pub use context::*;
 pub use definition::*;
@@ -724,6 +761,7 @@ pub use resource::*;
 pub use sanitized::*;
 pub use surrogate::*;
 pub use truncation::*;
+pub use wire::*;
 
 #[cfg(all(test, feature = "std"))]
 mod tests;

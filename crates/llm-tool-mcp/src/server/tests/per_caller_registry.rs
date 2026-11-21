@@ -28,12 +28,12 @@ impl RustTool for GreetTool {
     fn description(&self) -> Cow<'static, str> {
         Cow::Owned(format!("Greets {}.", self.audience))
     }
-    async fn call(
+    fn call(
         &self,
         _params: Self::Params,
         _ctx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        Ok(ToolOutput::new(format!("hello {}", self.audience)))
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        std::future::ready(Ok(ToolOutput::new(format!("hello {}", self.audience))))
     }
 }
 
@@ -43,12 +43,12 @@ impl RustTool for AdminOnlyTool {
     type Params = EmptyParams;
     const NAME: &'static str = "admin_only";
     const DESCRIPTION: &'static str = "Privileged operation.";
-    async fn call(
+    fn call(
         &self,
         _params: Self::Params,
         _ctx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        Ok(ToolOutput::new("admin-ok"))
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        std::future::ready(Ok(ToolOutput::new("admin-ok")))
     }
 }
 

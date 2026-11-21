@@ -755,12 +755,12 @@ impl RustTool for EmptyResultTool {
     type Params = EmptyParams;
     const NAME: &'static str = "empty_result";
     const DESCRIPTION: &'static str = "Returns empty string.";
-    async fn call(
+    fn call(
         &self,
         _params: Self::Params,
         _ctx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        Ok(ToolOutput::new(String::new()))
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        std::future::ready(Ok(ToolOutput::new(String::new())))
     }
 }
 

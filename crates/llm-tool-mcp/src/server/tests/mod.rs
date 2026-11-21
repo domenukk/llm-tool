@@ -6,10 +6,12 @@ pub use super::*;
 
 mod basic;
 mod blocking_and_dispatch;
+mod ergonomics_and_poisoning;
 mod per_caller_registry;
 mod per_connection_identity;
 mod prompts_resources;
 mod rmcp_integration;
+mod security;
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct AddParams {
@@ -24,12 +26,12 @@ impl RustTool for AddTool {
     type Params = AddParams;
     const NAME: &'static str = "add";
     const DESCRIPTION: &'static str = "Adds two numbers.";
-    async fn call(
+    fn call(
         &self,
         params: Self::Params,
         _ctx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        Ok(ToolOutput::new(format!("{}", params.a + params.b)))
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        std::future::ready(Ok(ToolOutput::new(format!("{}", params.a + params.b))))
     }
 }
 
@@ -38,12 +40,12 @@ impl RustTool for FailTool {
     type Params = EmptyParams;
     const NAME: &'static str = "fail";
     const DESCRIPTION: &'static str = "Always fails.";
-    async fn call(
+    fn call(
         &self,
         _params: Self::Params,
         _ctx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        Err(ToolError::new("intentional failure"))
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        std::future::ready(Err(ToolError::new("intentional failure")))
     }
 }
 
@@ -52,14 +54,14 @@ impl RustTool for ContextTool {
     type Params = EmptyParams;
     const NAME: &'static str = "whoami";
     const DESCRIPTION: &'static str = "Returns the caller identity from context.";
-    async fn call(
+    fn call(
         &self,
         _params: Self::Params,
         ctx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        Ok(ToolOutput::new(
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        std::future::ready(Ok(ToolOutput::new(
             ctx.conversation_id().unwrap_or("anonymous").to_owned(),
-        ))
+        )))
     }
 }
 

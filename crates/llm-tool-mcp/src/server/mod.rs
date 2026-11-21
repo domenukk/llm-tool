@@ -1,39 +1,20 @@
-//! MCP stdio server backed by a [`ToolRegistry`].
-//!
-//! [`McpServer`] wraps a [`ToolRegistry`] and exposes it via the
-//! [Model Context Protocol](https://modelcontextprotocol.io/) over any
-//! `BufRead`/`Write` pair (typically stdin/stdout).
-//!
-//! # Architecture
-//!
-//! ```text
-//! ┌─────────┐   JSON-RPC    ┌───────────┐   dispatch   ┌──────────────┐
-//! │  Client  │──────────────▶│ McpServer │─────────────▶│ ToolRegistry │
-//! │ (stdin)  │◀──────────────│           │◀─────────────│              │
-//! └─────────┘   JSON-RPC    └───────────┘   Result     └──────────────┘
-//! ```
-//!
-//! # Performance
-//!
-//! - MCP tool schemas are computed **once** at construction and cached.
-//! - [`run`](McpServer::run) creates a **single** tokio `current_thread`
-//!   runtime, reused for all dispatches.
-//! - The `"2.0"` JSON-RPC version is a `&'static str` to avoid allocation.
+//! MCP stdio/TCP/Unix server backed by a [`ToolRegistry`].
 
 use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
+    collections::{HashMap, VecDeque},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use llm_tool::{PromptRegistry, ResourceRegistry, ToolContext, ToolDefinition, ToolRegistry};
+use tokio::sync::Semaphore;
 use tracing::warn;
 
-// Re-exported so the `#[cfg(test)] mod tests` submodule keeps the same protocol
-// names in scope (via its glob import of this module) as before the split into
-// `builder` / `transport` / `dispatch`.
 #[cfg(test)]
 use crate::protocol::{self, *};
-use crate::protocol::{McpToolSchema, ToolsListResult};
+use crate::protocol::{InitializeParams, McpToolAnnotations, McpToolSchema, ToolsListResult};
 
 mod builder;
 mod dispatch;
@@ -42,6 +23,123 @@ mod transport;
 pub use builder::McpServerBuilder;
 pub use dispatch::RpcOutcome;
 pub use transport::Transport;
+
+/// Default maximum JSON-RPC wire line size (`16 MiB`).
+pub const DEFAULT_MAX_JSONRPC_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Default maximum number of requests inside a single JSON-RPC batch array (`128`).
+pub const DEFAULT_MAX_JSONRPC_BATCH_LEN: usize = 128;
+
+/// Default maximum number of concurrent in-flight requests per connection (`64`).
+pub const DEFAULT_MAX_IN_FLIGHT_PER_CONN: usize = 64;
+
+/// Default maximum number of concurrent accepted TCP / Unix connections (`256`).
+pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
+
+/// Default maximum number of distinct per-caller views cached by [`RegistryFactory`] (`256`).
+pub const DEFAULT_MAX_CALLER_VIEWS: usize = 256;
+
+/// Authenticated caller resolver invoked during the MCP `initialize` handshake.
+pub trait CallerResolver: Send + Sync {
+    /// Return a verified caller name for this connection, or `None` to use the default caller.
+    fn resolve_caller(&self, params: Option<&InitializeParams>) -> Option<String>;
+}
+
+impl<F> CallerResolver for F
+where
+    F: Fn(Option<&InitializeParams>) -> Option<String> + Send + Sync,
+{
+    fn resolve_caller(&self, params: Option<&InitializeParams>) -> Option<String> {
+        self(params)
+    }
+}
+
+/// Builds the [`ToolRegistry`] a given caller should see.
+pub trait RegistryFactory: Send + Sync {
+    /// Build the registry for `caller`.
+    ///
+    /// `caller` is `None` for the default view (before/without a negotiated
+    /// identity), or `Some(name)` for a connection with an authenticated or
+    /// explicitly trusted caller identity.
+    fn registry_for(&self, caller: Option<&str>) -> ToolRegistry;
+}
+
+impl<F> RegistryFactory for F
+where
+    F: Fn(Option<&str>) -> ToolRegistry + Send + Sync,
+{
+    fn registry_for(&self, caller: Option<&str>) -> ToolRegistry {
+        self(caller)
+    }
+}
+
+/// A caller-specific view: the registry to dispatch against plus its
+/// pre-serialized `tools/list` body. Cheap to clone (two `Arc`s).
+#[derive(Clone)]
+struct CallerView {
+    pub registry: Arc<ToolRegistry>,
+    pub tools_list: Arc<serde_json::Value>,
+}
+
+/// Bounded FIFO cache of per-caller views, keeping the default (`None`) view pinned.
+struct CallerViewCache {
+    pub default_view: Option<CallerView>,
+    pub named: HashMap<String, CallerView>,
+    order: VecDeque<String>,
+    max_named: usize,
+}
+
+impl CallerViewCache {
+    pub fn new(default_view: Option<CallerView>, max_named: usize) -> Self {
+        Self {
+            default_view,
+            named: HashMap::new(),
+            order: VecDeque::new(),
+            max_named: max_named.max(1),
+        }
+    }
+
+    fn get(&self, caller: Option<&str>) -> Option<CallerView> {
+        match caller {
+            None | Some("") => self.default_view.clone(),
+            Some(name) => self.named.get(name).cloned(),
+        }
+    }
+
+    fn get_or_insert(&mut self, caller: Option<&str>, view: CallerView) -> CallerView {
+        let Some(name) = caller.filter(|s| !s.is_empty()) else {
+            return self.default_view.get_or_insert(view).clone();
+        };
+        if let Some(existing) = self.named.get(name) {
+            return existing.clone();
+        }
+        while self.named.len() >= self.max_named {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.named.remove(&oldest);
+        }
+        self.order.push_back(name.to_owned());
+        self.named.insert(name.to_owned(), view.clone());
+        view
+    }
+}
+
+/// Error returned when a duplicate in-flight [`RequestId`](crate::protocol::RequestId) is rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DuplicateInFlightIdError;
+
+/// RAII guard removing an active [`RequestId`](crate::protocol::RequestId) from [`Connection`] on drop.
+struct InFlightGuard<'a> {
+    conn: &'a Connection,
+    id: crate::protocol::RequestId,
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.conn.remove_in_flight(&self.id);
+    }
+}
 
 /// An MCP server that serves tools from a [`ToolRegistry`] over JSON-RPC.
 ///
@@ -68,8 +166,6 @@ pub use transport::Transport;
 /// let server = McpServer::new("my-server", "0.1.0", registry)
 ///     .with_context(ctx);
 ///
-/// // In production: server.run_stdio().expect("MCP server failed");
-/// // Here we prove it works with an in-memory request:
 /// let input = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":1,"b":2}}}"#;
 /// let reader = std::io::Cursor::new(format!("{input}\n"));
 /// let mut output = Vec::new();
@@ -85,132 +181,108 @@ pub struct McpServer {
     instructions: Option<String>,
     registry: Arc<ToolRegistry>,
     context: Arc<ToolContext>,
-    /// Pre-serialized `tools/list` result body — built once at construction and
-    /// wrapped in `Arc` so `tools/list` clones a pointer plus one JSON value,
-    /// never re-serializing the schema tree.
     cached_tools_list: Arc<serde_json::Value>,
-    /// Pre-serialized `prompts/list` result body.
     cached_prompts_list: Arc<serde_json::Value>,
-    /// Pre-serialized `resources/list` result body.
     cached_resources_list: Arc<serde_json::Value>,
-    /// Pre-serialized `resources/templates/list` result body.
     cached_resource_templates_list: Arc<serde_json::Value>,
     prompts: Arc<PromptRegistry>,
     resources: Arc<ResourceRegistry>,
-    /// When `true`, each connection derives its own caller identity from the
-    /// `clientInfo.name` sent in that connection's MCP `initialize` handshake,
-    /// letting a single server serve many distinct callers. When `false` (the
-    /// default) every dispatch uses the one shared [`ToolContext`] identity.
     per_connection_identity: bool,
-    /// Optional factory that builds a **per-caller** [`ToolRegistry`] the first
-    /// time each negotiated caller is seen. When set, `tools/list` and
-    /// `tools/call` use the caller's own registry (see [`RegistryFactory`]);
-    /// when `None`, every connection shares [`registry`](Self::registry).
+    trust_client_info_caller: bool,
+    caller_resolver: Option<Arc<dyn CallerResolver>>,
     registry_factory: Option<Arc<dyn RegistryFactory>>,
-    /// Memoized caller → view cache. Keyed by the negotiated caller name (empty
-    /// string for the default/no-identity view). Shared across cloned servers
-    /// and connections so each caller's registry is built and serialized once.
-    caller_views: Arc<Mutex<HashMap<String, CallerView>>>,
-}
-
-/// Builds the [`ToolRegistry`] a given caller should see.
-///
-/// A single server can present a *different* tool set — and different tool
-/// descriptions — to each connection based on the caller negotiated at
-/// `initialize`. This is what lets "one MCP, many agents" preserve per-caller
-/// tailoring (gating privileged tools, personalising descriptions, …) rather
-/// than serving one fixed tool list to everyone.
-///
-/// Any `Fn(Option<&str>) -> ToolRegistry` implements this trait, so a closure
-/// is usually all that's needed. Pair it with
-/// [`with_per_connection_identity`](McpServerBuilder::with_per_connection_identity)
-/// so a caller is actually negotiated:
-///
-/// ```rust
-/// use llm_tool::ToolRegistry;
-/// use llm_tool_mcp::McpServer;
-///
-/// let server = McpServer::builder("srv", "0.1.0", ToolRegistry::new())
-///     .with_per_connection_identity(true)
-///     .with_registry_factory(|_caller: Option<&str>| {
-///         // Build a registry tailored to `_caller`.
-///         ToolRegistry::new()
-///     })
-///     .build();
-/// # let _server = server;
-/// ```
-pub trait RegistryFactory: Send + Sync {
-    /// Build the registry for `caller`.
-    ///
-    /// `caller` is `None` for the default view (before/without a negotiated
-    /// identity), or `Some(name)` for a connection that announced itself.
-    fn registry_for(&self, caller: Option<&str>) -> ToolRegistry;
-}
-
-impl<F> RegistryFactory for F
-where
-    F: Fn(Option<&str>) -> ToolRegistry + Send + Sync,
-{
-    fn registry_for(&self, caller: Option<&str>) -> ToolRegistry {
-        self(caller)
-    }
-}
-
-/// A caller-specific view: the registry to dispatch against plus its
-/// pre-serialized `tools/list` body. Cheap to clone (two `Arc`s).
-#[derive(Clone)]
-struct CallerView {
-    registry: Arc<ToolRegistry>,
-    tools_list: Arc<serde_json::Value>,
+    caller_views: Arc<Mutex<CallerViewCache>>,
+    max_line_bytes: usize,
+    max_batch_len: usize,
+    max_in_flight_per_conn: usize,
+    max_caller_views: usize,
+    connection_semaphore: Arc<Semaphore>,
 }
 
 /// Per-connection negotiated state, owned by each transport run loop.
-///
-/// Custom transports built on [`handle_message_conn`](McpServer::handle_message_conn)
-/// create one [`Connection`] per client (via [`Connection::new`] /
-/// [`Default`]) and pass `&mut` to it for every message on that connection, so
-/// the caller identity and per-caller registry view negotiated at `initialize`
-/// persist for the connection's lifetime.
-///
-/// Defaults to "nothing negotiated yet": dispatch then falls back to the
-/// server's shared identity, registry, and cached `tools/list`.
 #[derive(Clone, Default)]
 pub struct Connection {
-    /// Caller identity adopted from this connection's `initialize` handshake
-    /// (when per-connection identity is enabled); `None` uses the shared one.
+    initialized: Arc<AtomicBool>,
+    authenticated_caller: Option<String>,
+    client_info_name: Arc<Mutex<Option<String>>>,
     ctx: Arc<Mutex<Option<ToolContext>>>,
-    /// Caller-specific registry view (when a [`RegistryFactory`] is set);
-    /// `None` uses the server's shared registry + cached `tools/list`.
     view: Arc<Mutex<Option<CallerView>>>,
-    /// Active in-flight requests on this connection keyed by strongly-typed
-    /// [`RequestId`](crate::protocol::RequestId). Used to cancel running
-    /// requests upon receiving `notifications/cancelled`.
     in_flight: Arc<Mutex<HashMap<crate::protocol::RequestId, tokio::sync::oneshot::Sender<()>>>>,
 }
 
 impl Connection {
     /// Create a fresh, un-negotiated connection state.
-    ///
-    /// Equivalent to [`Connection::default`]; provided for call-site clarity in
-    /// transport loops.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub(crate) fn get_ctx(&self) -> Option<ToolContext> {
-        match self.ctx.lock() {
+    /// Create a connection pre-bound to a transport-authenticated caller identity
+    /// (e.g. verified via Unix `SO_PEERCRED`, mTLS client certificate, or HTTP Bearer token).
+    #[must_use]
+    pub fn with_authenticated_caller(caller: impl Into<String>) -> Self {
+        Self {
+            initialized: Arc::new(AtomicBool::new(false)),
+            authenticated_caller: Some(caller.into()),
+            client_info_name: Arc::new(Mutex::new(None)),
+            ctx: Arc::new(Mutex::new(None)),
+            view: Arc::new(Mutex::new(None)),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn authenticated_caller(&self) -> Option<&str> {
+        self.authenticated_caller
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
+    fn set_client_info_name(&self, name: Option<String>) {
+        match self.client_info_name.lock() {
+            Ok(mut guard) => *guard = name,
+            Err(e) => {
+                warn!(error = %e, "Connection::set_client_info_name: mutex poisoned");
+            }
+        }
+    }
+
+    fn client_info_name(&self) -> Option<String> {
+        match self.client_info_name.lock() {
             Ok(guard) => guard.clone(),
             Err(e) => {
-                warn!(error = %e, "Connection::get_ctx: mutex poisoned");
+                warn!(error = %e, "Connection::client_info_name: mutex poisoned");
                 None
             }
         }
     }
 
-    pub(crate) fn set_ctx(&self, ctx: Option<ToolContext>) {
+    fn try_mark_initialized(&self) -> bool {
+        matches!(
+            self.initialized
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire),
+            Ok(false)
+        )
+    }
+
+    /// Return this connection's isolated [`ToolContext`], lazily forking from `server_base`
+    /// on first access so `SurrogateVault` and `AllowDestructiveBatch` are never shared
+    /// across connections.
+    fn get_or_init_ctx(&self, server_base: &ToolContext) -> ToolContext {
         match self.ctx.lock() {
-            Ok(mut guard) => *guard = ctx,
+            Ok(mut guard) => guard
+                .get_or_insert_with(|| server_base.fork_connection(self.authenticated_caller()))
+                .clone(),
+            Err(e) => {
+                warn!(error = %e, "Connection::get_or_init_ctx: mutex poisoned; forking fresh context");
+                server_base.fork_connection(self.authenticated_caller())
+            }
+        }
+    }
+
+    fn set_ctx(&self, ctx: ToolContext) {
+        match self.ctx.lock() {
+            Ok(mut guard) => *guard = Some(ctx),
             Err(e) => {
                 warn!(error = %e, "Connection::set_ctx: mutex poisoned");
             }
@@ -236,23 +308,33 @@ impl Connection {
         }
     }
 
-    pub(crate) fn register_in_flight(
+    fn try_register_in_flight(
         &self,
         id: &crate::protocol::RequestId,
-    ) -> tokio::sync::oneshot::Receiver<()> {
+    ) -> Result<(tokio::sync::oneshot::Receiver<()>, InFlightGuard<'_>), DuplicateInFlightIdError>
+    {
         let (tx, rx) = tokio::sync::oneshot::channel();
         match self.in_flight.lock() {
             Ok(mut guard) => {
+                if guard.contains_key(id) {
+                    return Err(DuplicateInFlightIdError);
+                }
                 guard.insert(id.clone(), tx);
             }
             Err(e) => {
-                warn!(error = %e, "Connection::register_in_flight: mutex poisoned");
+                warn!(error = %e, "Connection::try_register_in_flight: mutex poisoned");
             }
         }
-        rx
+        Ok((
+            rx,
+            InFlightGuard {
+                conn: self,
+                id: id.clone(),
+            },
+        ))
     }
 
-    pub(crate) fn remove_in_flight(&self, id: &crate::protocol::RequestId) {
+    fn remove_in_flight(&self, id: &crate::protocol::RequestId) {
         match self.in_flight.lock() {
             Ok(mut guard) => {
                 guard.remove(id);
@@ -263,7 +345,7 @@ impl Connection {
         }
     }
 
-    pub(crate) fn cancel_request(&self, id: &crate::protocol::RequestId) -> bool {
+    fn cancel_request(&self, id: &crate::protocol::RequestId) -> bool {
         let tx_opt = match self.in_flight.lock() {
             Ok(mut guard) => guard.remove(id),
             Err(e) => {
@@ -280,12 +362,6 @@ impl Connection {
 
 impl McpServer {
     /// Create a new MCP server serving tools from `registry`.
-    ///
-    /// The `name` and `version` are reported in the MCP `initialize` response.
-    /// To also register prompts or resources, use [`builder`](Self::builder).
-    ///
-    /// Tool schemas are computed **once** here and cached for all subsequent
-    /// `tools/list` requests.
     #[must_use]
     pub fn new(
         name: impl Into<String>,
@@ -295,8 +371,7 @@ impl McpServer {
         McpServerBuilder::new(name, version, registry).build()
     }
 
-    /// Begin building a server, allowing prompts and resources to be registered
-    /// before [`build`](McpServerBuilder::build).
+    /// Begin building a server, allowing prompts, resources, limits, and caller authentication to be configured.
     #[must_use]
     pub fn builder(
         name: impl Into<String>,
@@ -306,10 +381,7 @@ impl McpServer {
         McpServerBuilder::new(name, version, registry)
     }
 
-    /// Set the [`ToolContext`] used for all tool dispatches.
-    ///
-    /// The context provides the conversation ID and a shared state store
-    /// that persists across tool calls.
+    /// Set the base [`ToolContext`] forked per connection.
     #[must_use]
     pub fn with_context(mut self, context: ToolContext) -> Self {
         self.context = Arc::new(context);
@@ -319,80 +391,120 @@ impl McpServer {
     /// Provide instructions describing how to use the server.
     #[must_use]
     pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
-        self.instructions = Some(instructions.into());
+        let raw = instructions.into();
+        self.instructions = Some(
+            llm_tool::OutputSanitization::SanitizeTokens
+                .apply_str(&raw)
+                .into_owned(),
+        );
         self
     }
 
-    /// Enable per-connection caller identity.
+    /// Enable per-connection caller identity from `initialize` `clientInfo.name` for both
+    /// [`ToolContext::conversation_id`] and [`RegistryFactory`].
     ///
-    /// When enabled, each connection derives its own caller from the
-    /// `clientInfo.name` in its MCP `initialize` handshake (sharing the base
-    /// context's state and typed extensions via [`ToolContext::with_caller`]),
-    /// so a single long-lived server can serve many agents under distinct
-    /// personas. Defaults to `false`, preserving the single-caller behaviour.
+    /// Defaults to `false` (unauthenticated `clientInfo.name` is ignored for both context
+    /// identity and per-caller registries). Multi-tenant TCP/Unix servers accepting untrusted
+    /// peers should pair per-caller privilege gating with transport authentication
+    /// ([`Connection::with_authenticated_caller`]) or [`with_caller_resolver`](Self::with_caller_resolver).
     #[must_use]
     pub const fn with_per_connection_identity(mut self, enabled: bool) -> Self {
         self.per_connection_identity = enabled;
         self
     }
 
-    /// Serve a **per-caller** tool registry via a [`RegistryFactory`].
+    /// Opt in to trusting unauthenticated `clientInfo.name` for switching per-caller
+    /// [`RegistryFactory`] views.
     ///
-    /// Post-construction counterpart of
-    /// [`McpServerBuilder::with_registry_factory`]: it recomputes the default
-    /// view from `registry_for(None)` and reseeds the caller cache, so a server
-    /// created with [`new`](Self::new) can still opt into per-caller registries.
+    /// Defaults to `false` (secure by default): unless enabled or verified via
+    /// [`with_caller_resolver`](Self::with_caller_resolver) /
+    /// [`Connection::with_authenticated_caller`], `clientInfo.name` cannot select
+    /// a privileged per-caller registry.
+    #[must_use]
+    pub const fn trust_client_info_caller(mut self, trust: bool) -> Self {
+        self.trust_client_info_caller = trust;
+        self
+    }
+
+    /// Attach an authenticated [`CallerResolver`] used during `initialize`.
+    #[must_use]
+    pub fn with_caller_resolver<R: CallerResolver + 'static>(mut self, resolver: R) -> Self {
+        self.caller_resolver = Some(Arc::new(resolver));
+        self
+    }
+
+    /// Configure the maximum allowed JSON-RPC wire line length in bytes.
+    #[must_use]
+    pub const fn with_max_line_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_line_bytes = if max_bytes == 0 { 1 } else { max_bytes };
+        self
+    }
+
+    /// Configure the maximum number of items in a JSON-RPC batch array.
+    #[must_use]
+    pub const fn with_max_batch_len(mut self, max_len: usize) -> Self {
+        self.max_batch_len = if max_len == 0 { 1 } else { max_len };
+        self
+    }
+
+    /// Configure the maximum number of concurrent in-flight requests per connection.
+    #[must_use]
+    pub const fn with_max_in_flight_requests(mut self, max_in_flight: usize) -> Self {
+        self.max_in_flight_per_conn = if max_in_flight == 0 { 1 } else { max_in_flight };
+        self
+    }
+
+    /// Configure the maximum number of concurrent accepted TCP/Unix connections.
+    #[must_use]
+    pub fn with_max_connections(mut self, max_connections: usize) -> Self {
+        self.connection_semaphore = Arc::new(Semaphore::new(max_connections.max(1)));
+        self
+    }
+
+    /// Configure the maximum number of distinct per-caller views cached by [`RegistryFactory`].
+    #[must_use]
+    pub fn with_max_caller_views(mut self, max_views: usize) -> Self {
+        let clamped = max_views.max(1);
+        self.max_caller_views = clamped;
+        let default_view = self.lock_views().default_view.clone();
+        self.caller_views = Arc::new(Mutex::new(CallerViewCache::new(default_view, clamped)));
+        self
+    }
+
+    /// Serve a **per-caller** tool registry via a [`RegistryFactory`].
     #[must_use]
     pub fn with_registry_factory<F: RegistryFactory + 'static>(mut self, factory: F) -> Self {
         let factory: Arc<dyn RegistryFactory> = Arc::new(factory);
         let registry = Arc::new(factory.registry_for(None));
         let cached_tools_list = Arc::new(build_tools_list_value(&registry));
-        let mut views = HashMap::new();
-        views.insert(
-            String::new(),
-            CallerView {
-                registry: Arc::clone(&registry),
-                tools_list: Arc::clone(&cached_tools_list),
-            },
-        );
+        let default_view = CallerView {
+            registry: Arc::clone(&registry),
+            tools_list: Arc::clone(&cached_tools_list),
+        };
         self.registry = registry;
         self.cached_tools_list = cached_tools_list;
         self.registry_factory = Some(factory);
-        self.caller_views = Arc::new(Mutex::new(views));
+        self.caller_views = Arc::new(Mutex::new(CallerViewCache::new(
+            Some(default_view),
+            self.max_caller_views,
+        )));
         self
     }
 
-    /// Lock the caller-view cache, recovering a poisoned guard rather than
-    /// propagating the panic.
-    ///
-    /// The cache holds only derived, idempotently-rebuildable views, so reusing
-    /// a poisoned guard is safe. The poisoning is logged so the original panic
-    /// isn't silently swallowed.
-    fn lock_views(&self) -> std::sync::MutexGuard<'_, HashMap<String, CallerView>> {
+    fn lock_views(&self) -> std::sync::MutexGuard<'_, CallerViewCache> {
         self.caller_views.lock().unwrap_or_else(|poisoned| {
             warn!("caller-view cache mutex was poisoned; recovering guard");
             poisoned.into_inner()
         })
     }
 
-    /// Resolve (and memoize) the caller-specific [`CallerView`] for `caller`.
-    ///
-    /// Returns `None` when no [`RegistryFactory`] is configured, so dispatch
-    /// falls back to the shared registry and cached `tools/list`. The registry
-    /// is built and its schema serialized only once per distinct caller.
     fn resolve_view(&self, caller: Option<&str>) -> Option<CallerView> {
         let factory = self.registry_factory.as_ref()?;
-        // `None` (no negotiated caller) maps to the empty-string default-view key.
-        let key = caller.unwrap_or("");
-
-        // Fast path: hand back a cached view without holding the lock across the
-        // (potentially expensive) build below.
-        if let Some(view) = self.lock_views().get(key) {
-            return Some(view.clone());
+        let cached = self.lock_views().get(caller);
+        if let Some(view) = cached {
+            return Some(view);
         }
 
-        // Build outside the lock: registry construction and schema serialization
-        // can be costly, and many agents may initialize concurrently.
         let registry = Arc::new(factory.registry_for(caller));
         let tools_list = Arc::new(build_tools_list_value(&registry));
         let view = CallerView {
@@ -400,18 +512,10 @@ impl McpServer {
             tools_list,
         };
 
-        // Insert, tolerating a concurrent build that beat us to this caller.
-        Some(
-            self.lock_views()
-                .entry(key.to_owned())
-                .or_insert(view)
-                .clone(),
-        )
+        Some(self.lock_views().get_or_insert(caller, view))
     }
 
     /// Borrow the underlying [`ToolRegistry`].
-    ///
-    /// Useful for extracting definitions or dispatching outside MCP.
     #[must_use]
     pub fn registry(&self) -> &ToolRegistry {
         &self.registry
@@ -420,11 +524,6 @@ impl McpServer {
 
 // ── Schema helpers ──────────────────────────────────────────────────
 
-/// Build and pre-serialize the cached `tools/list` response body.
-///
-/// Called once at [`McpServerBuilder::build`] — the resulting JSON value is
-/// wrapped in an `Arc` so `tools/list` clones a pointer plus one value rather
-/// than re-serializing the schema tree on every request.
 fn build_tools_list_value(registry: &ToolRegistry) -> serde_json::Value {
     let tools = registry
         .definitions()
@@ -435,16 +534,16 @@ fn build_tools_list_value(registry: &ToolRegistry) -> serde_json::Value {
     serde_json::to_value(list).expect("tools/list schema must be JSON-serializable")
 }
 
-/// Convert a [`ToolDefinition`] to the MCP `tools/list` schema format.
+/// Convert a [`ToolDefinition`] to the MCP `tools/list` schema format with behavior annotations.
 fn definition_to_mcp_schema(def: &ToolDefinition) -> McpToolSchema {
     McpToolSchema {
         name: def.name.clone(),
         description: def.description.clone(),
         input_schema: def.parameter_schema.clone(),
+        annotations: Some(McpToolAnnotations::from_definition(def)),
     }
 }
 
-/// Build and pre-serialize the cached `prompts/list` response body.
 fn build_prompts_list_value(prompts: &PromptRegistry) -> serde_json::Value {
     let list = crate::protocol::PromptsListResult {
         prompts: prompts.definitions(),
@@ -452,7 +551,6 @@ fn build_prompts_list_value(prompts: &PromptRegistry) -> serde_json::Value {
     serde_json::to_value(list).expect("prompts/list schema must be JSON-serializable")
 }
 
-/// Build and pre-serialize the cached `resources/list` response body.
 fn build_resources_list_value(resources: &ResourceRegistry) -> serde_json::Value {
     let list = crate::protocol::ResourcesListResult {
         resources: resources
@@ -469,7 +567,6 @@ fn build_resources_list_value(resources: &ResourceRegistry) -> serde_json::Value
     serde_json::to_value(list).expect("resources/list schema must be JSON-serializable")
 }
 
-/// Build and pre-serialize the cached `resources/templates/list` response body.
 fn build_resource_templates_list_value(resources: &ResourceRegistry) -> serde_json::Value {
     let list = crate::protocol::ResourceTemplatesListResult {
         resource_templates: resources.definitions(),

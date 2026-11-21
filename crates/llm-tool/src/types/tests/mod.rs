@@ -1,0 +1,515 @@
+//! Unit tests for core types.
+//!
+//! These are `std`-gated because they exercise lock poisoning, which only
+//! occurs with `std::sync::RwLock` (the `spin` locks used under `no_std`
+//! cannot be poisoned).
+
+mod sanitization;
+mod security_0107;
+
+use std::sync::Arc;
+
+use super::{
+    Json, PromptOutput, PromptRole, RegistryItem, ResourceOutput, ResourceOutputContent,
+    SharedState, ToolContext, ToolDefinition, ToolEffect, ToolError, ToolOutput, TruncationPolicy,
+};
+use crate::compat::{RwLock, write_lock};
+
+// ── ToolContext: shared state ────────────────────────────────────────
+
+#[test]
+fn with_shared_state_shares_store() {
+    let store = SharedState::new();
+    let a = ToolContext::new()
+        .with_conversation_id("conv")
+        .with_shared_state(store.clone());
+    let b = ToolContext::new().with_shared_state(store);
+
+    a.set_state("k", serde_json::json!(1)).unwrap();
+    // `b` observes `a`'s write because they share the same backing store.
+    assert_eq!(b.get_state("k", serde_json::json!(0)), serde_json::json!(1));
+    assert_eq!(a.conversation_id(), Some("conv"));
+    assert_eq!(b.conversation_id(), None);
+}
+
+#[test]
+fn shared_state_handle_round_trips_via_accessor() {
+    let ctx = ToolContext::new();
+    ctx.set_state("k", serde_json::json!(7)).unwrap();
+    // A handle obtained from `shared_state()` aliases the same store.
+    let shared = ctx.shared_state();
+    let other = ToolContext::new().with_shared_state(shared);
+    assert_eq!(
+        other.get_state("k", serde_json::json!(0)),
+        serde_json::json!(7)
+    );
+}
+
+#[test]
+fn get_state_returns_default_when_absent() {
+    let ctx = ToolContext::new();
+    assert_eq!(
+        ctx.get_state("missing", serde_json::json!("d")),
+        serde_json::json!("d")
+    );
+}
+
+// ── ToolContext::with_caller ──────────────────────────────────────────
+
+#[test]
+fn with_caller_overrides_identity_but_shares_state() {
+    let base = ToolContext::new().with_conversation_id("server");
+    let alice = base.with_caller("alice");
+
+    assert_eq!(base.conversation_id(), Some("server"));
+    assert_eq!(alice.conversation_id(), Some("alice"));
+
+    // The derived context shares the *same* backing state store.
+    base.set_state("k", serde_json::json!(1)).unwrap();
+    assert_eq!(
+        alice.get_state("k", serde_json::json!(0)),
+        serde_json::json!(1)
+    );
+    alice.set_state("k2", serde_json::json!(2)).unwrap();
+    assert_eq!(
+        base.get_state("k2", serde_json::json!(0)),
+        serde_json::json!(2)
+    );
+}
+
+#[test]
+fn with_caller_shares_extensions() {
+    #[derive(Clone, PartialEq, Debug)]
+    struct Marker(u32);
+
+    let base = ToolContext::new().with_conversation_id("server");
+    base.set_ext(Marker(7)).unwrap();
+
+    // A per-connection caller sees extensions injected on the base context.
+    let derived = base.with_caller("bob");
+    assert_eq!(derived.get_ext::<Marker>(), Some(Marker(7)));
+
+    // And extensions set through the derived context are visible on the base,
+    // confirming a single shared extension map.
+    derived.set_ext(String::from("hello")).unwrap();
+    assert_eq!(base.get_ext::<String>().as_deref(), Some("hello"));
+}
+
+// ── ToolContext: typed extensions ────────────────────────────────────
+
+#[test]
+fn ext_round_trip() {
+    #[derive(Clone, PartialEq, Debug)]
+    struct Marker(u32);
+
+    let ctx = ToolContext::new();
+    assert!(ctx.get_ext::<Marker>().is_none());
+    ctx.set_ext(Marker(7)).unwrap();
+    assert_eq!(ctx.get_ext::<Marker>(), Some(Marker(7)));
+}
+
+// ── Lock poisoning ───────────────────────────────────────────────────
+
+/// Poison the given lock by panicking on a separate thread while holding its
+/// write guard, so the panic does not unwind the test itself.
+fn poison<T: Send + Sync + 'static>(lock: &Arc<RwLock<T>>) {
+    let clone = Arc::clone(lock);
+    let handle = std::thread::spawn(move || {
+        let guard = write_lock(&clone).expect("first lock acquisition is not poisoned");
+        // Panicking while `guard` is alive poisons the lock during unwinding.
+        std::hint::black_box(&guard);
+        panic!("intentional poison");
+    });
+    handle
+        .join()
+        .expect_err("poisoning thread should have panicked");
+}
+
+#[test]
+fn set_state_errors_on_poisoned_lock() {
+    let ctx = ToolContext::new();
+    poison(&ctx.state.0);
+    let err = ctx.set_state("k", serde_json::json!(1)).unwrap_err();
+    assert!(err.to_string().contains("poisoned"));
+}
+
+#[test]
+fn get_state_returns_default_on_poisoned_lock() {
+    let ctx = ToolContext::new();
+    poison(&ctx.state.0);
+    assert_eq!(
+        ctx.get_state("k", serde_json::json!("d")),
+        serde_json::json!("d")
+    );
+}
+
+#[test]
+fn set_ext_errors_on_poisoned_lock() {
+    let ctx = ToolContext::new();
+    poison(&ctx.extensions);
+    let err = ctx.set_ext(5u32).unwrap_err();
+    assert!(err.to_string().contains("poisoned"));
+}
+
+#[test]
+fn get_ext_returns_none_on_poisoned_lock() {
+    let ctx = ToolContext::new();
+    poison(&ctx.extensions);
+    assert!(ctx.get_ext::<u32>().is_none());
+}
+
+// ── ToolOutput From impls ────────────────────────────────────────────
+
+#[test]
+fn tool_output_from_scalars() {
+    assert_eq!(ToolOutput::from(42i64).content(), "42");
+    assert_eq!(ToolOutput::from(true).content(), "true");
+    let f: ToolOutput = 1.5f64.into();
+    assert_eq!(f.content(), "1.5");
+    let v: ToolOutput = serde_json::json!({"a": 1}).into();
+    assert_eq!(v.content(), r#"{"a":1}"#);
+}
+
+// ── Json<T> conversion ───────────────────────────────────────────────
+
+#[test]
+fn json_object_populates_metadata() {
+    #[derive(serde::Serialize)]
+    struct M {
+        a: i32,
+        b: i32,
+    }
+    let out: ToolOutput = Json(M { a: 1, b: 2 }).into();
+    assert_eq!(out.metadata()["a"], 1);
+    assert_eq!(out.metadata()["b"], 2);
+}
+
+#[test]
+fn json_scalar_has_no_metadata() {
+    let out: ToolOutput = Json(5i32).into();
+    assert_eq!(out.content(), "5");
+    assert!(out.metadata().is_empty());
+}
+
+#[test]
+#[should_panic(expected = "Serialize impl")]
+fn json_panics_on_serialize_failure() {
+    struct Bad;
+    impl serde::Serialize for Bad {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("boom"))
+        }
+    }
+    let out: ToolOutput = Json(Bad).into();
+    assert_eq!(out.content(), "");
+}
+
+// ── ToolError From impls ─────────────────────────────────────────────
+
+#[test]
+fn tool_error_from_io_error() {
+    let io = std::io::Error::new(std::io::ErrorKind::NotFound, "nope");
+    let err: ToolError = io.into();
+    assert!(err.to_string().contains("nope"));
+    assert_eq!(err.metadata()["error_kind"], serde_json::json!("NotFound"));
+}
+
+// ── ToolError::not_found / is_not_found ───────────────────────────────
+
+#[test]
+fn registry_item_display() {
+    assert_eq!(RegistryItem::Tool.to_string(), "tool");
+    assert_eq!(RegistryItem::Prompt.to_string(), "prompt");
+    assert_eq!(RegistryItem::Resource.to_string(), "resource");
+}
+
+#[test]
+fn not_found_sets_message_and_predicate() {
+    let err = ToolError::not_found(RegistryItem::Tool, "add_nummbers");
+    assert!(err.to_string().contains("add_nummbers"));
+    assert!(err.to_string().contains("tool"));
+    assert!(err.is_not_found());
+    assert_eq!(
+        err.metadata()[ToolError::ERROR_KIND_KEY],
+        serde_json::json!(ToolError::KIND_NOT_REGISTERED)
+    );
+}
+
+#[test]
+fn is_not_found_false_for_plain_error() {
+    assert!(!ToolError::new("handler blew up").is_not_found());
+}
+
+#[test]
+fn is_not_found_does_not_collide_with_io_not_found() {
+    let io = std::io::Error::new(std::io::ErrorKind::NotFound, "missing file");
+    let err: ToolError = io.into();
+    assert!(!err.is_not_found());
+}
+
+#[test]
+fn tool_error_from_serde_json_error() {
+    let parse_err = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
+    let err: ToolError = parse_err.into();
+    assert!(err.metadata().contains_key("category"));
+}
+
+#[test]
+fn tool_error_from_boxed_error() {
+    let boxed: Box<dyn core::error::Error + Send + Sync> = "boom".into();
+    let err: ToolError = boxed.into();
+    assert_eq!(err.to_string(), "boom");
+}
+
+#[test]
+fn tool_error_from_infallible_via_question_mark() {
+    fn inner() -> Result<(), ToolError> {
+        let ok: Result<(), core::convert::Infallible> = Ok(());
+        ok?;
+        Ok(())
+    }
+    assert!(inner().is_ok());
+}
+
+// ── PromptOutput / ResourceOutput ────────────────────────────────────
+
+#[test]
+fn prompt_role_display_and_as_str() {
+    assert_eq!(PromptRole::User.as_str(), "user");
+    assert_eq!(PromptRole::Assistant.as_str(), "assistant");
+    assert_eq!(PromptRole::System.as_str(), "system");
+    assert_eq!(PromptRole::User.to_string(), "user");
+}
+
+#[test]
+fn prompt_output_constructors() {
+    let p: PromptOutput = "hi".into();
+    assert_eq!(p.messages.len(), 1);
+    assert_eq!(p.messages[0].role, PromptRole::User);
+    assert_eq!(p.messages[0].role.as_str(), "user");
+    assert_eq!(p.messages[0].content, "hi");
+
+    let p2: PromptOutput = String::from("yo").into();
+    assert_eq!(p2.messages[0].content, "yo");
+
+    let a = PromptOutput::assistant("resp");
+    assert_eq!(a.messages[0].role, PromptRole::Assistant);
+    assert_eq!(a.messages[0].content, "resp");
+
+    let s = PromptOutput::system("instructions");
+    assert_eq!(s.messages[0].role, PromptRole::System);
+    assert_eq!(s.messages[0].content, "instructions");
+}
+
+#[test]
+fn resource_output_text_variant() {
+    let t = ResourceOutput::text("u://a", Some("text/plain"), "body");
+    match &t.contents[0] {
+        ResourceOutputContent::Text {
+            uri,
+            mime_type,
+            text,
+        } => {
+            assert_eq!(uri, "u://a");
+            assert_eq!(mime_type.as_deref(), Some("text/plain"));
+            assert_eq!(text, "body");
+        }
+        ResourceOutputContent::Blob { .. } => panic!("expected a text content block"),
+    }
+}
+
+#[test]
+fn resource_output_blob_variant() {
+    let b = ResourceOutput::blob("u://b", None, "ZGF0YQ==");
+    match &b.contents[0] {
+        ResourceOutputContent::Blob {
+            uri,
+            mime_type,
+            blob,
+        } => {
+            assert_eq!(uri, "u://b");
+            assert!(mime_type.is_none());
+            assert_eq!(blob, "ZGF0YQ==");
+        }
+        ResourceOutputContent::Text { .. } => panic!("expected a blob content block"),
+    }
+}
+
+#[test]
+fn shared_state_remove_and_clear_state() {
+    let state = SharedState::new();
+    state.set_state("k1", serde_json::json!(10)).unwrap();
+    state.set_state("k2", serde_json::json!(20)).unwrap();
+
+    assert!(state.remove_state("k1"));
+    assert!(!state.remove_state("k1"));
+    assert_eq!(
+        state.get_state("k1", serde_json::Value::Null),
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        state.get_state("k2", serde_json::Value::Null),
+        serde_json::json!(20)
+    );
+
+    state.clear_state();
+    assert_eq!(
+        state.get_state("k2", serde_json::Value::Null),
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn shared_state_methods_on_poisoned_lock() {
+    let state = SharedState::new();
+    poison(&state.0);
+
+    assert_eq!(
+        state.get_state("k", serde_json::json!("fallback")),
+        serde_json::json!("fallback")
+    );
+    assert!(state.set_state("k", serde_json::json!(1)).is_err());
+    assert!(!state.remove_state("k"));
+    state.clear_state();
+}
+
+#[test]
+fn tool_context_debug_fmt_on_poisoned_extensions_lock() {
+    let ctx = ToolContext::new().with_conversation_id("conv-123");
+    poison(&ctx.extensions);
+    let debug_str = format!("{ctx:?}");
+    assert!(debug_str.contains("extensions_count: 0"));
+    assert!(debug_str.contains("conv-123"));
+}
+
+#[test]
+fn shared_state_and_extensions_concurrent_read_write_stress() {
+    let ctx = ToolContext::new();
+    let mut handles = Vec::new();
+    for i in 0..8usize {
+        let ctx_clone = ctx.clone();
+        handles.push(std::thread::spawn(move || {
+            for j in 0..50usize {
+                let key = format!("key_{i}_{j}");
+                ctx_clone.set_state(&key, serde_json::json!(j)).unwrap();
+                let val = ctx_clone.get_state(&key, serde_json::Value::Null);
+                assert_eq!(val, serde_json::json!(j));
+                ctx_clone.set_ext(i * 1000 + j).unwrap();
+                assert!(ctx_clone.get_ext::<usize>().is_some());
+                if j % 5 == 0 {
+                    assert!(ctx_clone.state.remove_state(&key));
+                }
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+}
+
+// ── ToolDefinition serde & lazy schema tests ────────────────────────
+
+#[test]
+fn tool_definition_serde_roundtrip_and_lazy_schema() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "query": { "type": "string" },
+            "limit": { "type": "integer" }
+        },
+        "required": ["query"]
+    });
+
+    let def = ToolDefinition::with_effect(
+        "search_records",
+        "Searches records in database",
+        schema,
+        ToolEffect::ReadOnly,
+    );
+
+    assert!(def.is_idempotent());
+    assert_eq!(def.effect, ToolEffect::ReadOnly);
+
+    let initial_schema_json = def.parameter_schema_json();
+    assert!(initial_schema_json.contains("query"));
+    assert!(initial_schema_json.contains("limit"));
+
+    let arc_schema = def.parameter_schema_json_arc();
+    assert_eq!(arc_schema.as_ref(), initial_schema_json);
+
+    let serialized = serde_json::to_string(&def).expect("serialization succeeds");
+    let parsed: ToolDefinition =
+        serde_json::from_str(&serialized).expect("deserialization succeeds");
+
+    assert_eq!(parsed, def);
+    assert_eq!(parsed.effect, ToolEffect::ReadOnly);
+    assert!(parsed.is_idempotent());
+
+    let parsed_schema_json = parsed.parameter_schema_json();
+    assert_ne!(parsed_schema_json, "{}");
+    assert_eq!(parsed_schema_json, def.parameter_schema_json());
+    assert_eq!(
+        parsed.parameter_schema_json_arc().as_ref(),
+        def.parameter_schema_json_arc().as_ref()
+    );
+}
+
+#[test]
+fn tool_definition_deserializes_legacy_idempotent_field() {
+    let json = serde_json::json!({
+        "name": "read_sensor",
+        "description": "Reads current sensor telemetry",
+        "parameter_schema": { "type": "object" },
+        "idempotent": true
+    });
+
+    let def: ToolDefinition =
+        serde_json::from_value(json).expect("deserializing legacy definition succeeds");
+
+    assert_eq!(def.effect, ToolEffect::ReadOnly);
+    assert!(def.is_idempotent());
+    assert_eq!(
+        def.parameter_schema_json(),
+        "{\"properties\":{},\"type\":\"object\"}"
+    );
+}
+
+#[test]
+fn tool_output_truncation_helper() {
+    let big_output = ToolOutput::new("A".repeat(500));
+    let truncated = big_output.truncated(&TruncationPolicy::new(80));
+    assert!(truncated.content().len() <= 80);
+    assert!(truncated.content().contains("bytes omitted"));
+}
+
+#[test]
+fn tool_definition_schema_mutation_invalidates_cached_json() {
+    let mut def = ToolDefinition::new(
+        "calc",
+        "Calculator",
+        serde_json::json!({ "type": "object", "properties": { "a": { "type": "number" } } }),
+    );
+    assert!(def.parameter_schema_json().contains("\"a\""));
+
+    def.set_parameter_schema(serde_json::json!({
+        "type": "object",
+        "properties": { "b": { "type": "string" } }
+    }));
+    assert!(def.parameter_schema_json().contains("\"b\""));
+    assert!(!def.parameter_schema_json().contains("\"a\""));
+
+    def.parameter_schema_mut()["properties"]["c"] = serde_json::json!({ "type": "boolean" });
+    assert!(def.parameter_schema_json().contains("\"c\""));
+}
+
+#[test]
+fn destructive_in_parallel_batch_error_has_typed_metadata() {
+    let err = ToolError::destructive_in_parallel_batch("wipe_disk");
+    assert!(err.is_destructive_batch_rejected());
+    assert!(!err.is_not_found());
+    assert!(err.to_string().contains("wipe_disk"));
+    assert_eq!(
+        err.metadata()[ToolError::ERROR_KIND_KEY],
+        serde_json::json!(ToolError::KIND_DESTRUCTIVE_BATCH)
+    );
+}

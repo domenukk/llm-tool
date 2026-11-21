@@ -1,15 +1,24 @@
 //! Strongly-typed Rust resource trait and URI template matching.
 
+mod uri_de;
+
 use alloc::{
     borrow::Cow,
     boxed::Box,
+    collections::BTreeMap,
     format,
     string::{String, ToString},
+    sync::Arc,
     vec::Vec,
 };
 use core::{future::Future, pin::Pin};
 
-use super::types::{RegistryItem, ResourceDefinition, ResourceOutput, ToolError};
+use uri_de::UriVarDeserializer;
+
+use super::types::{
+    OutputSanitization, RegistryItem, ResourceDefinition, ResourceOutput, ToolContext, ToolError,
+    ToolProvenance,
+};
 
 /// A custom resource or resource template implemented in Rust.
 pub trait RustResource: Send + Sync {
@@ -28,6 +37,41 @@ pub trait RustResource: Send + Sync {
     /// Optional MIME type.
     const MIME_TYPE: Option<&'static str>;
 
+    /// Data-provenance and trust classification of the resource.
+    const PROVENANCE: ToolProvenance = ToolProvenance::Trusted;
+
+    /// Shorthand: neutralize control tokens in this resource's output.
+    const SANITIZE_OUTPUT: bool = true;
+
+    /// Shorthand: wrap this resource's text content in `<tool_output_quarantine>`.
+    const QUARANTINE_OUTPUT: bool = false;
+
+    /// Automatic prompt-injection sanitization policy applied to this resource's output.
+    const OUTPUT_SANITIZATION: OutputSanitization = if Self::QUARANTINE_OUTPUT
+        || (Self::SANITIZE_OUTPUT && Self::PROVENANCE.is_untrusted_source())
+    {
+        OutputSanitization::Quarantine
+    } else if Self::SANITIZE_OUTPUT {
+        OutputSanitization::SanitizeTokens
+    } else {
+        OutputSanitization::None
+    };
+
+    /// Return the data-provenance tier of the resource.
+    fn provenance(&self) -> ToolProvenance {
+        Self::PROVENANCE
+    }
+
+    /// Return the automatic prompt-injection sanitization policy for this resource's output.
+    fn output_sanitization(&self) -> OutputSanitization {
+        let base = Self::OUTPUT_SANITIZATION;
+        if !Self::SANITIZE_OUTPUT || base.is_none() {
+            base
+        } else {
+            base.at_least(self.provenance().default_sanitization())
+        }
+    }
+
     /// Return the resource description.
     fn description(&self) -> Cow<'static, str> {
         Cow::Borrowed(Self::DESCRIPTION)
@@ -39,26 +83,43 @@ pub trait RustResource: Send + Sync {
         uri: &str,
         params: Self::Params,
     ) -> impl Future<Output = Result<ResourceOutput, ToolError>> + Send;
-}
 
-/// Build a [`ResourceDefinition`] from any [`RustResource`] implementor.
-///
-/// Infallible: the definition is built purely from associated constants.
-#[must_use]
-pub fn definition_of_resource<T: RustResource>(resource: &T) -> ResourceDefinition {
-    ResourceDefinition {
-        uri_template: T::URI_TEMPLATE.to_string(),
-        name: T::NAME.to_string(),
-        description: resource.description().into_owned(),
-        mime_type: T::MIME_TYPE.map(ToString::to_string),
+    /// Read the resource with URI, extracted parameters, and execution [`ToolContext`].
+    fn read_with_context(
+        &self,
+        uri: &str,
+        params: Self::Params,
+        _ctx: &ToolContext,
+    ) -> impl Future<Output = Result<ResourceOutput, ToolError>> + Send {
+        self.read(uri, params)
+    }
+
+    /// Internal unsanitized invocation hook overridden by `#[llm_resource]` so registry
+    /// dispatch applies output/error sanitization in a single pass.
+    #[doc(hidden)]
+    fn __read_raw(
+        &self,
+        uri: &str,
+        params: Self::Params,
+        ctx: &ToolContext,
+    ) -> impl Future<Output = Result<ResourceOutput, ToolError>> + Send {
+        self.read_with_context(uri, params, ctx)
     }
 }
 
-/// Opening delimiter for URI template variable placeholders.
+/// Build a sanitized [`ResourceDefinition`] from any [`RustResource`] implementor.
+#[must_use]
+pub fn definition_of_resource<T: RustResource>(resource: &T) -> ResourceDefinition {
+    ResourceDefinition::new(
+        T::URI_TEMPLATE,
+        T::NAME,
+        resource.description().into_owned(),
+        T::MIME_TYPE.map(ToString::to_string),
+    )
+}
+
 const TEMPLATE_VAR_START: char = '{';
-/// Closing delimiter for URI template variable placeholders.
 const TEMPLATE_VAR_END: char = '}';
-/// Empty string slice.
 const EMPTY_STR: &str = "";
 
 /// A single segment of a pre-compiled URI template.
@@ -71,11 +132,6 @@ pub enum TemplateSegment<'a> {
 }
 
 /// Pre-compiled representation of a URI template pattern.
-///
-/// Parses `{variable}` placeholders once at registration time so that
-/// [`matches`](Self::matches) and [`extract_borrowed`](Self::extract_borrowed)
-/// run in pure stack memory without re-scanning the template string or
-/// allocating heap `String`s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledUriTemplate<'a> {
     raw: &'a str,
@@ -154,8 +210,6 @@ impl<'a> CompiledUriTemplate<'a> {
     }
 
     /// Extract borrowed `(variable_name, value)` pairs from `uri`.
-    ///
-    /// Returns `None` if `uri` does not match this template.
     #[must_use]
     pub fn extract_borrowed<'u>(&self, uri: &'u str) -> Option<Vec<(&'a str, &'u str)>> {
         if self.var_count == 0 {
@@ -208,16 +262,10 @@ impl<'a> CompiledUriTemplate<'a> {
 }
 
 /// Helper to match an incoming URI against a URI template pattern with `{variable}` placeholders.
-///
-/// Returns `Some(map)` if the URI matches the pattern, mapping each `{variable}` name
-/// to its extracted value string. Returns `None` if the URI does not match.
 #[must_use]
-pub fn match_uri_template(
-    template: &str,
-    uri: &str,
-) -> Option<alloc::collections::BTreeMap<String, String>> {
+pub fn match_uri_template(template: &str, uri: &str) -> Option<BTreeMap<String, String>> {
     let compiled = CompiledUriTemplate::new(template);
-    let mut map = alloc::collections::BTreeMap::new();
+    let mut map = BTreeMap::new();
     compiled.match_with_callback(uri, |k, v| {
         map.insert(k.to_string(), v.to_string());
     })?;
@@ -229,9 +277,6 @@ pub type BoxResourceFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ResourceOutput, ToolError>> + Send + 'a>>;
 
 /// Type-erased wrapper enabling heterogeneous resource storage.
-///
-/// This is an internal implementation detail of [`ResourceRegistry`]; callers
-/// interact with resources through the registry rather than this trait.
 pub trait ErasedResource: Send + Sync {
     /// Execute `read` given pre-extracted borrowed `(key, value)` URI variables.
     fn read_with_vars<'a>(
@@ -239,6 +284,23 @@ pub trait ErasedResource: Send + Sync {
         uri: &'a str,
         vars: Vec<(&'static str, &'a str)>,
     ) -> BoxResourceFuture<'a>;
+
+    /// Execute `read` with caller `ctx` under `effective_policy`.
+    fn read_with_vars_and_policy<'a>(
+        &'a self,
+        uri: &'a str,
+        vars: Vec<(&'static str, &'a str)>,
+        _ctx: &'a ToolContext,
+        effective_policy: OutputSanitization,
+    ) -> BoxResourceFuture<'a> {
+        let fut = self.read_with_vars(uri, vars);
+        Box::pin(async move {
+            match fut.await {
+                Ok(out) => Ok(effective_policy.apply_resource(out)),
+                Err(err) => Err(effective_policy.apply_error(err)),
+            }
+        })
+    }
 }
 
 impl<T: RustResource> ErasedResource for T {
@@ -247,37 +309,69 @@ impl<T: RustResource> ErasedResource for T {
         uri: &'a str,
         vars: Vec<(&'static str, &'a str)>,
     ) -> BoxResourceFuture<'a> {
+        let policy = self.output_sanitization();
+        Box::pin(async move {
+            let ctx = ToolContext::new();
+            let deserializer = serde::de::value::MapDeserializer::new(
+                vars.into_iter()
+                    .map(|(k, v)| (k, UriVarDeserializer::new(v))),
+            );
+            let params: T::Params = match serde::de::Deserialize::deserialize(deserializer) {
+                Ok(p) => p,
+                Err(e) => {
+                    let err = ToolError::new(format!(
+                        "Failed to deserialize resource parameters from URI variables: {e}"
+                    ));
+                    return Err(policy.apply_error(err));
+                }
+            };
+            match self.__read_raw(uri, params, &ctx).await {
+                Ok(out) => Ok(policy.apply_resource(out)),
+                Err(err) => Err(policy.apply_error(err)),
+            }
+        })
+    }
+
+    fn read_with_vars_and_policy<'a>(
+        &'a self,
+        uri: &'a str,
+        vars: Vec<(&'static str, &'a str)>,
+        ctx: &'a ToolContext,
+        effective_policy: OutputSanitization,
+    ) -> BoxResourceFuture<'a> {
         Box::pin(async move {
             let deserializer = serde::de::value::MapDeserializer::new(
                 vars.into_iter()
-                    .map(|(k, v)| (k, serde::de::value::BorrowedStrDeserializer::new(v))),
+                    .map(|(k, v)| (k, UriVarDeserializer::new(v))),
             );
-            let params: T::Params = serde::de::Deserialize::deserialize(deserializer).map_err(
-                |e: serde::de::value::Error| {
-                    ToolError::new(format!(
+            let params: T::Params = match serde::de::Deserialize::deserialize(deserializer) {
+                Ok(p) => p,
+                Err(e) => {
+                    let err = ToolError::new(format!(
                         "Failed to deserialize resource parameters from URI variables: {e}"
-                    ))
-                },
-            )?;
-            self.read(uri, params).await
+                    ));
+                    return Err(effective_policy.apply_error(err));
+                }
+            };
+            match self.__read_raw(uri, params, ctx).await {
+                Ok(out) => Ok(effective_policy.apply_resource(out)),
+                Err(err) => Err(effective_policy.apply_error(err)),
+            }
         })
     }
 }
 
-/// A registered resource: its cached definition, pre-compiled URI template,
-/// and type-erased handler.
+#[derive(Clone)]
 struct RegisteredResource {
     name: &'static str,
     definition: ResourceDefinition,
+    provenance: ToolProvenance,
+    output_sanitization: OutputSanitization,
     template: CompiledUriTemplate<'static>,
-    erased: Box<dyn ErasedResource>,
+    erased: Arc<dyn ErasedResource>,
 }
 
 /// A registry of resources and resource templates for dynamic dispatch.
-///
-/// Models MCP's `resources/list`, `resources/read`, and `resources/templates/list`
-/// primitives. Tools provide actionable commands; resources provide readable
-/// context (static documents, log files, configuration snapshots).
 ///
 /// # Example
 ///
@@ -307,9 +401,16 @@ struct RegisteredResource {
 /// assert_eq!(reg.len(), 1);
 /// assert!(reg.matches("file:///etc/app.conf"));
 /// ```
-#[derive(Default)]
+#[derive(Clone)]
 pub struct ResourceRegistry {
     resources: Vec<RegisteredResource>,
+    output_floor: OutputSanitization,
+}
+
+impl Default for ResourceRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl core::fmt::Debug for ResourceRegistry {
@@ -318,31 +419,84 @@ impl core::fmt::Debug for ResourceRegistry {
         f.debug_struct("ResourceRegistry")
             .field("resource_count", &self.resources.len())
             .field("resource_names", &names)
+            .field("output_floor", &self.output_floor)
             .finish()
     }
 }
 
 impl ResourceRegistry {
-    /// Create a new, empty resource registry.
+    /// Create a new, empty resource registry with secure default [`OutputSanitization::SanitizeTokens`] floor.
     #[must_use]
     pub const fn new() -> Self {
         Self {
             resources: Vec::new(),
+            output_floor: OutputSanitization::SanitizeTokens,
         }
     }
 
-    /// Register a [`RustResource`].
-    ///
-    /// Replaces any existing registration with the same [`RustResource::NAME`].
+    /// Set the minimum [`OutputSanitization`] enforced on every read resource output.
+    #[must_use]
+    pub const fn with_output_floor(mut self, floor: OutputSanitization) -> Self {
+        self.output_floor = floor;
+        self
+    }
+
+    /// In-place variant of [`with_output_floor`](Self::with_output_floor).
+    pub const fn set_output_floor(&mut self, floor: OutputSanitization) -> &mut Self {
+        self.output_floor = floor;
+        self
+    }
+
+    /// Return the minimum [`OutputSanitization`] enforced on every read resource output.
+    #[must_use]
+    pub const fn output_floor(&self) -> OutputSanitization {
+        self.output_floor
+    }
+
+    const fn effective_policy_for_entry(&self, entry: &RegisteredResource) -> OutputSanitization {
+        let res_policy = if entry.output_sanitization.is_none() {
+            OutputSanitization::None
+        } else {
+            entry
+                .output_sanitization
+                .at_least(entry.provenance.default_sanitization())
+        };
+        res_policy.at_least(self.output_floor)
+    }
+
+    /// Return the effective [`OutputSanitization`] applied to resource `name`, or `None` if not registered.
+    #[must_use]
+    pub fn effective_output_sanitization(&self, name: &str) -> Option<OutputSanitization> {
+        self.resources
+            .iter()
+            .find(|e| e.name == name)
+            .map(|e| self.effective_policy_for_entry(e))
+    }
+
+    /// Return the [`ToolProvenance`] of resource `name`, or `None` if not registered.
+    #[must_use]
+    pub fn provenance(&self, name: &str) -> Option<ToolProvenance> {
+        self.resources
+            .iter()
+            .find(|e| e.name == name)
+            .map(|e| e.provenance)
+    }
+
+    /// Register a [`RustResource`], replacing any existing registration with the same [`RustResource::NAME`].
     pub fn register<R: RustResource + 'static>(&mut self, resource: R) -> &mut Self {
         if let Some(pos) = self.resources.iter().position(|e| e.name == R::NAME) {
             self.resources.remove(pos);
         }
+        let definition = definition_of_resource(&resource);
+        let provenance = resource.provenance();
+        let output_sanitization = resource.output_sanitization();
         self.resources.push(RegisteredResource {
             name: R::NAME,
-            definition: definition_of_resource(&resource),
+            definition,
+            provenance,
+            output_sanitization,
             template: CompiledUriTemplate::new(R::URI_TEMPLATE),
-            erased: Box::new(resource),
+            erased: Arc::new(resource),
         });
         self
     }
@@ -370,8 +524,6 @@ impl ResourceRegistry {
     }
 
     /// Collect [`ResourceDefinition`]s for all registered resources.
-    ///
-    /// Returns clones of the cached definitions computed at registration time.
     #[must_use]
     pub fn definitions(&self) -> Vec<ResourceDefinition> {
         self.resources
@@ -393,19 +545,12 @@ impl ResourceRegistry {
     }
 
     /// Whether a resource with the given name is registered.
-    ///
-    /// Note that resources are *read* by URI (see [`matches`](Self::matches)),
-    /// not by name; this checks the registered resource **name** for parity
-    /// with [`ToolRegistry::contains`](crate::ToolRegistry::contains).
     #[must_use]
     pub fn contains(&self, name: &str) -> bool {
         self.resources.iter().any(|entry| entry.name == name)
     }
 
     /// Whether any registered resource's URI template matches `uri`.
-    ///
-    /// This is the URI-keyed analog of [`contains`](Self::contains) and mirrors
-    /// what [`read`](Self::read) uses to select a resource.
     #[must_use]
     pub fn matches(&self, uri: &str) -> bool {
         self.resources
@@ -414,8 +559,6 @@ impl ResourceRegistry {
     }
 
     /// Borrow the cached [`ResourceDefinition`] for a registered resource by name.
-    ///
-    /// Returns `None` if no resource named `name` is registered.
     #[must_use]
     pub fn definition(&self, name: &str) -> Option<&ResourceDefinition> {
         self.resources
@@ -425,8 +568,6 @@ impl ResourceRegistry {
     }
 
     /// Iterate over `(name, definition)` pairs for every registered resource.
-    ///
-    /// Yields clones of the cached definitions computed at registration time.
     #[must_use]
     pub fn iter(&self) -> ResourceDefinitions<'_> {
         ResourceDefinitions {
@@ -438,23 +579,39 @@ impl ResourceRegistry {
     ///
     /// # Errors
     ///
-    /// Returns [`ToolError::not_found`] if no registered resource's template
-    /// matches `uri` (carrying `error_kind = "not_registered"` metadata), or a
-    /// read error if URI-variable deserialization or reading fails.
+    /// Returns [`ToolError::not_found`] if no registered resource's template matches `uri`,
+    /// or a read error if URI-variable deserialization or reading fails.
     pub async fn read(&self, uri: &str) -> Result<ResourceOutput, ToolError> {
+        let ctx = ToolContext::new();
+        self.read_with_context(uri, &ctx).await
+    }
+
+    /// Read the first resource whose URI template matches `uri`, passing caller `ctx`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError::not_found`] if no registered resource's template matches `uri`,
+    /// or a read error if URI-variable deserialization, extension extraction, or reading fails.
+    pub async fn read_with_context(
+        &self,
+        uri: &str,
+        ctx: &ToolContext,
+    ) -> Result<ResourceOutput, ToolError> {
         for resource in &self.resources {
             if let Some(vars) = resource.template.extract_borrowed(uri) {
-                return resource.erased.read_with_vars(uri, vars).await;
+                let effective = self.effective_policy_for_entry(resource);
+                return resource
+                    .erased
+                    .read_with_vars_and_policy(uri, vars, ctx, effective)
+                    .await;
             }
         }
-        Err(ToolError::not_found(RegistryItem::Resource, uri))
+        let err = ToolError::not_found(RegistryItem::Resource, uri);
+        Err(self.output_floor.apply_error(err))
     }
 }
 
-/// Borrowing iterator over `(name, definition)` pairs, yielded by
-/// [`ResourceRegistry::iter`] and by `&ResourceRegistry`'s [`IntoIterator`] impl.
-///
-/// Each cached [`ResourceDefinition`] is cloned lazily as it is yielded.
+/// Borrowing iterator over `(name, definition)` pairs, yielded by [`ResourceRegistry::iter`].
 pub struct ResourceDefinitions<'a> {
     inner: core::slice::Iter<'a, RegisteredResource>,
 }
@@ -479,7 +636,6 @@ impl ExactSizeIterator for ResourceDefinitions<'_> {
     }
 }
 
-/// Iterate over `(name, definition)` pairs for every registered resource.
 impl<'a> IntoIterator for &'a ResourceRegistry {
     type Item = (&'static str, ResourceDefinition);
     type IntoIter = ResourceDefinitions<'a>;
@@ -535,19 +691,16 @@ mod tests {
 
     #[test]
     fn unterminated_template_variable_returns_none() {
-        // '{' with no closing '}' cannot be parsed into a variable.
         assert!(match_uri_template("x://{a", "x://foo").is_none());
     }
 
     #[test]
     fn missing_delimiter_in_uri_returns_none() {
-        // Template expects '/' after {a}, but the URI has none.
         assert!(match_uri_template("x://{a}/end", "x://noslash").is_none());
     }
 
     #[test]
     fn trailing_literal_must_match() {
-        // {a} captures up to '.', then ".log" must match the remainder.
         assert!(match_uri_template("f://{a}.log", "f://name.txt").is_none());
     }
 
@@ -570,31 +723,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn erased_resource_deserialization_failure_on_non_string_param() {
+    async fn erased_resource_deserializes_typed_uri_variables_and_rejects_malformed() {
         use super::*;
 
-        struct IntResource;
         #[derive(serde::Deserialize)]
-        struct IntParams {
-            count: u64,
+        #[serde(rename_all = "lowercase")]
+        enum Env {
+            Prod,
+            Staging,
         }
-        impl RustResource for IntResource {
-            const NAME: &'static str = "int_res";
-            const URI_TEMPLATE: &'static str = "res://{count}";
-            const DESCRIPTION: &'static str = "Resource with integer param";
+
+        struct TypedResource;
+        #[derive(serde::Deserialize)]
+        struct TypedParams {
+            env: Env,
+            count: u64,
+            verbose: bool,
+        }
+        impl RustResource for TypedResource {
+            const NAME: &'static str = "typed_res";
+            const URI_TEMPLATE: &'static str = "res://{env}/{count}/{verbose}";
+            const DESCRIPTION: &'static str = "Resource with typed URI params";
             const MIME_TYPE: Option<&'static str> = None;
-            type Params = IntParams;
-            async fn read(
+            type Params = TypedParams;
+            fn read(
                 &self,
                 uri: &str,
                 params: Self::Params,
-            ) -> Result<ResourceOutput, ToolError> {
-                Ok(ResourceOutput::text(uri, None, format!("{}", params.count)))
+            ) -> impl Future<Output = Result<ResourceOutput, ToolError>> + Send {
+                let env_name = match params.env {
+                    Env::Prod => "prod",
+                    Env::Staging => "staging",
+                };
+                core::future::ready(Ok(ResourceOutput::text(
+                    uri,
+                    None,
+                    format!("{env_name}:{}:{}", params.count, params.verbose),
+                )))
             }
         }
 
-        let reg = ResourceRegistry::new().with_resource(IntResource);
-        let err = reg.read("res://42").await.unwrap_err();
+        let reg = ResourceRegistry::new().with_resource(TypedResource);
+        let ok_out = reg
+            .read("res://prod/42/true")
+            .await
+            .expect("valid URI vars");
+        match &ok_out.contents[0] {
+            crate::ResourceOutputContent::Text { text, .. } => {
+                assert_eq!(text, "prod:42:true");
+            }
+            crate::ResourceOutputContent::Blob { .. } => panic!("expected text"),
+        }
+
+        let err = reg.read("res://prod/not_an_int/true").await.unwrap_err();
         assert!(
             err.to_string()
                 .contains("Failed to deserialize resource parameters from URI variables")
@@ -645,7 +826,6 @@ mod tests {
             extracted,
             alloc::vec![("host", "localhost"), ("port", "8080"), ("path", "api/v1"),]
         );
-        // Verify that extracted values point directly into the input `uri` slice (zero copy)
         let uri_start = uri.as_ptr() as usize;
         let uri_end = uri_start + uri.len();
         for (_, val) in extracted {

@@ -92,3 +92,67 @@ Supports both metric and imperial unit systems."
         .expect("dispatch static_tmpl_tool failed");
     assert_eq!(out.content(), "Weather for Paris");
 }
+
+#[derive(Clone)]
+struct NoStdService {
+    prefix: String,
+}
+
+#[llm_tool]
+impl NoStdService {
+    /// Echo sanitized input and extension state.
+    #[llm_tool(effect = "read_only")]
+    pub fn echo(
+        &self,
+        /// Sanitized query.
+        query: llm_tool::Sanitized<String>,
+        /// Typed extension state.
+        #[llm_tool(ext)]
+        state: Arc<CustomState>,
+    ) -> String {
+        let clean = query.into_inner();
+        let val = Arc::try_unwrap(state).map_or_else(|arc| arc.value, |s| s.value);
+        format!("{}:{clean}:{val}", self.prefix)
+    }
+}
+
+/// Read an item by numeric URI var.
+#[llm_tool::llm_resource(uri = "item://{id}")]
+fn read_no_std_item(
+    /// Numeric ID.
+    id: u32,
+) -> String {
+    format!("item-{id}")
+}
+
+#[tokio::test]
+async fn test_no_std_0107_ergonomics_and_wire_projections() {
+    let svc = NoStdService {
+        prefix: "ns".to_string(),
+    };
+    let reg = svc.tool_registry().read_only();
+    assert_eq!(reg.to_openai_tools().len(), 1);
+    assert_eq!(reg.to_anthropic_tools().len(), 1);
+    assert_eq!(reg.to_gemini_declarations().len(), 1);
+
+    let ctx = ToolContext::new();
+    ctx.set_ext(Arc::new(CustomState { value: 7 }))
+        .expect("set_ext");
+    let out = reg
+        .dispatch(
+            "echo",
+            serde_json::json!({ "query": "hi <|im_start|>" }),
+            &ctx,
+        )
+        .await
+        .expect("dispatch echo");
+    assert!(!out.content().contains("<|im_start|>"));
+    assert!(out.content().starts_with("ns:hi "));
+
+    let res_reg = llm_tool::ResourceRegistry::new().with_resource(ReadNoStdItem);
+    let res_out = res_reg
+        .read_with_context("item://42", &ctx)
+        .await
+        .expect("read item://42");
+    assert_eq!(res_out.contents.len(), 1);
+}

@@ -13,12 +13,12 @@ impl RustTool for EmptyParamTool {
     type Params = EmptyParams;
     const NAME: &'static str = "empty";
     const DESCRIPTION: &'static str = "No params";
-    async fn call(
+    fn call(
         &self,
         _params: Self::Params,
         _ctx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        Ok("ok".into())
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        core::future::ready(Ok("ok".into()))
     }
 }
 
@@ -197,12 +197,12 @@ async fn registry_replaces_on_duplicate_name() {
         type Params = PathParams;
         const NAME: &'static str = "sample";
         const DESCRIPTION: &'static str = "Alternate sample";
-        async fn call(
+        fn call(
             &self,
             params: Self::Params,
             _ctx: &ToolContext,
-        ) -> Result<ToolOutput, ToolError> {
-            Ok(format!("alt: {}", params.path).into())
+        ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+            core::future::ready(Ok(format!("alt: {}", params.path).into()))
         }
     }
 
@@ -224,12 +224,12 @@ async fn registry_tool_returning_error() {
         type Params = EmptyParams;
         const NAME: &'static str = "fail";
         const DESCRIPTION: &'static str = "Always fails";
-        async fn call(
+        fn call(
             &self,
             _params: Self::Params,
             _ctx: &ToolContext,
-        ) -> Result<ToolOutput, ToolError> {
-            Err(ToolError::new("intentional failure"))
+        ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+            core::future::ready(Err(ToolError::new("intentional failure")))
         }
     }
 
@@ -456,8 +456,14 @@ impl RustTool for DocumentedTool {
     type Params = DocumentedParams;
     const NAME: &'static str = "connect";
     const DESCRIPTION: &'static str = "Connects to a remote host.";
-    async fn call(&self, p: Self::Params, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
-        Ok(format!("{}:{}:{:?}", p.hostname, p.port, p.timeout).into())
+    fn call(
+        &self,
+        p: Self::Params,
+        _ctx: &ToolContext,
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        core::future::ready(Ok(
+            format!("{}:{}:{:?}", p.hostname, p.port, p.timeout).into()
+        ))
     }
 }
 
@@ -673,12 +679,12 @@ impl RustTool for DestructiveTool {
     const DESCRIPTION: &'static str = "Destructive data wiper";
     const EFFECT: ToolEffect = ToolEffect::Destructive;
 
-    async fn call(
+    fn call(
         &self,
         _params: Self::Params,
         _ctx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        Ok("wiped".into())
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        core::future::ready(Ok("wiped".into()))
     }
 }
 

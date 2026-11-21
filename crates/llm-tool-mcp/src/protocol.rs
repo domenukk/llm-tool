@@ -130,25 +130,68 @@ pub const REQUEST_CANCELLED: RpcErrorCode = RpcErrorCode::RequestCancelled;
 
 /// Strongly-typed JSON-RPC 2.0 request identifier for zero-allocation
 /// hash-map indexing of in-flight requests.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Supports signed 64-bit integers (`i64`), unsigned 64-bit integers exceeding
+/// `i64::MAX` (`u64`), and arbitrary strings without truncation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RequestId {
-    /// Numeric request ID (e.g. `1`, `42`).
+    /// Signed 64-bit integer request ID (e.g. `1`, `-1`, `42`).
     Number(i64),
+    /// Unsigned 64-bit integer request ID exceeding `i64::MAX` (e.g. `u64::MAX`).
+    UnsignedNumber(u64),
     /// String request ID (e.g. `"req-1"`).
     String(String),
 }
 
+#[derive(PartialEq, Eq, Hash)]
+enum NormalizedId<'a> {
+    Signed(i64),
+    UnsignedHigh(u64),
+    Str(&'a str),
+}
+
 impl RequestId {
+    const fn normalized(&self) -> NormalizedId<'_> {
+        match self {
+            Self::Number(i) => NormalizedId::Signed(*i),
+            Self::UnsignedNumber(u) => {
+                if *u <= i64::MAX.unsigned_abs() {
+                    NormalizedId::Signed(i64::from_ne_bytes(u.to_ne_bytes()))
+                } else {
+                    NormalizedId::UnsignedHigh(*u)
+                }
+            }
+            Self::String(s) => NormalizedId::Str(s.as_str()),
+        }
+    }
+
     /// Extract a strongly-typed [`RequestId`] from a JSON value if it is a
-    /// valid JSON-RPC 2.0 identifier (`Number` or `String`).
+    /// valid JSON-RPC 2.0 identifier (`i64`, `u64`, or `String`).
     #[must_use]
     pub fn from_json_value(val: &serde_json::Value) -> Option<Self> {
         match val {
-            serde_json::Value::Number(n) => n.as_i64().map(Self::Number),
+            serde_json::Value::Number(n) => n
+                .as_i64()
+                .map(Self::Number)
+                .or_else(|| n.as_u64().map(Self::UnsignedNumber)),
             serde_json::Value::String(s) => Some(Self::String(s.clone())),
             _ => None,
         }
+    }
+}
+
+impl PartialEq for RequestId {
+    fn eq(&self, other: &Self) -> bool {
+        self.normalized() == other.normalized()
+    }
+}
+
+impl Eq for RequestId {}
+
+impl core::hash::Hash for RequestId {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.normalized().hash(state);
     }
 }
 
@@ -176,11 +219,13 @@ impl TryFrom<&serde_json::Value> for RequestId {
 
     fn try_from(val: &serde_json::Value) -> Result<Self, Self::Error> {
         match val {
-            serde_json::Value::Number(n) => {
-                n.as_i64().map(Self::Number).ok_or(InvalidRequestIdError {
-                    actual_type: "non-i64 number",
-                })
-            }
+            serde_json::Value::Number(n) => n
+                .as_i64()
+                .map(Self::Number)
+                .or_else(|| n.as_u64().map(Self::UnsignedNumber))
+                .ok_or(InvalidRequestIdError {
+                    actual_type: "non-integer number",
+                }),
             serde_json::Value::String(s) => Ok(Self::String(s.clone())),
             serde_json::Value::Null => Err(InvalidRequestIdError {
                 actual_type: "null",
@@ -469,16 +514,209 @@ pub struct ToolsListResult {
     pub tools: Vec<McpToolSchema>,
 }
 
+/// Behavioral hint annotations describing a tool in `tools/list` responses.
+///
+/// Serializes on the wire as `{"readOnlyHint": bool, "destructiveHint": bool, "idempotentHint": bool, "openWorldHint": bool}`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct McpToolAnnotations {
+    bits: u8,
+}
+
+impl McpToolAnnotations {
+    const BIT_READ_ONLY: u8 = 1 << 0;
+    const BIT_DESTRUCTIVE: u8 = 1 << 1;
+    const BIT_IDEMPOTENT: u8 = 1 << 2;
+    const BIT_OPEN_WORLD: u8 = 1 << 3;
+
+    const KEY_READ_ONLY: &'static str = "readOnlyHint";
+    const KEY_DESTRUCTIVE: &'static str = "destructiveHint";
+    const KEY_IDEMPOTENT: &'static str = "idempotentHint";
+    const KEY_OPEN_WORLD: &'static str = "openWorldHint";
+
+    /// Construct empty [`McpToolAnnotations`] with all hint bits set to `false`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { bits: 0 }
+    }
+
+    /// Set the `readOnlyHint` bit.
+    #[must_use]
+    pub const fn with_read_only_hint(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.bits |= Self::BIT_READ_ONLY;
+        } else {
+            self.bits &= !Self::BIT_READ_ONLY;
+        }
+        self
+    }
+
+    /// Set the `destructiveHint` bit.
+    #[must_use]
+    pub const fn with_destructive_hint(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.bits |= Self::BIT_DESTRUCTIVE;
+        } else {
+            self.bits &= !Self::BIT_DESTRUCTIVE;
+        }
+        self
+    }
+
+    /// Set the `idempotentHint` bit.
+    #[must_use]
+    pub const fn with_idempotent_hint(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.bits |= Self::BIT_IDEMPOTENT;
+        } else {
+            self.bits &= !Self::BIT_IDEMPOTENT;
+        }
+        self
+    }
+
+    /// Set the `openWorldHint` bit.
+    #[must_use]
+    pub const fn with_open_world_hint(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.bits |= Self::BIT_OPEN_WORLD;
+        } else {
+            self.bits &= !Self::BIT_OPEN_WORLD;
+        }
+        self
+    }
+
+    /// Derive MCP tool annotations from a [`llm_tool::ToolDefinition`].
+    #[must_use]
+    pub const fn from_definition(def: &llm_tool::ToolDefinition) -> Self {
+        Self::new()
+            .with_read_only_hint(def.effect.is_read_only())
+            .with_destructive_hint(def.effect.is_destructive())
+            .with_idempotent_hint(def.is_idempotent())
+            .with_open_world_hint(def.provenance.is_untrusted_source())
+    }
+
+    /// `true` when the tool does not modify its environment.
+    #[must_use]
+    pub const fn read_only_hint(self) -> bool {
+        (self.bits & Self::BIT_READ_ONLY) != 0
+    }
+
+    /// `true` when the tool may perform destructive updates to its environment.
+    #[must_use]
+    pub const fn destructive_hint(self) -> bool {
+        (self.bits & Self::BIT_DESTRUCTIVE) != 0
+    }
+
+    /// `true` when calling the tool repeatedly with identical arguments has no additional effect.
+    #[must_use]
+    pub const fn idempotent_hint(self) -> bool {
+        (self.bits & Self::BIT_IDEMPOTENT) != 0
+    }
+
+    /// `true` when the tool interacts with external/open-world systems.
+    #[must_use]
+    pub const fn open_world_hint(self) -> bool {
+        (self.bits & Self::BIT_OPEN_WORLD) != 0
+    }
+}
+
+impl Serialize for McpToolAnnotations {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = serializer.serialize_struct("McpToolAnnotations", 4)?;
+        st.serialize_field(Self::KEY_READ_ONLY, &self.read_only_hint())?;
+        st.serialize_field(Self::KEY_DESTRUCTIVE, &self.destructive_hint())?;
+        st.serialize_field(Self::KEY_IDEMPOTENT, &self.idempotent_hint())?;
+        st.serialize_field(Self::KEY_OPEN_WORLD, &self.open_world_hint())?;
+        st.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for McpToolAnnotations {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct AnnotationsVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for AnnotationsVisitor {
+            type Value = McpToolAnnotations;
+
+            fn expecting(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                formatter.write_str("an MCP tool annotations object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut bits = 0u8;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        McpToolAnnotations::KEY_READ_ONLY => {
+                            if map.next_value::<bool>()? {
+                                bits |= McpToolAnnotations::BIT_READ_ONLY;
+                            }
+                        }
+                        McpToolAnnotations::KEY_DESTRUCTIVE => {
+                            if map.next_value::<bool>()? {
+                                bits |= McpToolAnnotations::BIT_DESTRUCTIVE;
+                            }
+                        }
+                        McpToolAnnotations::KEY_IDEMPOTENT => {
+                            if map.next_value::<bool>()? {
+                                bits |= McpToolAnnotations::BIT_IDEMPOTENT;
+                            }
+                        }
+                        McpToolAnnotations::KEY_OPEN_WORLD => {
+                            if map.next_value::<bool>()? {
+                                bits |= McpToolAnnotations::BIT_OPEN_WORLD;
+                            }
+                        }
+                        _ => {
+                            let ignored: serde::de::IgnoredAny = map.next_value()?;
+                            core::hint::black_box(ignored);
+                        }
+                    }
+                }
+                Ok(McpToolAnnotations { bits })
+            }
+        }
+
+        deserializer.deserialize_map(AnnotationsVisitor)
+    }
+}
+
 /// A single tool's schema in the `tools/list` response.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpToolSchema {
     /// Tool name.
     pub name: String,
     /// Human-readable description.
+    #[serde(default)]
     pub description: String,
     /// JSON Schema for the tool's input parameters.
     pub input_schema: serde_json::Value,
+    /// Optional MCP tool behavior hint annotations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<McpToolAnnotations>,
+}
+
+impl McpToolSchema {
+    /// Convert an external MCP `tools/list` schema into a normalized, metadata-sanitized
+    /// [`llm_tool::ToolDefinition`] classified at [`llm_tool::ToolProvenance::ExternalMcp`]
+    /// (defaulting `output_sanitization` to [`llm_tool::OutputSanitization::Quarantine`]).
+    #[must_use]
+    pub fn into_tool_definition(self) -> llm_tool::ToolDefinition {
+        let effect = match self.annotations {
+            Some(ann) if ann.destructive_hint() => llm_tool::ToolEffect::Destructive,
+            Some(ann) if ann.read_only_hint() => llm_tool::ToolEffect::ReadOnly,
+            Some(_) | None => llm_tool::ToolEffect::Mutating,
+        };
+        llm_tool::ToolDefinition::with_effect(
+            self.name,
+            self.description,
+            self.input_schema,
+            effect,
+        )
+        .with_provenance(llm_tool::ToolProvenance::ExternalMcp)
+    }
 }
 
 /// Deserialized `tools/call` request parameters.

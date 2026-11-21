@@ -1,10 +1,22 @@
 //! Execution context and shared state store passed to Rust tools during dispatch.
 
-use alloc::{borrow::ToOwned, boxed::Box, format, string::String, sync::Arc};
+use alloc::{borrow::ToOwned, boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::any::{Any, TypeId};
 
 use super::{SurrogateHandle, SurrogateVault, ToolError};
-use crate::compat::{HashMap, RwLock, read_lock, write_lock};
+use crate::{
+    compat::{HashMap, RwLock, read_lock, write_lock},
+    registry::AllowDestructiveBatch,
+};
+
+type ExtensionMap = Arc<RwLock<HashMap<TypeId, Box<dyn Any + Send + Sync>>>>;
+
+/// Returns `true` for security-sensitive mutable extensions that must never be inherited
+/// across isolated connection forks ([`ToolContext::fork_connection`]).
+fn is_connection_isolated_extension<T: 'static>() -> bool {
+    let tid = TypeId::of::<T>();
+    tid == TypeId::of::<SurrogateVault>() || tid == TypeId::of::<AllowDestructiveBatch>()
+}
 
 /// A cheaply-cloneable handle to a tool's shared key-value state store.
 ///
@@ -78,6 +90,27 @@ impl SharedState {
             }
         }
     }
+
+    /// Create an independent [`SharedState`] initialized with a snapshot clone of this
+    /// store's current entries.
+    ///
+    /// Initial server-configured defaults are preserved in the returned store, while
+    /// subsequent [`set_state`](Self::set_state), [`remove_state`](Self::remove_state),
+    /// or [`clear_state`](Self::clear_state) mutations on either store remain isolated.
+    #[must_use]
+    pub fn fork_snapshot(&self) -> Self {
+        let snapshot = match read_lock(&self.0) {
+            Ok(guard) => guard.clone(),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "SharedState::fork_snapshot: lock poisoned, initializing empty snapshot"
+                );
+                HashMap::new()
+            }
+        };
+        Self(Arc::new(RwLock::new(snapshot)))
+    }
 }
 
 impl Default for SharedState {
@@ -100,7 +133,10 @@ impl core::fmt::Debug for SharedState {
 pub struct ToolContext {
     conversation_id: Option<String>,
     pub(super) state: SharedState,
-    pub(super) extensions: Arc<RwLock<HashMap<TypeId, Box<dyn Any + Send + Sync>>>>,
+    pub(super) extensions: ExtensionMap,
+    /// Read-only ancestor extension layers inherited on [`fork_connection`](Self::fork_connection)
+    /// (excluding connection-isolated extensions such as [`SurrogateVault`] and [`AllowDestructiveBatch`]).
+    pub(super) parent_extensions: Vec<ExtensionMap>,
 }
 
 impl Clone for ToolContext {
@@ -109,6 +145,7 @@ impl Clone for ToolContext {
             conversation_id: self.conversation_id.clone(),
             state: self.state.clone(),
             extensions: Arc::clone(&self.extensions),
+            parent_extensions: self.parent_extensions.clone(),
         }
     }
 }
@@ -126,6 +163,7 @@ impl core::fmt::Debug for ToolContext {
             .field("conversation_id", &self.conversation_id)
             .field("state", &self.state)
             .field("extensions_count", &count)
+            .field("parent_layers", &self.parent_extensions.len())
             .finish()
     }
 }
@@ -147,6 +185,7 @@ impl ToolContext {
             conversation_id: None,
             state: SharedState::new(),
             extensions: Arc::new(RwLock::new(HashMap::new())),
+            parent_extensions: Vec::new(),
         }
     }
 
@@ -160,12 +199,9 @@ impl ToolContext {
     /// Derive a new context that carries a different conversation ID while
     /// **sharing** this context's state store and typed extensions.
     ///
-    /// Both the shared state ([`SharedState`]) and the typed extension map are
-    /// held behind `Arc`, so the returned context reads and writes the *same*
-    /// underlying stores — only the conversation identity differs. This is the
-    /// primitive a single MCP server uses to serve **many** callers: each
-    /// connection derives its own identity from the shared, session-wide
-    /// context without duplicating extensions like injected session state.
+    /// For multi-tenant servers accepting untrusted peer connections where
+    /// mutable extensions ([`SurrogateVault`], [`AllowDestructiveBatch`]) must
+    /// remain isolated per connection, prefer [`fork_connection`](Self::fork_connection).
     ///
     /// ```rust
     /// use std::sync::Arc;
@@ -186,15 +222,31 @@ impl ToolContext {
             conversation_id: Some(conversation_id.into()),
             state: self.state.clone(),
             extensions: Arc::clone(&self.extensions),
+            parent_extensions: self.parent_extensions.clone(),
+        }
+    }
+
+    /// Fork an isolated per-connection context that inherits read-only server extensions
+    /// (such as injected `Arc<Config>` or session handles) and a snapshot of initial
+    /// [`SharedState`] defaults while isolating connection-local [`set_state`](Self::set_state)
+    /// and [`set_ext`](Self::set_ext) writes, [`SurrogateVault`], and [`AllowDestructiveBatch`].
+    #[must_use]
+    pub fn fork_connection(&self, caller_override: Option<&str>) -> Self {
+        let mut parents = Vec::with_capacity(self.parent_extensions.len() + 1);
+        parents.push(Arc::clone(&self.extensions));
+        parents.extend(self.parent_extensions.iter().cloned());
+        let conversation_id = caller_override
+            .map(ToOwned::to_owned)
+            .or_else(|| self.conversation_id.clone());
+        Self {
+            conversation_id,
+            state: self.state.fork_snapshot(),
+            extensions: Arc::new(RwLock::new(HashMap::new())),
+            parent_extensions: parents,
         }
     }
 
     /// Use an externally-provided [`SharedState`] as this context's state store.
-    ///
-    /// Use this when multiple `ToolContext` instances (e.g. successive tool
-    /// calls within the same agent) must read/write the **same** state store.
-    /// Obtain a handle from an existing context via
-    /// [`shared_state`](Self::shared_state).
     #[must_use]
     pub fn with_shared_state(mut self, state: SharedState) -> Self {
         self.state = state;
@@ -202,9 +254,6 @@ impl ToolContext {
     }
 
     /// Return a cloneable handle to this context's shared state store.
-    ///
-    /// Pass the returned handle to [`with_shared_state`](Self::with_shared_state)
-    /// on another context to share the same underlying store.
     #[must_use]
     pub fn shared_state(&self) -> SharedState {
         self.state.clone()
@@ -218,9 +267,6 @@ impl ToolContext {
 
     /// Retrieve a value from the shared state, returning `default` if the key
     /// is absent or the lock is poisoned.
-    ///
-    /// This method never fails — on a poisoned lock it logs a warning and
-    /// returns `default`. See the [struct-level docs](Self) for rationale.
     #[must_use]
     pub fn get_state(&self, key: &str, default: serde_json::Value) -> serde_json::Value {
         match read_lock(&self.state.0) {
@@ -234,14 +280,9 @@ impl ToolContext {
 
     /// Insert or update a value in the shared state.
     ///
-    /// Unlike [`get_state`](Self::get_state), this method returns `Err` on a
-    /// poisoned lock because silently dropping a write can cause subtle bugs.
-    /// See the [struct-level docs](Self) for rationale.
-    ///
     /// # Errors
     ///
-    /// Returns [`ToolError`]
-    /// if the lock is poisoned.
+    /// Returns [`ToolError`] if the lock is poisoned.
     pub fn set_state(&self, key: &str, value: serde_json::Value) -> Result<(), ToolError> {
         match write_lock(&self.state.0) {
             Ok(mut guard) => {
@@ -256,10 +297,10 @@ impl ToolContext {
         }
     }
 
-    /// Store a typed value in the extensions map.
+    /// Store a typed value in this context's local extensions map.
     ///
     /// Values are keyed by `TypeId`, so each concrete type can only appear
-    /// once. Typically used to store `Arc<T>` for shared, cloneable access.
+    /// once per layer. Typically used to store `Arc<T>` for shared, cloneable access.
     ///
     /// # Errors
     ///
@@ -283,20 +324,40 @@ impl ToolContext {
 
     /// Retrieve a clone of a typed value from the extensions map.
     ///
-    /// Returns `None` if no value of type `T` has been stored via
-    /// [`set_ext`](Self::set_ext).
+    /// Checks this context's own extension map first, then any inherited parent maps
+    /// (unless `T` is a connection-isolated type such as [`SurrogateVault`] or
+    /// [`AllowDestructiveBatch`]).
     #[must_use]
     pub fn get_ext<T: Clone + Send + Sync + 'static>(&self) -> Option<T> {
+        let tid = TypeId::of::<T>();
         match read_lock(&self.extensions) {
-            Ok(exts) => exts
-                .get(&TypeId::of::<T>())
-                .and_then(|v| v.downcast_ref::<T>())
-                .cloned(),
+            Ok(exts) => {
+                if let Some(found) = exts.get(&tid).and_then(|v| v.downcast_ref::<T>()).cloned() {
+                    return Some(found);
+                }
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "ToolContext::get_ext: lock poisoned, returning None");
-                None
+                return None;
             }
         }
+        if is_connection_isolated_extension::<T>() {
+            return None;
+        }
+        for parent in &self.parent_extensions {
+            match read_lock(parent) {
+                Ok(exts) => {
+                    if let Some(found) = exts.get(&tid).and_then(|v| v.downcast_ref::<T>()).cloned()
+                    {
+                        return Some(found);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "ToolContext::get_ext: parent lock poisoned");
+                }
+            }
+        }
+        None
     }
 
     /// Attach a pre-constructed [`SurrogateVault`] to this context. Chainable.
@@ -343,11 +404,11 @@ impl ToolContext {
         Ok(vault)
     }
 
-    /// Mint an opaque [`SurrogateHandle`] (`<surrogate:kind:id>`) in this context's [`SurrogateVault`].
+    /// Mint an opaque [`SurrogateHandle`] (`<surrogate:kind:nonce>`) in this context's [`SurrogateVault`].
     ///
     /// # Errors
     ///
-    /// Returns [`ToolError`] if `kind` or `raw_value` is invalid or a lock is poisoned.
+    /// Returns [`ToolError`] if `kind` or `raw_value` is invalid, capacity is exceeded, or a lock is poisoned.
     pub fn mint_surrogate(
         &self,
         kind: &str,
@@ -356,7 +417,21 @@ impl ToolContext {
         self.surrogate_vault()?.mint(kind, raw_value)
     }
 
-    /// Resolve all `<surrogate:kind:id>` tokens in `input` using this context's [`SurrogateVault`].
+    /// Resolve an exact `<surrogate:kind:nonce>` token bound to `expected_kind` using this context's [`SurrogateVault`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError`] if `token` is malformed, unknown, kind-mismatched, or a lock is poisoned.
+    pub fn resolve_surrogate_of_kind(
+        &self,
+        token: &str,
+        expected_kind: &str,
+    ) -> Result<String, ToolError> {
+        self.surrogate_vault()?
+            .resolve_token_of_kind(token, expected_kind)
+    }
+
+    /// Resolve all `<surrogate:kind:nonce>` tokens in `input` using this context's [`SurrogateVault`].
     ///
     /// Fails closed with [`ToolError`] if any surrogate token in `input` was not minted in this session.
     ///
@@ -367,7 +442,7 @@ impl ToolContext {
         self.surrogate_vault()?.resolve_in_str(input)
     }
 
-    /// Redact any registered raw secret/handle values in `output` back to their `<surrogate:kind:id>` tokens.
+    /// Redact any registered raw secret/handle values in `output` back to their `<surrogate:kind:nonce>` tokens.
     ///
     /// # Errors
     ///

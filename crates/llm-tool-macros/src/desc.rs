@@ -1,3 +1,8 @@
+use quote::{format_ident, quote};
+use syn::{ItemFn, LitStr, ext::IdentExt as _};
+
+use crate::{DescriptionInfo, ToolAttr, extract_doc_string};
+
 fn missing_params_context_error(
     span: proc_macro2::Span,
     source_label: &str,
@@ -11,11 +16,6 @@ fn missing_params_context_error(
         ),
     )
 }
-
-use quote::{format_ident, quote};
-use syn::{ItemFn, LitStr};
-
-use crate::{DescriptionInfo, ToolAttr, extract_doc_string};
 
 /// Convert the `env_vars` from a `ToolAttr` into a `Vec<(String, String)>`
 /// for passing to md-tmpl compilation functions.
@@ -119,27 +119,32 @@ fn build_context_description_method(
 }
 
 pub fn resolve_description(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<DescriptionInfo> {
+    resolve_description_parts(&func.attrs, &func.sig.ident, attr)
+}
+
+pub fn resolve_description_parts(
+    attrs: &[syn::Attribute],
+    fn_ident: &syn::Ident,
+    attr: Option<&ToolAttr>,
+) -> syn::Result<DescriptionInfo> {
     match attr {
-        // Inline description template or string.
         Some(
             tool_attr @ ToolAttr {
                 description_inline: Some(_),
                 ..
             },
-        ) => resolve_inline_description(tool_attr, &func.sig.ident),
-        // Template file.
+        ) => resolve_inline_description(tool_attr, fn_ident),
         Some(
             tool_attr @ ToolAttr {
                 description_file_path: Some(_),
                 ..
             },
-        ) => resolve_template_description(tool_attr, &func.sig.ident),
-        // No attribute, or attribute with only response_file — use doc comment.
+        ) => resolve_template_description(tool_attr, fn_ident),
         _ => {
-            let desc = extract_doc_string(&func.attrs);
+            let desc = extract_doc_string(attrs);
             if desc.is_empty() {
                 return Err(syn::Error::new_spanned(
-                    &func.sig.ident,
+                    fn_ident,
                     "#[llm_tool] functions must have a doc comment \
                      (used as the tool description), or use \
                      #[llm_tool(description = \"...\")]",
@@ -347,7 +352,7 @@ pub fn resolve_inline_description_impl(
         )
     } else if has_context {
         // Case 3: Runtime context function.
-        let desc_mod_name = format_ident!("__{}_desc_mod", fn_name);
+        let desc_mod_name = format_ident!("__{}_desc_mod", fn_name.unraw());
         let env_toks = env_tokens(attr);
         let helper_tokens = quote! {
             ::llm_tool::__md_tmpl_macros::template!(
@@ -427,7 +432,7 @@ pub fn resolve_context_description(args: ResolveContextArgs<'_>) -> syn::Result<
         ));
     }
 
-    let desc_mod_name = format_ident!("__{}_desc_mod", fn_name);
+    let desc_mod_name = format_ident!("__{}_desc_mod", fn_name.unraw());
     let rel_path_lit = syn::LitStr::new(rel_path, template_lit.span());
     let env_toks = env_tokens(attr);
     let helper_tokens = quote! {

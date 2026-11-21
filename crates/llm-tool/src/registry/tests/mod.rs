@@ -25,12 +25,12 @@ impl RustTool for SampleTool {
     type Params = PathParams;
     const NAME: &'static str = "sample";
     const DESCRIPTION: &'static str = "A sample tool";
-    async fn call(
+    fn call(
         &self,
         params: Self::Params,
         _ctx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        Ok(params.path.into())
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        core::future::ready(Ok(params.path.into()))
     }
 }
 
@@ -52,14 +52,14 @@ impl RustTool for RunCommandTool {
     type Params = RunCommandParams;
     const NAME: &'static str = "run_command";
     const DESCRIPTION: &'static str = "Runs a command.";
-    async fn call(
+    fn call(
         &self,
         params: Self::Params,
         _ctx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
         assert!(params.timeout.is_none());
         assert!(params.env.is_none());
-        Ok(format!("Ran: {}", params.command).into())
+        core::future::ready(Ok(format!("Ran: {}", params.command).into()))
     }
 }
 

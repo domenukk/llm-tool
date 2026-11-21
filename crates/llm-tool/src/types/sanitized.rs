@@ -1,7 +1,8 @@
 //! Value-level wrapper types ([`Sanitized<T>`] and [`Untrusted<T>`] / [`Quarantined<T>`])
-//! for declarative prompt-injection sanitization on tool return types and struct fields.
+//! for declarative prompt-injection sanitization on tool input parameters, return types,
+//! and struct fields.
 //!
-//! These wrappers can be used in two ways:
+//! These wrappers can be used in three ways:
 //!
 //! 1. **Return-type tagging on `#[llm_tool]` functions**:
 //!    ```rust
@@ -40,36 +41,33 @@
 //!        raw_snippet: Untrusted<String>,
 //!    }
 //!    ```
+//!
+//! 3. **Input parameter sanitization** (`Deserialize` automatically neutralizes control tokens,
+//!    invisible characters, and map keys on deserialization):
+//!    `fn search(query: Sanitized<String>) -> ...`
 
-use alloc::string::String;
-use core::ops::{Deref, DerefMut};
+use alloc::string::{String, ToString};
+use core::{
+    fmt,
+    ops::{Deref, DerefMut},
+};
 
-use serde::ser::{Serialize, Serializer};
+use serde::{
+    de::{Deserialize, Deserializer},
+    ser::{Serialize, Serializer},
+};
 
-use super::{Json, TOOL_OUTPUT_QUARANTINE_TAG, ToolOutput};
+use super::{
+    Json, OutputSanitization, TOOL_OUTPUT_QUARANTINE_TAG, ToolOutput,
+    sanitized_de::{InputSanitizeMode, SanitizingDeserializer},
+};
 
-/// Value wrapper neutralizing LLM control delimiters and breakout tags on serialization.
-///
-/// Neutralizes all known LLM control/turn/tool delimiters
-/// ([`DELIMITER_RULES`](super::DELIMITER_RULES)) and `<tool_output_quarantine>`
-/// breakout tags when converted into [`ToolOutput`] or serialized via [`serde::Serialize`].
-///
-/// Unlike [`Untrusted<T>`], `Sanitized<T>` does **not** wrap strings in an outer
-/// `<tool_output_quarantine>` XML envelope.
+/// Value wrapper neutralizing LLM control delimiters and breakout tags on both
+/// deserialization and serialization.
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Default,
-    serde::Deserialize,
-    schemars::JsonSchema,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, schemars::JsonSchema,
 )]
-#[serde(transparent)]
+#[schemars(transparent)]
 pub struct Sanitized<T>(pub T);
 
 impl<T> Sanitized<T> {
@@ -92,6 +90,12 @@ impl<T> Sanitized<T> {
     }
 }
 
+impl<T> AsRef<T> for Sanitized<T> {
+    fn as_ref(&self) -> &T {
+        &self.0
+    }
+}
+
 impl<T> Deref for Sanitized<T> {
     type Target = T;
 
@@ -109,6 +113,13 @@ impl<T> DerefMut for Sanitized<T> {
 impl<T> From<T> for Sanitized<T> {
     fn from(value: T) -> Self {
         Self(value)
+    }
+}
+
+impl<T: fmt::Display> fmt::Display for Sanitized<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let raw = self.0.to_string();
+        f.write_str(&OutputSanitization::SanitizeTokens.apply_str(&raw))
     }
 }
 
@@ -148,29 +159,22 @@ impl<T: Serialize> Serialize for Sanitized<T> {
     }
 }
 
-/// Value wrapper neutralizing delimiters and wrapping strings in `<tool_output_quarantine>`.
-///
-/// Neutralizes all known LLM control/turn/tool
-/// delimiters ([`DELIMITER_RULES`](super::DELIMITER_RULES)) and idempotently wraps
-/// strings in a `<tool_output_quarantine>` XML envelope.
-///
-/// Can be used both as a tool return type (`-> Untrusted<String>`, `-> Result<Untrusted<T>, E>`)
-/// and as a struct field wrapper (`field: Untrusted<String>`) for JSON and `md-tmpl` response
-/// templates.
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Sanitized<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        T::deserialize(SanitizingDeserializer::new(
+            deserializer,
+            InputSanitizeMode::SanitizeTokens,
+        ))
+        .map(Self)
+    }
+}
+
+/// Value wrapper neutralizing delimiters and wrapping strings in `<tool_output_quarantine>`
+/// across both deserialization and serialization.
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Default,
-    serde::Deserialize,
-    schemars::JsonSchema,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, schemars::JsonSchema,
 )]
-#[serde(transparent)]
+#[schemars(transparent)]
 pub struct Untrusted<T>(pub T);
 
 /// Type alias for [`Untrusted<T>`] emphasizing `<tool_output_quarantine>` boundary framing.
@@ -196,6 +200,12 @@ impl<T> Untrusted<T> {
     }
 }
 
+impl<T> AsRef<T> for Untrusted<T> {
+    fn as_ref(&self) -> &T {
+        &self.0
+    }
+}
+
 impl<T> Deref for Untrusted<T> {
     type Target = T;
 
@@ -213,6 +223,13 @@ impl<T> DerefMut for Untrusted<T> {
 impl<T> From<T> for Untrusted<T> {
     fn from(value: T) -> Self {
         Self(value)
+    }
+}
+
+impl<T: fmt::Display> fmt::Display for Untrusted<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let raw = self.0.to_string();
+        f.write_str(&OutputSanitization::Quarantine.apply_str(&raw))
     }
 }
 
@@ -236,7 +253,7 @@ impl From<Untrusted<&str>> for ToolOutput {
 
 impl<T: Serialize> From<Untrusted<Json<T>>> for ToolOutput {
     fn from(value: Untrusted<Json<T>>) -> Self {
-        Self::from(value.0).quarantined()
+        Self::from(Json(Sanitized(value.0.0))).quarantined()
     }
 }
 
@@ -249,5 +266,15 @@ impl<T: Serialize> Serialize for Untrusted<T> {
                 tag_spec: TOOL_OUTPUT_QUARANTINE_TAG,
             },
         )
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Untrusted<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        T::deserialize(SanitizingDeserializer::new(
+            deserializer,
+            InputSanitizeMode::Quarantine,
+        ))
+        .map(Self)
     }
 }

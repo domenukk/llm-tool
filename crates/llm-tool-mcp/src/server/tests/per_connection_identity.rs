@@ -20,16 +20,16 @@ impl RustTool for EchoExtTool {
     type Params = EmptyParams;
     const NAME: &'static str = "echo_ext";
     const DESCRIPTION: &'static str = "Returns '<caller>:<shared-label>'.";
-    async fn call(
+    fn call(
         &self,
         _params: Self::Params,
         ctx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
         let caller = ctx.conversation_id().unwrap_or("anonymous").to_owned();
         let label = ctx
             .get_ext::<Arc<String>>()
             .map_or_else(|| "no-label".to_owned(), |l| (*l).clone());
-        Ok(ToolOutput::new(format!("{caller}:{label}")))
+        std::future::ready(Ok(ToolOutput::new(format!("{caller}:{label}"))))
     }
 }
 

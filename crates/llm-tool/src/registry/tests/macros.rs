@@ -316,17 +316,19 @@ async fn dispatch_passes_context_to_tool() {
         const NAME: &'static str = "ctx_tool";
         const DESCRIPTION: &'static str = "Reads conversation_id from context.";
 
-        async fn call(
+        fn call(
             &self,
             _params: Self::Params,
             ctx: &ToolContext,
-        ) -> Result<ToolOutput, ToolError> {
+        ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
             let conv = ctx.conversation_id().unwrap_or("none");
             let count = ctx.get_state("call_count", serde_json::json!(0));
             let n = count.as_i64().expect("call_count state must be i64");
-            ctx.set_state("call_count", serde_json::json!(n + 1))
-                .map_err(|e| ToolError::new(format!("set_state failed: {e}")))?;
-            Ok(format!("conv={conv}, call={n}").into())
+            core::future::ready(
+                ctx.set_state("call_count", serde_json::json!(n + 1))
+                    .map(|()| format!("conv={conv}, call={n}").into())
+                    .map_err(|e| ToolError::new(format!("set_state failed: {e}"))),
+            )
         }
     }
 
@@ -360,15 +362,17 @@ impl RustTool for MetadataTool {
     const NAME: &'static str = "metadata_tool";
     const DESCRIPTION: &'static str = "Returns output with metadata.";
 
-    async fn call(
+    fn call(
         &self,
         params: Self::Params,
         _ctx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        ToolOutput::new(format!("processed: {}", params.path)).with_metadata(&ProcessMeta {
-            bytes_read: 1024,
-            source: params.path,
-        })
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        core::future::ready(
+            ToolOutput::new(format!("processed: {}", params.path)).with_metadata(&ProcessMeta {
+                bytes_read: 1024,
+                source: params.path,
+            }),
+        )
     }
 }
 
@@ -462,13 +466,13 @@ impl RustTool for MetadataErrorTool {
     const NAME: &'static str = "metadata_error_tool";
     const DESCRIPTION: &'static str = "Always fails with metadata.";
 
-    async fn call(
+    fn call(
         &self,
         _params: Self::Params,
         _ctx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        Err(ToolError::new("service unavailable")
-            .with_meta("retry_after_secs", serde_json::json!(30)))
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        core::future::ready(Err(ToolError::new("service unavailable")
+            .with_meta("retry_after_secs", serde_json::json!(30))))
     }
 }
 

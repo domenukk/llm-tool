@@ -1,6 +1,6 @@
 //! Strongly-typed Rust tool trait and type-erasure machinery.
 
-use alloc::{borrow::Cow, boxed::Box, format, string::ToString};
+use alloc::{borrow::Cow, boxed::Box, format};
 use core::{future::Future, pin::Pin};
 
 use super::types::{
@@ -57,10 +57,6 @@ pub struct EmptyParams {}
 /// ```
 pub trait RustTool: Send + Sync {
     /// The strongly-typed parameters struct.
-    ///
-    /// Derive [`serde::Deserialize`] and `JsonSchema` on your params struct.
-    /// `JsonSchema` auto-generates the parameter schema sent to the model;
-    /// `Deserialize` parses the model's JSON arguments into your struct.
     type Params: serde::de::DeserializeOwned + schemars::JsonSchema + Send;
 
     /// Unique tool name (e.g. `"flash_device"`).
@@ -99,21 +95,15 @@ pub trait RustTool: Send + Sync {
     const QUARANTINE_OUTPUT: bool = false;
 
     /// Automatic prompt-injection sanitization policy applied to this tool's output.
-    ///
-    /// Derived from the shorthands and provenance: [`OutputSanitization::Quarantine`] if
-    /// [`Self::QUARANTINE_OUTPUT`] or [`Self::PROVENANCE`] is an untrusted external source,
-    /// else [`OutputSanitization::SanitizeTokens`] if [`Self::SANITIZE_OUTPUT`] (the default),
-    /// else [`OutputSanitization::None`].
-    /// Override it to pick a tagged envelope, or [`OutputSanitization::None`] only for
-    /// output you fully control.
-    const OUTPUT_SANITIZATION: OutputSanitization =
-        if Self::QUARANTINE_OUTPUT || Self::PROVENANCE.is_untrusted_source() {
-            OutputSanitization::Quarantine
-        } else if Self::SANITIZE_OUTPUT {
-            OutputSanitization::SanitizeTokens
-        } else {
-            OutputSanitization::None
-        };
+    const OUTPUT_SANITIZATION: OutputSanitization = if Self::QUARANTINE_OUTPUT
+        || (Self::SANITIZE_OUTPUT && Self::PROVENANCE.is_untrusted_source())
+    {
+        OutputSanitization::Quarantine
+    } else if Self::SANITIZE_OUTPUT {
+        OutputSanitization::SanitizeTokens
+    } else {
+        OutputSanitization::None
+    };
 
     /// Return the execution effect of the tool.
     fn effect(&self) -> ToolEffect {
@@ -130,31 +120,23 @@ pub trait RustTool: Send + Sync {
         matches!(self.effect(), ToolEffect::ReadOnly)
     }
 
-    /// Return the automatic prompt-injection sanitization policy for this tool's output.
+    /// Return the automatic prompt-injection sanitization policy for this tool's output,
+    /// incorporating [`provenance`](Self::provenance) unless sanitization was explicitly disabled.
     fn output_sanitization(&self) -> OutputSanitization {
-        Self::OUTPUT_SANITIZATION
+        let base = Self::OUTPUT_SANITIZATION;
+        if !Self::SANITIZE_OUTPUT || base.is_none() {
+            base
+        } else {
+            base.at_least(self.provenance().default_sanitization())
+        }
     }
 
     /// Return the tool description used in [`ToolDefinition`].
-    ///
-    /// The default returns [`Self::DESCRIPTION`] (the static string from a
-    /// doc comment or template body). When using
-    /// `#[llm_tool(description_file = "...", context = ...)]`, the generated
-    /// implementation overrides this to render the template with runtime
-    /// variables on each call (parsed once via `LazyLock`), falling back to
-    /// [`Self::DESCRIPTION`] if a render ever fails.
     fn description(&self) -> Cow<'static, str> {
         Cow::Borrowed(Self::DESCRIPTION)
     }
 
     /// Execute the tool with typed parameters and an execution context.
-    ///
-    /// Async to support I/O-bound tools (HTTP, filesystem, subprocess).
-    /// Sync tools just compute and return — the async wrapper is zero-cost.
-    ///
-    /// The `ctx` parameter provides access to conversation metadata and a
-    /// shared key-value state store. Tools that don't need context can simply
-    /// ignore it with `_ctx`.
     ///
     /// # Errors
     ///
@@ -164,6 +146,17 @@ pub trait RustTool: Send + Sync {
         params: Self::Params,
         ctx: &ToolContext,
     ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send;
+
+    /// Internal unsanitized invocation hook overridden by `#[llm_tool]` so type-erased
+    /// and registry dispatch apply output/error sanitization in a single pass.
+    #[doc(hidden)]
+    fn __call_raw(
+        &self,
+        params: Self::Params,
+        ctx: &ToolContext,
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        self.call(params, ctx)
+    }
 }
 
 /// Shared [`alloc::sync::Arc`]-backed wrapper for any [`RustTool`] implementation,
@@ -235,6 +228,14 @@ impl<T: RustTool> RustTool for alloc::sync::Arc<T> {
     ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
         (**self).call(params, ctx)
     }
+
+    fn __call_raw(
+        &self,
+        params: Self::Params,
+        ctx: &ToolContext,
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        (**self).__call_raw(params, ctx)
+    }
 }
 
 impl<T: RustTool> RustTool for SharedRustTool<T> {
@@ -275,14 +276,17 @@ impl<T: RustTool> RustTool for SharedRustTool<T> {
     ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
         self.0.call(params, ctx)
     }
+
+    fn __call_raw(
+        &self,
+        params: Self::Params,
+        ctx: &ToolContext,
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        self.0.__call_raw(params, ctx)
+    }
 }
 
 /// Build a [`ToolDefinition`] from any [`RustTool`] implementor.
-///
-/// The generated schema is sanitized for broad compatibility with LLM
-/// SDKs that expect `"type"` to always be a single string
-/// (not the array form `["string", "null"]` that schemars emits for
-/// `Option<T>` fields).
 ///
 /// # Errors
 ///
@@ -295,7 +299,7 @@ pub fn definition_of<T: RustTool>(tool: &T) -> Result<ToolDefinition, ToolError>
             T::NAME
         ))
     })?;
-    sanitize_schema_types(&mut parameter_schema);
+    crate::types::quarantine::normalize_parameter_schema(&mut parameter_schema);
     Ok(ToolDefinition::with_effect(
         T::NAME,
         tool.description().into_owned(),
@@ -306,75 +310,44 @@ pub fn definition_of<T: RustTool>(tool: &T) -> Result<ToolDefinition, ToolError>
     .with_output_sanitization(tool.output_sanitization()))
 }
 
-/// Recursively sanitize JSON Schema `"type"` fields for Go genai compatibility.
-///
-/// `schemars` emits `"type": ["string", "null"]` for `Option<String>` fields
-/// (the nullable type-array form). The Go genai SDK's `Schema.Type`
-/// is a single `genai.Type` enum, so it can't unmarshal an array.
-///
-/// This function walks the schema tree and replaces any array `type` with the
-/// first non-`"null"` element. For example:
-/// - `["string", "null"]` → `"string"`
-/// - `["integer", "null"]` → `"integer"`
-const SCHEMA_TYPE_KEY: &str = "type";
-const SCHEMA_NULL_TYPE: &str = "null";
-
-fn sanitize_schema_types(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(map) => {
-            // If "type" is an array (e.g. ["string", "null"]), pick the first
-            // non-"null" element and replace with it as a scalar type.
-            let replacement = match map.get(SCHEMA_TYPE_KEY) {
-                Some(serde_json::Value::Array(arr)) => {
-                    let non_null = arr
-                        .iter()
-                        .find(
-                            |v| !matches!(v, serde_json::Value::String(s) if s == SCHEMA_NULL_TYPE),
-                        )
-                        .cloned();
-                    non_null.or_else(|| arr.first().cloned())
-                }
-                _ => None,
-            };
-            if let Some(val) = replacement {
-                map.insert(SCHEMA_TYPE_KEY.to_string(), val);
-            }
-            for val in map.values_mut() {
-                sanitize_schema_types(val);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for item in arr {
-                sanitize_schema_types(item);
-            }
-        }
-        _ => {}
-    }
-}
-
 /// Type-erased future returned when dispatching a boxed tool.
-///
-/// Produced by the crate-internal type-erasure layer that lets heterogeneous
-/// [`RustTool`] implementations share one registry.
 pub type BoxToolFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ToolOutput, ToolError>> + Send + 'a>>;
 
 /// Type-erased wrapper enabling heterogeneous tool storage.
-///
-/// Boxes the future from [`RustTool::call`] so we can store different tool
-/// types in the same `HashMap<String, Box<dyn ErasedTool>>`.
 pub trait ErasedTool: Send + Sync {
-    /// Deserialize `args` and call the handler, returning a boxed future.
+    /// Deserialize `args` and call the handler with the tool's own sanitization policy.
     fn call_erased<'a>(
         &'a self,
         args: serde_json::Value,
         ctx: &'a ToolContext,
     ) -> BoxToolFuture<'a>;
 
-    /// Deserialize `args_json` directly from a JSON string and call the handler,
-    /// returning a boxed future without intermediate DOM allocation.
+    /// Deserialize `args_json` directly from a JSON string and call the handler.
     fn call_erased_str<'a>(&'a self, args_json: &'a str, ctx: &'a ToolContext)
     -> BoxToolFuture<'a>;
+
+    /// Deserialize `args` and call the handler under an explicit `effective_policy` in one pass.
+    fn call_erased_with_policy<'a>(
+        &'a self,
+        args: serde_json::Value,
+        ctx: &'a ToolContext,
+        effective_policy: OutputSanitization,
+    ) -> BoxToolFuture<'a> {
+        let fut = self.call_erased(args, ctx);
+        Box::pin(async move { effective_policy.apply_result(fut.await) })
+    }
+
+    /// Deserialize `args_json` and call the handler under an explicit `effective_policy` in one pass.
+    fn call_erased_str_with_policy<'a>(
+        &'a self,
+        args_json: &'a str,
+        ctx: &'a ToolContext,
+        effective_policy: OutputSanitization,
+    ) -> BoxToolFuture<'a> {
+        let fut = self.call_erased_str(args_json, ctx);
+        Box::pin(async move { effective_policy.apply_result(fut.await) })
+    }
 }
 
 impl<T: RustTool> ErasedTool for T {
@@ -383,13 +356,8 @@ impl<T: RustTool> ErasedTool for T {
         args: serde_json::Value,
         ctx: &'a ToolContext,
     ) -> BoxToolFuture<'a> {
-        Box::pin(async move {
-            let params: T::Params = serde_json::from_value(args).map_err(|e| {
-                ToolError::new(format!("Failed to deserialize tool parameters: {e}"))
-            })?;
-            let output = self.call(params, ctx).await?;
-            Ok(self.output_sanitization().apply(output))
-        })
+        let policy = self.output_sanitization();
+        self.call_erased_with_policy(args, ctx, policy)
     }
 
     fn call_erased_str<'a>(
@@ -397,12 +365,45 @@ impl<T: RustTool> ErasedTool for T {
         args_json: &'a str,
         ctx: &'a ToolContext,
     ) -> BoxToolFuture<'a> {
+        let policy = self.output_sanitization();
+        self.call_erased_str_with_policy(args_json, ctx, policy)
+    }
+
+    fn call_erased_with_policy<'a>(
+        &'a self,
+        args: serde_json::Value,
+        ctx: &'a ToolContext,
+        effective_policy: OutputSanitization,
+    ) -> BoxToolFuture<'a> {
         Box::pin(async move {
-            let params: T::Params = serde_json::from_str(args_json).map_err(|e| {
-                ToolError::new(format!("Failed to deserialize tool parameters: {e}"))
-            })?;
-            let output = self.call(params, ctx).await?;
-            Ok(self.output_sanitization().apply(output))
+            let params: T::Params = match serde_json::from_value(args) {
+                Ok(p) => p,
+                Err(e) => {
+                    let err = ToolError::new(format!("Failed to deserialize tool parameters: {e}"));
+                    return Err(effective_policy.apply_error(err));
+                }
+            };
+            let res = self.__call_raw(params, ctx).await;
+            effective_policy.apply_result(res)
+        })
+    }
+
+    fn call_erased_str_with_policy<'a>(
+        &'a self,
+        args_json: &'a str,
+        ctx: &'a ToolContext,
+        effective_policy: OutputSanitization,
+    ) -> BoxToolFuture<'a> {
+        Box::pin(async move {
+            let params: T::Params = match serde_json::from_str(args_json) {
+                Ok(p) => p,
+                Err(e) => {
+                    let err = ToolError::new(format!("Failed to deserialize tool parameters: {e}"));
+                    return Err(effective_policy.apply_error(err));
+                }
+            };
+            let res = self.__call_raw(params, ctx).await;
+            effective_policy.apply_result(res)
         })
     }
 }

@@ -1,130 +1,69 @@
 //! Proc-macro crate for `llm-tool`.
 //!
-//! Provides the `#[llm_tool]` attribute macro that transforms a plain function
-//! into a strongly-typed [`RustTool`](https://docs.rs/llm-tool/latest/llm_tool/trait.RustTool.html)
-//! implementation.
-//!
-//! Tool descriptions can be loaded from `.tmpl.md` template files via
-//! `description_file = "..."`, and tool responses can be auto-rendered through
-//! templates via `response = "..."` or `response_file = "..."`.
+//! Provides `#[llm_tool]` (on both free functions and stateful `impl MyType` blocks),
+//! `#[llm_prompt]`, and `#[llm_resource]`.
+
+mod attr;
+mod builder_derive;
+pub(crate) mod desc;
+pub(crate) mod helpers;
+mod impl_macro;
+pub(crate) mod params;
 mod prompt_macro;
 mod resource_macro;
 mod response_struct_gen;
 
+pub(crate) use attr::{
+    ATTR_CONTEXT, ATTR_DESCRIPTION, ATTR_DESCRIPTION_FILE, ATTR_EFFECT, ATTR_ENV, ATTR_IDEMPOTENT,
+    ATTR_NAME, ATTR_PARAMS, ATTR_PROVENANCE, ATTR_QUARANTINE, ATTR_SANITIZATION, ATTR_SANITIZE,
+    MacroOutputSanitization, MacroToolEffect, ToolAttr, ToolAttrBuilder, ToolAttrKey,
+};
 use convert_case::{Case, Casing};
+pub(crate) use desc::{resolve_description, resolve_description_parts};
+pub(crate) use helpers::{
+    build_body_tokens, build_extension_extractions, build_field_attrs_and_default_helpers,
+    build_param_types_and_borrows, extract_doc_string, extract_params, parse_return_type,
+    parse_sig_return_type, reject_generic_signature, resolve_response_template,
+};
+pub(crate) use params::{ParamInfo, destructure_mut_tokens};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Ident, ItemFn, LitStr, parse_macro_input};
+use syn::{ItemFn, ext::IdentExt as _, parse_macro_input};
 
-/// Transforms a function into a `RustTool` implementation.
-///
-/// The macro generates:
-/// - A `{FnName}Params` struct deriving `Deserialize` and `JsonSchema`
-/// - A `{FnName}` unit struct (`PascalCase`) implementing `RustTool`
-///
-/// The tool **name** is the function name (`snake_case`).
-/// The tool **description** comes from one of the sources below.
-/// Parameter names and types come from the function signature.
-/// Doc comments on parameters become schema descriptions.
-///
-/// # Description sources (in priority order)
-///
-/// | Syntax | Cost |
-/// |--------|------|
-/// | `#[llm_tool]` + doc comment | Zero (static `&str`) |
-/// | `#[llm_tool(description = "inline text")]` | Zero (static `&str`) |
-/// | `#[llm_tool(response_file = "...")]` | Runtime render |
-/// | `#[llm_tool(description_file = "tools/x.tmpl.md")]` | Zero (compiled) |
-/// | `#[llm_tool(description_file = "...", params(k = "v"))]` | Zero (compiled) |
-/// | `#[llm_tool(description_file = "...", env(K = "v"))]` | Zero (compiled) |
-/// | `#[llm_tool(description_file = "...", context = fn)]` | Runtime `Cow::Owned` |
-///
-/// ## Inline description
-///
-/// Override or replace the doc comment with an inline string:
-///
-/// ```text
-/// #[llm_tool(description = "Get the current weather for a city.")]
-/// fn get_weather(/* … */) -> Result<String, ToolError> { /* … */ }
-/// ```
-///
-/// ## Template descriptions
-///
-/// Load the description from a `.tmpl.md` file:
-///
-/// ```text
-/// #[llm_tool(description_file = "tools/weather.tmpl.md")]
-/// fn get_weather(/* … */) -> Result<String, ToolError> { /* … */ }
-/// ```
-///
-/// For templates with variables, provide **compile-time** key-value pairs:
-///
-/// ```text
-/// #[llm_tool(description_file = "tools/weather.tmpl.md", params(api = "v3", env = "prod"))]
-/// fn get_weather(/* … */) -> Result<String, ToolError> { /* … */ }
-/// ```
-///
-/// The macro reads the template, validates all declared variables are
-/// provided, renders the description, and embeds the result as a static
-/// string — **zero runtime cost**.
-///
-/// For **runtime** context (e.g. values from config), provide a context function:
-///
-/// ```text
-/// #[llm_tool(description_file = "tools/weather.tmpl.md", context = build_ctx)]
-/// fn get_weather(/* … */) -> Result<String, ToolError> { /* … */ }
-/// ```
-///
-/// The context function signature is `fn(&ToolStruct) -> Context`.
-/// Templates are parsed once at startup via `LazyLock`.
-///
-/// ## Environment variables
-///
-/// Templates can declare `env:` variables in their frontmatter. These are
-/// separate from `params:` — they represent build-time configuration
-/// (deployment environment, API version, etc.) rather than template parameters.
-///
-/// In the template:
-/// ```text
-/// ---
-/// env:
-///   - API_VERSION = str
-///   - MAX_RETRIES = int := 3
-/// ---
-/// Uses API {{ API_VERSION }} with {{ MAX_RETRIES }} retries.
-/// ```
-///
-/// Supply values via the `env(...)` attribute:
-/// ```text
-/// #[llm_tool(description_file = "tools/api.tmpl.md", env(API_VERSION = "v5"))]
-/// fn query_api(/* … */) -> Result<String, ToolError> { /* … */ }
-/// ```
-///
-/// Env values are resolved at compile time, producing a zero-cost static
-/// description. They can be combined with `params(...)` or `context = fn`.
-///
-/// # Typed parameters
-///
-/// Parameters may use `&str` — the generated params struct stores an owned
-/// `String` and the macro auto-borrows it before passing to your function body.
-///
-/// # Response templates
-///
-/// When `response_file = "path/to/response.tmpl.md"` is provided, the
-/// tool's return value (`T: Serialize`) is used to build a template context
-/// via `Context::from_serialize`, rendered through the template, and returned
-/// as `ToolOutput`. The struct is also attached as metadata.
-///
-/// # Return types
-///
-/// The return type can be `Result<T, E>` or just `T` (infallible):
-///
-/// - **`T`**: `String` (wrapped as-is), `ToolOutput` (passed through), any
-///   `T: Serialize` (auto-serialized to JSON), or any `T: Into<ToolOutput>`
-/// - **`E`**: any `E: Into<ToolError>` — built-in for `String`, `ToolError`,
-///   `std::io::Error`, `serde_json::Error`
+pub(crate) const MACRO_LLM_TOOL: &str = "llm_tool";
+pub(crate) const MACRO_LLM_PROMPT: &str = "llm_prompt";
+pub(crate) const MACRO_LLM_RESOURCE: &str = "llm_resource";
+pub(crate) const ATTR_DOC: &str = "doc";
+
+pub(crate) const TYPE_OPTION: &str = "Option";
+pub(crate) const TYPE_TOOL_CONTEXT: &str = "ToolContext";
+pub(crate) const TYPE_STR: &str = "str";
+pub(crate) const TYPE_RESULT: &str = "Result";
+
+/// Transforms a free function or stateful `impl MyType` block into `RustTool` implementation(s).
 #[proc_macro_attribute]
 pub fn llm_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
+    match syn::parse::<syn::ItemImpl>(item.clone()) {
+        Ok(item_impl) => {
+            if !attr.is_empty() {
+                return syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    "#[llm_tool] on an `impl` block takes no arguments; place attributes on each `#[llm_tool(...)]` method inside the `impl` block",
+                )
+                .to_compile_error()
+                .into();
+            }
+            return match impl_macro::tool_impl_block(item_impl) {
+                Ok(tokens) => tokens.into(),
+                Err(err) => err.to_compile_error().into(),
+            };
+        }
+        Err(not_impl_err) => {
+            let has_msg = !not_impl_err.to_string().is_empty();
+            debug_assert!(has_msg);
+        }
+    }
+
     let func = parse_macro_input!(item as ItemFn);
     let tool_attr = if attr.is_empty() {
         None
@@ -172,755 +111,49 @@ pub fn llm_resource(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-// ── Attribute Parsing ───────────────────────────────────────────────────────
-
-/// Parsed `#[llm_tool(...)]` attribute.
-///
-/// Supports:
-/// - `description = "inline text"` — static or inline template description
-/// - `description_file = "path.tmpl.md"` — template file
-/// - `params(key = "value", ...)` — compile-time template variables
-/// - `env(KEY = "value", ...)` — compile-time environment variables for `env:` frontmatter
-/// - `context = path::to::fn` — runtime template context function
-/// - `response_file = "path.tmpl.md"` — response rendering template
-struct ToolAttr {
-    /// Inline description string (mutually exclusive with `description_file_path`).
-    description_inline: Option<LitStr>,
-    /// Path to a `.tmpl.md` file (mutually exclusive with `description_inline`).
-    description_file_path: Option<LitStr>,
-    /// Path to a response `.tmpl.md` file for auto-rendering tool output.
-    response_file_path: Option<LitStr>,
-    /// Inline response template string (mutually exclusive with `response_file_path`).
-    response_inline: Option<LitStr>,
-    /// Compile-time key-value pairs for template rendering.
-    /// Mutually exclusive with `context_fn`.
-    inline_params: Vec<(Ident, LitStr)>,
-    /// Compile-time environment variables for `env:` frontmatter declarations.
-    env_vars: Vec<(Ident, syn::Lit)>,
-    /// Runtime context function (mutually exclusive with `inline_params`).
-    context_fn: Option<syn::Path>,
-    idempotent: bool,
-    effect: MacroToolEffect,
-    provenance: helpers::MacroToolProvenance,
-    sanitization: MacroOutputSanitization,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub(crate) enum MacroToolEffect {
-    ReadOnly,
-    Mutating,
-    Destructive,
-}
-
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub(crate) enum MacroOutputSanitization {
-    None,
-    #[default]
-    SanitizeTokens,
-    Quarantine,
-    SanitizeTagged(syn::LitStr),
-    SanitizeWithNotice {
-        tag: syn::LitStr,
-        notice: syn::LitStr,
-    },
-}
-
-fn parse_effect_str(s: &str, span: proc_macro2::Span) -> syn::Result<MacroToolEffect> {
-    match s {
-        "read_only" | "ReadOnly" => Ok(MacroToolEffect::ReadOnly),
-        "mutating" | "Mutating" => Ok(MacroToolEffect::Mutating),
-        "destructive" | "Destructive" => Ok(MacroToolEffect::Destructive),
-        _ => Err(syn::Error::new(
-            span,
-            "expected `read_only`, `mutating`, or `destructive`",
-        )),
+/// Internal derive macro used for `md-tmpl` generated parameter and response structs.
+#[doc(hidden)]
+#[proc_macro_derive(ResponseStructBuilder, attributes(builder))]
+pub fn derive_response_struct_builder(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as syn::DeriveInput);
+    match builder_derive::derive_impl(&input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
     }
-}
-
-fn parse_sanitization_str(
-    s: &str,
-    span: proc_macro2::Span,
-) -> syn::Result<MacroOutputSanitization> {
-    match s {
-        "none" | "None" => Ok(MacroOutputSanitization::None),
-        "sanitize_tokens" | "sanitize" | "SanitizeTokens" => {
-            Ok(MacroOutputSanitization::SanitizeTokens)
-        }
-        "quarantine" | "Quarantine" => Ok(MacroOutputSanitization::Quarantine),
-        _ => Err(syn::Error::new(
-            span,
-            "expected `none`, `sanitize_tokens`, or `quarantine`",
-        )),
-    }
-}
-
-pub(crate) const MACRO_LLM_TOOL: &str = "llm_tool";
-pub(crate) const MACRO_LLM_PROMPT: &str = "llm_prompt";
-pub(crate) const MACRO_LLM_RESOURCE: &str = "llm_resource";
-
-pub(crate) const ATTR_DESCRIPTION: &str = "description";
-pub(crate) const ATTR_DESCRIPTION_FILE: &str = "description_file";
-pub(crate) const ATTR_RESPONSE_FILE: &str = "response_file";
-pub(crate) const ATTR_RESPONSE: &str = "response";
-pub(crate) const ATTR_PARAMS: &str = "params";
-pub(crate) const ATTR_CONTEXT: &str = "context";
-pub(crate) const ATTR_ENV: &str = "env";
-pub(crate) const ATTR_IDEMPOTENT: &str = "idempotent";
-pub(crate) const ATTR_EFFECT: &str = "effect";
-pub(crate) const ATTR_PROVENANCE: &str = "provenance";
-pub(crate) const ATTR_SANITIZE: &str = "sanitize";
-pub(crate) const ATTR_QUARANTINE: &str = "quarantine";
-pub(crate) const ATTR_SANITIZATION: &str = "sanitization";
-pub(crate) const ATTR_DOC: &str = "doc";
-
-pub(crate) const TYPE_OPTION: &str = "Option";
-pub(crate) const TYPE_TOOL_CONTEXT: &str = "ToolContext";
-pub(crate) const TYPE_STR: &str = "str";
-pub(crate) const TYPE_RESULT: &str = "Result";
-
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub(crate) enum ToolAttrKey {
-    Description,
-    DescriptionFile,
-    ResponseFile,
-    Response,
-    Params,
-    Env,
-    Context,
-    Idempotent,
-    Effect,
-    Provenance,
-    Sanitize,
-    Quarantine,
-    Sanitization,
-}
-
-impl ToolAttrKey {
-    pub(crate) const ALL: &'static [Self] = &[
-        Self::Description,
-        Self::DescriptionFile,
-        Self::Response,
-        Self::ResponseFile,
-        Self::Params,
-        Self::Env,
-        Self::Context,
-        Self::Idempotent,
-        Self::Effect,
-        Self::Provenance,
-        Self::Sanitize,
-        Self::Quarantine,
-        Self::Sanitization,
-    ];
-
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Description => ATTR_DESCRIPTION,
-            Self::DescriptionFile => ATTR_DESCRIPTION_FILE,
-            Self::ResponseFile => ATTR_RESPONSE_FILE,
-            Self::Response => ATTR_RESPONSE,
-            Self::Params => ATTR_PARAMS,
-            Self::Env => ATTR_ENV,
-            Self::Context => ATTR_CONTEXT,
-            Self::Idempotent => ATTR_IDEMPOTENT,
-            Self::Effect => ATTR_EFFECT,
-            Self::Provenance => ATTR_PROVENANCE,
-            Self::Sanitize => ATTR_SANITIZE,
-            Self::Quarantine => ATTR_QUARANTINE,
-            Self::Sanitization => ATTR_SANITIZATION,
-        }
-    }
-
-    pub(crate) fn expected_keys_error(span: proc_macro2::Span) -> syn::Error {
-        let mut parts: Vec<String> = Self::ALL
-            .iter()
-            .map(|k| format!("`{}`", k.as_str()))
-            .collect();
-        let last = parts.pop().expect("ToolAttrKey::ALL is non-empty");
-        let formatted = if parts.is_empty() {
-            last
-        } else {
-            format!("{}, or {last}", parts.join(", "))
-        };
-        syn::Error::new(span, format!("expected {formatted}"))
-    }
-}
-
-impl TryFrom<&syn::Ident> for ToolAttrKey {
-    type Error = syn::Error;
-
-    fn try_from(ident: &syn::Ident) -> Result<Self, Self::Error> {
-        let s = ident.to_string();
-        for &variant in Self::ALL {
-            if s == variant.as_str() {
-                return Ok(variant);
-            }
-        }
-        Err(Self::expected_keys_error(ident.span()))
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct ToolAttrBuilder {
-    description_inline: Option<syn::LitStr>,
-    description_file_path: Option<syn::LitStr>,
-    response_file_path: Option<syn::LitStr>,
-    response_inline: Option<syn::LitStr>,
-    idempotent: Option<syn::LitBool>,
-    effect: Option<(MacroToolEffect, proc_macro2::Span)>,
-    provenance: Option<(helpers::MacroToolProvenance, proc_macro2::Span)>,
-    sanitization: Option<(MacroOutputSanitization, proc_macro2::Span)>,
-    has_explicit_sanitization: bool,
-    inline_params: Vec<(syn::Ident, syn::LitStr)>,
-    env_vars: Vec<(syn::Ident, syn::Lit)>,
-    context_fn: Option<syn::Path>,
-}
-
-impl ToolAttrBuilder {
-    fn parse_params_attr(&mut self, input: syn::parse::ParseStream) -> syn::Result<()> {
-        let content;
-        syn::parenthesized!(content in input);
-        while !content.is_empty() {
-            let key: syn::Ident = content.parse()?;
-            let _: syn::Token![=] = content.parse()?;
-            let value: syn::LitStr = content.parse()?;
-            self.inline_params.push((key, value));
-            if !content.is_empty() {
-                let _: syn::Token![,] = content.parse()?;
-            }
-        }
-        Ok(())
-    }
-
-    fn parse_env_attr(&mut self, input: syn::parse::ParseStream) -> syn::Result<()> {
-        let content;
-        syn::parenthesized!(content in input);
-        while !content.is_empty() {
-            let key: syn::Ident = content.parse()?;
-            let _: syn::Token![=] = content.parse()?;
-            let value: syn::Lit = content.parse()?;
-            match &value {
-                syn::Lit::Str(_) | syn::Lit::Int(_) | syn::Lit::Float(_) | syn::Lit::Bool(_) => {}
-                other => {
-                    return Err(syn::Error::new(
-                        other.span(),
-                        "env values must be string, integer, float, or bool literals",
-                    ));
-                }
-            }
-            self.env_vars.push((key, value));
-            if !content.is_empty() {
-                let _: syn::Token![,] = content.parse()?;
-            }
-        }
-        Ok(())
-    }
-
-    fn parse_single(&mut self, input: syn::parse::ParseStream) -> syn::Result<()> {
-        let ident: syn::Ident = input.parse()?;
-        let key = ToolAttrKey::try_from(&ident)?;
-        self.parse_by_key(&ident, key, input)
-    }
-
-    fn parse_lit_str_attr(
-        field: &mut Option<syn::LitStr>,
-        ident: &syn::Ident,
-        key: ToolAttrKey,
-        input: syn::parse::ParseStream,
-    ) -> syn::Result<()> {
-        let _: syn::Token![=] = input.parse()?;
-        if field.is_some() {
-            return Err(syn::Error::new(
-                ident.span(),
-                format!("duplicate `{}` attribute", key.as_str()),
-            ));
-        }
-        *field = Some(input.parse::<syn::LitStr>()?);
-        Ok(())
-    }
-
-    fn parse_context_attr(
-        &mut self,
-        ident: &syn::Ident,
-        key: ToolAttrKey,
-        input: syn::parse::ParseStream,
-    ) -> syn::Result<()> {
-        let _: syn::Token![=] = input.parse()?;
-        if self.context_fn.is_some() {
-            return Err(syn::Error::new(
-                ident.span(),
-                format!("duplicate `{}` attribute", key.as_str()),
-            ));
-        }
-        self.context_fn = Some(input.parse::<syn::Path>()?);
-        Ok(())
-    }
-
-    fn parse_effect_attr(
-        &mut self,
-        ident: &syn::Ident,
-        key: ToolAttrKey,
-        input: syn::parse::ParseStream,
-    ) -> syn::Result<()> {
-        let _: syn::Token![=] = input.parse()?;
-        if self.effect.is_some() {
-            return Err(syn::Error::new(
-                ident.span(),
-                format!("duplicate `{}` attribute", key.as_str()),
-            ));
-        }
-        let span = input.span();
-        let eff = if input.peek(syn::Ident) {
-            let id: syn::Ident = input.parse()?;
-            parse_effect_str(id.to_string().as_str(), id.span())?
-        } else if input.peek(syn::LitStr) {
-            let lit: syn::LitStr = input.parse()?;
-            parse_effect_str(lit.value().as_str(), lit.span())?
-        } else {
-            return Err(syn::Error::new(
-                span,
-                "expected identifier or string literal (`read_only`, `mutating`, or `destructive`)",
-            ));
-        };
-        self.effect = Some((eff, span));
-        Ok(())
-    }
-
-    fn parse_idempotent_attr(
-        &mut self,
-        ident: &syn::Ident,
-        key: ToolAttrKey,
-        input: syn::parse::ParseStream,
-    ) -> syn::Result<()> {
-        if self.idempotent.is_some() {
-            return Err(syn::Error::new(
-                ident.span(),
-                format!("duplicate `{}` attribute", key.as_str()),
-            ));
-        }
-        if input.peek(syn::Token![=]) {
-            let _: syn::Token![=] = input.parse()?;
-            self.idempotent = Some(input.parse::<syn::LitBool>()?);
-        } else {
-            self.idempotent = Some(syn::LitBool::new(true, ident.span()));
-        }
-        Ok(())
-    }
-
-    fn parse_sanitize_attr(
-        &mut self,
-        ident: &syn::Ident,
-        key: ToolAttrKey,
-        input: syn::parse::ParseStream,
-    ) -> syn::Result<()> {
-        if self.has_explicit_sanitization {
-            return Err(syn::Error::new(
-                ident.span(),
-                "`sanitization` cannot be combined with `sanitize` or `quarantine`",
-            ));
-        }
-        if self.sanitization.is_some() {
-            return Err(syn::Error::new(
-                ident.span(),
-                format!("duplicate `{}` attribute", key.as_str()),
-            ));
-        }
-        if input.peek(syn::Token![=]) {
-            let _: syn::Token![=] = input.parse()?;
-            if input.peek(syn::LitBool) {
-                let lit = input.parse::<syn::LitBool>()?;
-                let mode = if lit.value() {
-                    MacroOutputSanitization::SanitizeTokens
-                } else {
-                    MacroOutputSanitization::None
-                };
-                self.sanitization = Some((mode, ident.span()));
-            } else if input.peek(syn::LitStr) {
-                let lit = input.parse::<syn::LitStr>()?;
-                let val = lit.value();
-                let mode = match val.as_str() {
-                    "none" | "None" => MacroOutputSanitization::None,
-                    "sanitize_tokens" | "sanitize" | "SanitizeTokens" => {
-                        MacroOutputSanitization::SanitizeTokens
-                    }
-                    "quarantine" | "Quarantine" => MacroOutputSanitization::Quarantine,
-                    _ => MacroOutputSanitization::SanitizeTagged(lit),
-                };
-                self.sanitization = Some((mode, ident.span()));
-            } else if input.peek(syn::Ident) {
-                let id: syn::Ident = input.parse()?;
-                let mode = parse_sanitization_str(&id.to_string(), id.span())?;
-                self.sanitization = Some((mode, ident.span()));
-            } else {
-                return Err(syn::Error::new(
-                    ident.span(),
-                    "expected boolean literal or tag string (e.g. `sanitize = true` or `sanitize = \"tag\"`)",
-                ));
-            }
-        } else if input.peek(syn::token::Paren) {
-            let content;
-            syn::parenthesized!(content in input);
-            let mut tag: Option<syn::LitStr> = None;
-            let mut notice: Option<syn::LitStr> = None;
-            while !content.is_empty() {
-                let k: syn::Ident = content.parse()?;
-                let _: syn::Token![=] = content.parse()?;
-                match k.to_string().as_str() {
-                    "tag" => {
-                        if tag.is_some() {
-                            return Err(syn::Error::new(k.span(), "duplicate `tag` argument"));
-                        }
-                        tag = Some(content.parse::<syn::LitStr>()?);
-                    }
-                    "notice" => {
-                        if notice.is_some() {
-                            return Err(syn::Error::new(k.span(), "duplicate `notice` argument"));
-                        }
-                        notice = Some(content.parse::<syn::LitStr>()?);
-                    }
-                    _ => {
-                        return Err(syn::Error::new(
-                            k.span(),
-                            "expected `tag` or `notice` in `sanitize(...)`",
-                        ));
-                    }
-                }
-                if !content.is_empty() {
-                    let _: syn::Token![,] = content.parse()?;
-                }
-            }
-            let Some(tag_lit) = tag else {
-                return Err(syn::Error::new(
-                    ident.span(),
-                    "`sanitize(...)` requires a `tag = \"...\"` parameter",
-                ));
-            };
-            let mode = if let Some(notice_lit) = notice {
-                MacroOutputSanitization::SanitizeWithNotice {
-                    tag: tag_lit,
-                    notice: notice_lit,
-                }
-            } else {
-                MacroOutputSanitization::SanitizeTagged(tag_lit)
-            };
-            self.sanitization = Some((mode, ident.span()));
-        } else {
-            // Bare `#[llm_tool(sanitize)]`
-            self.sanitization = Some((MacroOutputSanitization::SanitizeTokens, ident.span()));
-        }
-        Ok(())
-    }
-
-    fn parse_quarantine_attr(
-        &mut self,
-        ident: &syn::Ident,
-        key: ToolAttrKey,
-        input: syn::parse::ParseStream,
-    ) -> syn::Result<()> {
-        if self.has_explicit_sanitization {
-            return Err(syn::Error::new(
-                ident.span(),
-                "`sanitization` cannot be combined with `sanitize` or `quarantine`",
-            ));
-        }
-        if self.sanitization.is_some() {
-            return Err(syn::Error::new(
-                ident.span(),
-                format!("duplicate `{}` attribute", key.as_str()),
-            ));
-        }
-        if input.peek(syn::Token![=]) {
-            let _: syn::Token![=] = input.parse()?;
-            if input.peek(syn::LitBool) {
-                let lit = input.parse::<syn::LitBool>()?;
-                let mode = if lit.value() {
-                    MacroOutputSanitization::Quarantine
-                } else {
-                    MacroOutputSanitization::None
-                };
-                self.sanitization = Some((mode, ident.span()));
-            } else if input.peek(syn::LitStr) {
-                let lit = input.parse::<syn::LitStr>()?;
-                let val = lit.value();
-                let mode = if val == "quarantine" || val == "Quarantine" {
-                    MacroOutputSanitization::Quarantine
-                } else {
-                    MacroOutputSanitization::SanitizeTagged(lit)
-                };
-                self.sanitization = Some((mode, ident.span()));
-            } else {
-                return Err(syn::Error::new(
-                    ident.span(),
-                    "expected boolean literal or tag string (e.g. `quarantine = true` or `quarantine = \"tag\"`)",
-                ));
-            }
-        } else {
-            // Bare `#[llm_tool(quarantine)]`
-            self.sanitization = Some((MacroOutputSanitization::Quarantine, ident.span()));
-        }
-        Ok(())
-    }
-
-    fn parse_sanitization_attr(
-        &mut self,
-        ident: &syn::Ident,
-        key: ToolAttrKey,
-        input: syn::parse::ParseStream,
-    ) -> syn::Result<()> {
-        let _: syn::Token![=] = input.parse()?;
-        if self.has_explicit_sanitization || self.sanitization.is_some() {
-            return Err(syn::Error::new(
-                ident.span(),
-                format!("duplicate `{}` attribute", key.as_str()),
-            ));
-        }
-        let span = input.span();
-        let mode = if input.peek(syn::Ident) {
-            let id: syn::Ident = input.parse()?;
-            parse_sanitization_str(id.to_string().as_str(), id.span())?
-        } else if input.peek(syn::LitStr) {
-            let lit: syn::LitStr = input.parse()?;
-            parse_sanitization_str(lit.value().as_str(), lit.span())?
-        } else {
-            return Err(syn::Error::new(
-                span,
-                "expected identifier or string literal (`none`, `sanitize_tokens`, or `quarantine`)",
-            ));
-        };
-        self.has_explicit_sanitization = true;
-        self.sanitization = Some((mode, span));
-        Ok(())
-    }
-
-    pub(crate) fn parse_by_key(
-        &mut self,
-        ident: &syn::Ident,
-        key: ToolAttrKey,
-        input: syn::parse::ParseStream,
-    ) -> syn::Result<()> {
-        match key {
-            ToolAttrKey::Description => {
-                Self::parse_lit_str_attr(&mut self.description_inline, ident, key, input)?;
-            }
-            ToolAttrKey::DescriptionFile => {
-                Self::parse_lit_str_attr(&mut self.description_file_path, ident, key, input)?;
-            }
-            ToolAttrKey::ResponseFile => {
-                Self::parse_lit_str_attr(&mut self.response_file_path, ident, key, input)?;
-            }
-            ToolAttrKey::Response => {
-                Self::parse_lit_str_attr(&mut self.response_inline, ident, key, input)?;
-            }
-            ToolAttrKey::Params => {
-                self.parse_params_attr(input)?;
-            }
-            ToolAttrKey::Env => {
-                self.parse_env_attr(input)?;
-            }
-            ToolAttrKey::Context => {
-                self.parse_context_attr(ident, key, input)?;
-            }
-            ToolAttrKey::Idempotent => {
-                self.parse_idempotent_attr(ident, key, input)?;
-            }
-            ToolAttrKey::Effect => {
-                self.parse_effect_attr(ident, key, input)?;
-            }
-            ToolAttrKey::Provenance => {
-                let _: syn::Token![=] = input.parse()?;
-                if self.provenance.is_some() {
-                    return Err(syn::Error::new(
-                        ident.span(),
-                        format!("duplicate `{}` attribute", key.as_str()),
-                    ));
-                }
-                let span = input.span();
-                let prov = if input.peek(syn::Ident) {
-                    let id: syn::Ident = input.parse()?;
-                    helpers::parse_provenance_str(id.to_string().as_str(), id.span())?
-                } else if input.peek(syn::LitStr) {
-                    let lit: syn::LitStr = input.parse()?;
-                    helpers::parse_provenance_str(lit.value().as_str(), lit.span())?
-                } else {
-                    return Err(syn::Error::new(
-                        span,
-                        "expected identifier or string literal (`trusted`, `workspace_local`, `private_data`, `external_mcp`, or `untrusted_network`)",
-                    ));
-                };
-                self.provenance = Some((prov, span));
-            }
-            ToolAttrKey::Sanitize => {
-                self.parse_sanitize_attr(ident, key, input)?;
-            }
-            ToolAttrKey::Quarantine => {
-                self.parse_quarantine_attr(ident, key, input)?;
-            }
-            ToolAttrKey::Sanitization => {
-                self.parse_sanitization_attr(ident, key, input)?;
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn build(self) -> syn::Result<ToolAttr> {
-        validate_tool_attr(&self)?;
-
-        let effect = match (self.effect, self.idempotent) {
-            (Some((eff, _)), _) => eff,
-            (None, Some(idemp)) => {
-                if idemp.value() {
-                    MacroToolEffect::ReadOnly
-                } else {
-                    MacroToolEffect::Mutating
-                }
-            }
-            (None, None) => MacroToolEffect::Mutating,
-        };
-        let idempotent = matches!(effect, MacroToolEffect::ReadOnly);
-        let provenance = self
-            .provenance
-            .map_or_else(helpers::MacroToolProvenance::default, |(p, _)| p);
-
-        let sanitization = self.sanitization.map_or_else(
-            || {
-                if provenance.is_untrusted_source() {
-                    MacroOutputSanitization::Quarantine
-                } else {
-                    MacroOutputSanitization::default()
-                }
-            },
-            |(mode, _)| mode,
-        );
-
-        Ok(ToolAttr {
-            description_inline: self.description_inline,
-            description_file_path: self.description_file_path,
-            response_file_path: self.response_file_path,
-            response_inline: self.response_inline,
-            inline_params: self.inline_params,
-            env_vars: self.env_vars,
-            context_fn: self.context_fn,
-            idempotent,
-            effect,
-            provenance,
-            sanitization,
-        })
-    }
-}
-
-impl syn::parse::Parse for ToolAttr {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let mut builder = ToolAttrBuilder::default();
-
-        while !input.is_empty() {
-            builder.parse_single(input)?;
-            if !input.is_empty() {
-                let _: syn::Token![,] = input.parse()?;
-            }
-        }
-
-        builder.build()
-    }
-}
-
-fn validate_tool_attr(builder: &ToolAttrBuilder) -> syn::Result<()> {
-    if builder.description_inline.is_some() && builder.description_file_path.is_some() {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "`description` and `description_file` are mutually exclusive",
-        ));
-    }
-
-    if builder.response_file_path.is_some() && builder.response_inline.is_some() {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "`response` and `response_file` are mutually exclusive",
-        ));
-    }
-
-    let has_inline_params = !builder.inline_params.is_empty();
-    let has_context_fn = builder.context_fn.is_some();
-    let has_env = !builder.env_vars.is_empty();
-
-    if has_inline_params && has_context_fn {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "`params(...)` and `context = ...` are mutually exclusive; \
-             use `params` for compile-time values or `context` for runtime values",
-        ));
-    }
-
-    if has_inline_params
-        && builder.description_file_path.is_none()
-        && builder.description_inline.is_none()
-    {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "`params(...)` requires `description_file = \"...\"` or `description = \"...\"`",
-        ));
-    }
-
-    if has_context_fn
-        && builder.description_file_path.is_none()
-        && builder.description_inline.is_none()
-    {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "`context = ...` requires `description_file = \"...\"` or `description = \"...\"`",
-        ));
-    }
-
-    if has_env && builder.description_file_path.is_none() && builder.description_inline.is_none() {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "`env(...)` requires `description_file = \"...\"` or `description = \"...\"`",
-        ));
-    }
-
-    if let (Some(idemp), Some((eff, span))) = (&builder.idempotent, &builder.effect) {
-        let idemp_val = idemp.value();
-        let eff_is_read_only = matches!(eff, MacroToolEffect::ReadOnly);
-        if idemp_val != eff_is_read_only {
-            return Err(syn::Error::new(
-                *span,
-                "conflicting `idempotent` and `effect` attributes: `idempotent = true` requires `effect = read_only`",
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-// ── Implementation ──────────────────────────────────────────────────────────
-
-/// Parsed information about a single function parameter.
-struct ParamInfo {
-    name: syn::Ident,
-    ty: Box<syn::Type>,
-    doc_attrs: Vec<syn::Attribute>,
-    is_context: bool,
-    is_mut: bool,
 }
 
 /// Information about the function's return type.
-enum ReturnInfo {
-    /// `Result<T, E>` — fallible tool.
+pub(crate) enum ReturnInfo {
+    /// `Result<T, E>` — fallible tool/prompt/resource.
     ResultType {
         ok_type: Box<syn::Type>,
         err_type: Box<syn::Type>,
     },
-    /// Bare `T` — infallible tool.
+    /// Bare `T` — infallible tool/prompt/resource.
     BareType,
 }
 
-fn validate_params(all_params: &[ParamInfo], sig: &syn::Signature) -> syn::Result<()> {
-    let ctx_count = all_params.iter().filter(|p| p.is_context).count();
+/// Structured output from description resolution.
+pub(crate) struct DescriptionInfo {
+    /// Value for `const DESCRIPTION`. For dynamic descriptions, this contains the raw template body.
+    pub static_description: String,
+    /// Helper tokens to emit in the crate scope (e.g. `static TEMPLATE`).
+    pub helper_tokens: proc_macro2::TokenStream,
+    /// Implementation of the `description(&self)` method if dynamic.
+    pub description_method: Option<proc_macro2::TokenStream>,
+    /// Cargo dependency-tracking tokens.
+    pub dep_tracking: proc_macro2::TokenStream,
+}
+
+pub(crate) fn validate_params(all_params: &[ParamInfo], sig: &syn::Signature) -> syn::Result<()> {
+    let ctx_count = all_params.iter().filter(|p| p.is_context()).count();
     if ctx_count > 1 {
         return Err(syn::Error::new_spanned(
             sig,
             "#[llm_tool] functions can accept at most one ToolContext parameter",
         ));
     }
-    for param in all_params.iter().filter(|p| !p.is_context) {
+    for param in all_params.iter().filter(|p| p.is_schema_input()) {
         if param.doc_attrs.is_empty() {
             return Err(syn::Error::new_spanned(
                 &param.name,
@@ -935,24 +168,10 @@ fn validate_params(all_params: &[ParamInfo], sig: &syn::Signature) -> syn::Resul
     Ok(())
 }
 
-fn resolve_effect_and_sanitization_tokens(
+pub(crate) fn resolve_sanitization_tokens(
     attr: Option<&ToolAttr>,
     crate_path: &proc_macro2::TokenStream,
-) -> (
-    proc_macro2::TokenStream,
-    bool,
-    proc_macro2::TokenStream,
-    bool,
-    bool,
-) {
-    let effect_val = attr.map_or(MacroToolEffect::Mutating, |a| a.effect);
-    let effect_tokens = match effect_val {
-        MacroToolEffect::ReadOnly => quote!(#crate_path::ToolEffect::ReadOnly),
-        MacroToolEffect::Destructive => quote!(#crate_path::ToolEffect::Destructive),
-        MacroToolEffect::Mutating => quote!(#crate_path::ToolEffect::Mutating),
-    };
-    let idempotent_bool = attr.is_some_and(|a| a.idempotent);
-
+) -> (proc_macro2::TokenStream, bool, bool) {
     let san_val = attr.map_or_else(MacroOutputSanitization::default, |a| a.sanitization.clone());
     let san_tokens = match &san_val {
         MacroOutputSanitization::None => quote!(#crate_path::OutputSanitization::None),
@@ -974,6 +193,28 @@ fn resolve_effect_and_sanitization_tokens(
             | MacroOutputSanitization::SanitizeTagged(_)
             | MacroOutputSanitization::SanitizeWithNotice { .. }
     );
+    (san_tokens, sanitize_bool, quarantine_bool)
+}
+
+pub(crate) fn resolve_effect_and_sanitization_tokens(
+    attr: Option<&ToolAttr>,
+    crate_path: &proc_macro2::TokenStream,
+) -> (
+    proc_macro2::TokenStream,
+    bool,
+    proc_macro2::TokenStream,
+    bool,
+    bool,
+) {
+    let effect_val = attr.map_or(MacroToolEffect::Mutating, |a| a.effect);
+    let effect_tokens = match effect_val {
+        MacroToolEffect::ReadOnly => quote!(#crate_path::ToolEffect::ReadOnly),
+        MacroToolEffect::Destructive => quote!(#crate_path::ToolEffect::Destructive),
+        MacroToolEffect::Mutating => quote!(#crate_path::ToolEffect::Mutating),
+    };
+    let idempotent_bool = attr.is_some_and(|a| a.idempotent);
+    let (san_tokens, sanitize_bool, quarantine_bool) =
+        resolve_sanitization_tokens(attr, crate_path);
     (
         effect_tokens,
         idempotent_bool,
@@ -983,36 +224,64 @@ fn resolve_effect_and_sanitization_tokens(
     )
 }
 
-fn build_tool_call_method(
+pub(crate) fn build_tool_call_methods(
     is_async: bool,
     crate_path: &proc_macro2::TokenStream,
     inner: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     if is_async {
         quote! {
-            async fn call(&self, params: Self::Params, _ctx: &#crate_path::ToolContext) -> ::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError> {
+            #[doc(hidden)]
+            async fn __call_raw(&self, params: Self::Params, _ctx: &#crate_path::ToolContext) -> ::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError> {
                 #inner
-                __raw_res.map(|__out| Self::OUTPUT_SANITIZATION.apply(__out))
+                __raw_res
+            }
+
+            async fn call(&self, params: Self::Params, _ctx: &#crate_path::ToolContext) -> ::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError> {
+                let __res = self.__call_raw(params, _ctx).await;
+                #crate_path::RustTool::output_sanitization(self).apply_result(__res)
             }
         }
     } else {
         quote! {
-            fn call(&self, params: Self::Params, _ctx: &#crate_path::ToolContext) -> ::core::future::Ready<::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError>> {
+            #[doc(hidden)]
+            fn __call_raw(&self, params: Self::Params, _ctx: &#crate_path::ToolContext) -> ::core::future::Ready<::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError>> {
                 ::core::future::ready((|| -> ::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError> {
                     #inner
-                    __raw_res.map(|__out| Self::OUTPUT_SANITIZATION.apply(__out))
+                    __raw_res
                 })())
             }
+
+            fn call(&self, params: Self::Params, _ctx: &#crate_path::ToolContext) -> ::core::future::Ready<::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError>> {
+                let __res = self.__call_raw(params, _ctx).into_inner();
+                ::core::future::ready(#crate_path::RustTool::output_sanitization(self).apply_result(__res))
+            }
         }
+    }
+}
+
+pub(crate) fn extract_ok_type<'a>(
+    sig: &'a syn::Signature,
+    return_info: &'a ReturnInfo,
+) -> Option<&'a syn::Type> {
+    match return_info {
+        ReturnInfo::ResultType { ok_type, .. } => Some(ok_type.as_ref()),
+        ReturnInfo::BareType => match &sig.output {
+            syn::ReturnType::Type(_, ty) => Some(ty.as_ref()),
+            syn::ReturnType::Default => None,
+        },
     }
 }
 
 fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2::TokenStream> {
     let crate_path = quote! { ::llm_tool };
     let fn_name = &func.sig.ident;
-    reject_generic_signature(func, MACRO_LLM_TOOL)?;
-    let tool_name_str = fn_name.to_string();
-    let struct_name = format_ident!("{}", tool_name_str.to_case(Case::Pascal));
+    reject_generic_signature(&func.sig, MACRO_LLM_TOOL)?;
+    let fn_unraw = fn_name.unraw().to_string();
+    let tool_name_str = attr
+        .and_then(|a| a.name_override.as_ref())
+        .map_or_else(|| fn_unraw.clone(), syn::LitStr::value);
+    let struct_name = format_ident!("{}", fn_unraw.to_case(Case::Pascal));
     let params_name = format_ident!("{}Params", struct_name);
 
     let DescriptionInfo {
@@ -1022,27 +291,32 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
         dep_tracking,
     } = resolve_description(func, attr)?;
 
-    let response_info = resolve_response_template(attr, &struct_name, fn_name)?;
     let all_params = extract_params(func, MACRO_LLM_TOOL)?;
     validate_params(&all_params, &func.sig)?;
-    let ctx_param = all_params.iter().find(|p| p.is_context);
-    let params: Vec<&ParamInfo> = all_params.iter().filter(|p| !p.is_context).collect();
+    let ctx_param = all_params.iter().find(|p| p.is_context());
+    let schema_params: Vec<&ParamInfo> =
+        all_params.iter().filter(|p| p.is_schema_input()).collect();
     let return_info = parse_return_type(func, MACRO_LLM_TOOL)?;
+    let ok_type = extract_ok_type(&func.sig, &return_info);
+    let response_info = resolve_response_template(attr, &struct_name, fn_name, ok_type)?;
 
-    let param_names: Vec<_> = params.iter().map(|p| &p.name).collect();
-    let param_descriptions: Vec<String> = params
+    let param_names: Vec<_> = schema_params.iter().map(|p| &p.name).collect();
+    let param_descriptions: Vec<String> = schema_params
         .iter()
         .map(|p| extract_doc_string(&p.doc_attrs))
         .collect();
 
-    let (param_struct_types, borrow_bindings) = build_param_types_and_borrows(&params);
-    let serde_defaults = build_serde_defaults(&params);
+    let (param_struct_types, borrow_bindings) = build_param_types_and_borrows(&schema_params);
+    let (field_attrs, default_helper_fns) =
+        build_field_attrs_and_default_helpers(&fn_unraw, &schema_params, &param_struct_types);
+    let mut_tokens = destructure_mut_tokens(&schema_params);
+    let ext_extractions = build_extension_extractions(&all_params, &crate_path);
     let body_tokens = build_body_tokens(func, &return_info, &crate_path, &response_info);
 
     let vis = &func.vis;
     let params_doc = format!("Auto-generated parameters for the [`{struct_name}`] tool.");
     let struct_doc = format!(
-        "Auto-generated tool struct. See the `#[llm_tool]`-annotated function `{fn_name}` for the implementation."
+        "Auto-generated tool struct. See the `#[llm_tool]`-annotated function `{fn_unraw}` for the implementation."
     );
 
     let ctx_binding = ctx_param.map_or_else(
@@ -1052,17 +326,6 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
             quote! { let #ctx_name = _ctx; }
         },
     );
-
-    let mut_tokens: Vec<proc_macro2::TokenStream> = params
-        .iter()
-        .map(|p| {
-            if p.is_mut {
-                quote! { mut }
-            } else {
-                quote! {}
-            }
-        })
-        .collect();
 
     let response_dep_tracking = &response_info.dep_tracking;
     let response_helper_tokens = &response_info.helper_tokens;
@@ -1076,19 +339,21 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
         use #crate_path::__private::SerializeFallback as _;
         let #params_name { #( #mut_tokens #param_names, )* } = params;
         #( #borrow_bindings )*
+        #ext_extractions
         #ctx_binding
         let __raw_res: ::core::result::Result<#crate_path::ToolOutput, #crate_path::ToolError> = {
             #body_tokens
         };
     };
-    let call_method =
-        build_tool_call_method(func.sig.asyncness.is_some(), &crate_path, &call_inner);
+    let call_methods =
+        build_tool_call_methods(func.sig.asyncness.is_some(), &crate_path, &call_inner);
 
     Ok(quote! {
         #dep_tracking
         #response_dep_tracking
         #helper_tokens
         #response_helper_tokens
+        #default_helper_fns
 
         #[doc = #params_doc]
         #[derive(::serde::Deserialize, ::schemars::JsonSchema)]
@@ -1096,7 +361,7 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
             #(
                 #[doc = #param_descriptions]
                 #[schemars(description = #param_descriptions)]
-                #serde_defaults
+                #field_attrs
                 pub #param_names: #param_struct_types,
             )*
         }
@@ -1117,29 +382,7 @@ fn tool_impl(func: &ItemFn, attr: Option<&ToolAttr>) -> syn::Result<proc_macro2:
 
             #description_method
 
-            #call_method
+            #call_methods
         }
     })
 }
-
-// ── Description Resolution ──────────────────────────────────────────────────
-
-/// Structured output from description resolution.
-struct DescriptionInfo {
-    /// Value for `const DESCRIPTION`. For dynamic descriptions, this contains the raw template body.
-    static_description: String,
-    /// Helper tokens to emit in the crate scope (e.g. `static TEMPLATE`).
-    helper_tokens: proc_macro2::TokenStream,
-    /// Implementation of the `description(&self)` method if dynamic.
-    description_method: Option<proc_macro2::TokenStream>,
-    /// Cargo dependency-tracking tokens.
-    dep_tracking: proc_macro2::TokenStream,
-}
-
-pub(crate) mod desc;
-pub(crate) mod helpers;
-pub(crate) use desc::resolve_description;
-pub(crate) use helpers::{
-    build_body_tokens, build_param_types_and_borrows, build_serde_defaults, extract_doc_string,
-    extract_params, parse_return_type, reject_generic_signature, resolve_response_template,
-};

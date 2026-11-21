@@ -46,12 +46,12 @@ impl RustTool for ManualRawTool {
     const DESCRIPTION: &'static str = "Returns its input verbatim.";
     const OUTPUT_SANITIZATION: OutputSanitization = OutputSanitization::None;
 
-    async fn call(
+    fn call(
         &self,
         params: Self::Params,
         _ctx: &ToolContext,
-    ) -> Result<ToolOutput, ToolError> {
-        Ok(params.path.into())
+    ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+        core::future::ready(Ok(params.path.into()))
     }
 }
 
@@ -119,12 +119,12 @@ fn legacy_shorthands_stay_compatible_and_secure_by_default() {
         const DESCRIPTION: &'static str = "Opts out via SANITIZE_OUTPUT.";
         const SANITIZE_OUTPUT: bool = false;
 
-        async fn call(
+        fn call(
             &self,
             params: Self::Params,
             _ctx: &ToolContext,
-        ) -> Result<ToolOutput, ToolError> {
-            Ok(params.path.into())
+        ) -> impl Future<Output = Result<ToolOutput, ToolError>> + Send {
+            core::future::ready(Ok(params.path.into()))
         }
     }
 
