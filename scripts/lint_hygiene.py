@@ -492,11 +492,62 @@ def run_long_file_check(
     return False
 
 
+README_SYNC_PAIRS: tuple[tuple[str, str], ...] = (
+    ("README.md", "crates/llm-tool/README.md"),
+)
+
+
+def configure_stdio_utf8() -> None:
+    """Ensure stdout/stderr can print Unicode markers on legacy Windows codepages."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+def run_readme_sync_check(root_dir: Path | None = None) -> bool:
+    """Ensure mirrored crate README files are regular files matching the root README."""
+    base = root_dir if root_dir is not None else Path()
+    print("=== Synced README mirrors ===")
+    hits: list[str] = []
+    for src_rel, dst_rel in README_SYNC_PAIRS:
+        src = base / src_rel
+        dst = base / dst_rel
+        if not src.exists() or (not dst.exists() and not dst.is_symlink()):
+            continue
+        if dst.is_symlink():
+            hits.append(
+                f"  {dst_rel}: symlink breaks Windows checkouts when core.symlinks=false"
+            )
+            continue
+        try:
+            src_text = src.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+            dst_text = dst.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+        except OSError as err:
+            hits.append(f"  {dst_rel}: unreadable ({err})")
+            continue
+        if src_text != dst_text:
+            hits.append(
+                f"  {dst_rel}: out of sync with {src_rel} (copy {src_rel} to {dst_rel})"
+            )
+    if hits:
+        for hit in hits:
+            print(hit)
+        print(
+            "^^^ Keep mirrored crate READMEs as regular files identical to the root README "
+            "(symlinks break Windows checkouts, doctests, and `cargo publish`)."
+        )
+        return True
+    print("  ✓ clean")
+    return False
+
+
 def check_workspace(root_dir: Path) -> bool:
     """Run all hygiene checks on `root_dir`. Returns True if any violation is found."""
     failed = run_pattern_checks(root_dir)
     failed = run_bare_nolint_check(root_dir) or failed
     failed = run_long_file_check(root_dir) or failed
+    failed = run_readme_sync_check(root_dir) or failed
     return failed
 
 
@@ -504,6 +555,7 @@ def check_workspace(root_dir: Path) -> bool:
 
 
 def main() -> int:
+    configure_stdio_utf8()
     repo_root = Path(__file__).resolve().parent.parent
     os.chdir(repo_root)
     failed = check_workspace(repo_root)

@@ -1,0 +1,4 @@
+# Enforce Unix (LF) line endings across all platforms so rustfmt
+# (`newline_style = "Unix"`), `just --fmt`, templates, and UI test
+# snapshots stay consistent on Windows, macOS, and Linux.
+* text=auto eol=lf

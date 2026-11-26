@@ -1,19 +1,19 @@
 //! Compatibility shims for `no_std` / `std` mode.
 //!
-//! Re-exports [`HashMap`] and lock helpers from either `std` or
+//! Re-exports `HashMap` and lock helpers from either `std` or
 //! `hashbrown`/`spin` depending on the active feature set.
 
 // -- HashMap ------------------------------------------------------------------
 
 #[cfg(feature = "std")]
 pub use std::collections::HashMap;
-/// Borrowing iterator over a [`HashMap`]'s entries — `std` variant.
+/// Borrowing iterator over a `HashMap`'s entries — `std` variant.
 #[cfg(feature = "std")]
 pub use std::collections::hash_map::Iter as HashMapIter;
 
 #[cfg(not(feature = "std"))]
 pub use hashbrown::HashMap;
-/// Borrowing iterator over a [`HashMap`]'s entries — `hashbrown` variant.
+/// Borrowing iterator over a `HashMap`'s entries — `hashbrown` variant.
 #[cfg(not(feature = "std"))]
 pub use hashbrown::hash_map::Iter as HashMapIter;
 
@@ -98,8 +98,8 @@ mod lock {
 // -- OnceLock -----------------------------------------------------------------
 #[cfg(feature = "std")]
 pub use std::sync::OnceLock;
-/// Read-write lock — [`std::sync::RwLock`] under `std`,
-/// [`spin::RwLock`] under `no_std`.
+/// Read-write lock — `std::sync::RwLock` under `std`,
+/// `spin::RwLock` under `no_std`.
 #[cfg(feature = "std")]
 pub use std::sync::RwLock;
 

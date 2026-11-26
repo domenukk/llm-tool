@@ -15,8 +15,8 @@ Define tools for LLM agents in Rust.
 
 ```toml
 [dependencies]
-llm-tool = "0.10.7"
-llm-tool-mcp = "0.10.7" # Optional: MCP server support
+llm-tool = "0.10.8"
+llm-tool-mcp = "0.10.8" # Optional: MCP server support
 ```
 
 ### Define a Tool
@@ -291,7 +291,11 @@ Set where a tool's data comes from with `#[llm_tool(provenance = "...")]`
 `<tool_output_quarantine>` tags by default.
 
 Use [`SurrogateVault`] with [`ToolContext`] to replace secret values with
-`<surrogate:kind:nonce>` placeholders so raw secrets are not sent to the model:
+`<surrogate:kind:nonce>` placeholders so raw secrets are not sent to the model.
+A new vault seeds itself from the operating system's secure random source. On
+targets without one (such as `no_std` or `wasm32-unknown-unknown`), create it
+with `SurrogateVault::with_seed` and 32 bytes from a secure RNG; otherwise
+minting returns an error instead of making guessable placeholders:
 
 ```rust
 use llm_tool::{SurrogateVault, ToolContext};

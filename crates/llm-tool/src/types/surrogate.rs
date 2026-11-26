@@ -13,10 +13,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::{
-    hash::{Hash, Hasher},
-    sync::atomic::{AtomicU32, Ordering},
-};
+use core::hash::{Hash, Hasher};
 
 use serde::Serialize;
 
@@ -52,8 +49,6 @@ const CHACHA_CONSTANTS: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b2
 const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0100_0000_01b3;
-
-static VAULT_INSTANCE_COUNTER: AtomicU32 = AtomicU32::new(1);
 
 /// Zeroize a byte vector in-place without `unsafe` while preventing dead-store elimination.
 fn zeroize_byte_vec(buf: &mut Vec<u8>) {
@@ -265,60 +260,68 @@ fn derive_nonce_hex(seed: &[u8; 32], seq_id: u64, kind: &str) -> String {
 }
 
 #[cfg(all(feature = "std", unix))]
-fn generate_os_seed() -> [u8; 32] {
-    use std::io::Read;
+const DEV_URANDOM_PATH: &str = "/dev/urandom";
 
-    const DEV_URANDOM_PATH: &str = "/dev/urandom";
-    let mut seed = [0u8; 32];
-    match std::fs::File::open(DEV_URANDOM_PATH).and_then(|mut f| f.read_exact(&mut seed)) {
-        Ok(()) => seed,
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                "SurrogateVault: failed to read /dev/urandom; falling back to RandomState entropy"
-            );
-            generate_std_fallback_seed()
+/// Reason recorded when the target has no operating-system entropy source.
+#[cfg(not(all(feature = "std", any(unix, windows))))]
+const NO_OS_ENTROPY_SOURCE: &str = "this target has no operating-system entropy source";
+
+/// Seed state of a vault: 256 secret bits, or the reason none could be obtained.
+///
+/// A vault without a seed refuses to mint instead of falling back to guessable nonces.
+enum VaultSeed {
+    Ready([u8; 32]),
+    Unavailable(String),
+}
+
+impl VaultSeed {
+    /// Derive the nonce for `(seq_id, kind)`, failing closed when no secret seed exists.
+    fn nonce_hex(&self, seq_id: u64, kind: &str) -> Result<String, ToolError> {
+        match self {
+            Self::Ready(seed) => Ok(derive_nonce_hex(seed, seq_id, kind)),
+            Self::Unavailable(reason) => Err(ToolError::new(format!(
+                "SurrogateVault::mint: no secure seed available ({reason}); \
+                 create the vault with SurrogateVault::with_seed and 32 bytes from a secure RNG"
+            ))),
         }
     }
 }
 
-#[cfg(all(feature = "std", not(unix)))]
-fn generate_os_seed() -> [u8; 32] {
-    generate_std_fallback_seed()
+#[cfg(all(feature = "std", unix))]
+fn os_seed() -> VaultSeed {
+    use std::io::Read;
+
+    let mut seed = [0u8; 32];
+    match std::fs::File::open(DEV_URANDOM_PATH).and_then(|mut f| f.read_exact(&mut seed)) {
+        Ok(()) => VaultSeed::Ready(seed),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "SurrogateVault: failed to read {DEV_URANDOM_PATH}; minting is disabled for this vault"
+            );
+            VaultSeed::Unavailable(format!("failed to read {DEV_URANDOM_PATH}: {err}"))
+        }
+    }
 }
 
-#[cfg(feature = "std")]
-fn generate_std_fallback_seed() -> [u8; 32] {
-    use std::{
-        collections::hash_map::RandomState,
-        hash::{BuildHasher, Hasher as _},
-    };
-
-    let seq = VAULT_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut raw = [0u8; 32];
-    for chunk_idx in 0..4usize {
-        let state = RandomState::new();
-        let mut hasher = state.build_hasher();
-        hasher.write_u32(seq);
-        hasher.write_usize(chunk_idx);
-        let word = hasher.finish().to_le_bytes();
-        raw[chunk_idx * 8..chunk_idx * 8 + 8].copy_from_slice(&word);
+#[cfg(all(feature = "std", windows))]
+fn os_seed() -> VaultSeed {
+    let mut seed = [0u8; 32];
+    match getrandom::fill(&mut seed) {
+        Ok(()) => VaultSeed::Ready(seed),
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "SurrogateVault: OS entropy source failed; minting is disabled for this vault"
+            );
+            VaultSeed::Unavailable(format!("OS entropy source failed: {err}"))
+        }
     }
-    raw
 }
 
-#[cfg(not(feature = "std"))]
-fn generate_os_seed() -> [u8; 32] {
-    let seq = VAULT_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut key = [0u8; 32];
-    key[0..4].copy_from_slice(&seq.to_le_bytes());
-    key[8..16].copy_from_slice(&FNV_OFFSET_BASIS.to_le_bytes());
-    let block = chacha20_block(&key, seq, [0, 0x9e37_79b9, 0x7f4a_7c15]);
-    let mut out = [0u8; 32];
-    for i in 0..8 {
-        out[i * 4..i * 4 + 4].copy_from_slice(&block[i].to_le_bytes());
-    }
-    out
+#[cfg(not(all(feature = "std", any(unix, windows))))]
+fn os_seed() -> VaultSeed {
+    VaultSeed::Unavailable(String::from(NO_OS_ENTROPY_SOURCE))
 }
 
 struct VaultEntry {
@@ -327,7 +330,7 @@ struct VaultEntry {
 }
 
 struct SurrogateVaultInner {
-    seed: [u8; 32],
+    seed: VaultSeed,
     next_id: u64,
     /// Maps `"<surrogate:kind:nonce>"` -> `(kind, raw_secret)`.
     token_to_entry: HashMap<String, VaultEntry>,
@@ -338,7 +341,7 @@ struct SurrogateVaultInner {
 }
 
 impl SurrogateVaultInner {
-    fn with_seed(seed: [u8; 32]) -> Self {
+    fn with_seed(seed: VaultSeed) -> Self {
         Self {
             seed,
             next_id: 0,
@@ -357,14 +360,16 @@ impl SurrogateVaultInner {
 
 impl Default for SurrogateVaultInner {
     fn default() -> Self {
-        Self::with_seed(generate_os_seed())
+        Self::with_seed(os_seed())
     }
 }
 
 impl Drop for SurrogateVaultInner {
     fn drop(&mut self) {
         self.clear_entries();
-        zeroize_seed(&mut self.seed);
+        if let VaultSeed::Ready(seed) = &mut self.seed {
+            zeroize_seed(seed);
+        }
     }
 }
 
@@ -462,7 +467,12 @@ const fn has_first_byte_bit(bitmap: &[u64; 4], byte: u8) -> bool {
 }
 
 impl SurrogateVault {
-    /// Create a new, empty [`SurrogateVault`] seeded with 256 bits of CSPRNG entropy.
+    /// Create a new, empty [`SurrogateVault`] seeded with 256 bits from the operating system's
+    /// secure random source (`/dev/urandom` on Unix, `ProcessPrng` on Windows).
+    ///
+    /// If no such source exists (for example `no_std` builds or `wasm32-unknown-unknown`) or it
+    /// fails, the vault fails closed: [`mint`](Self::mint) returns an error instead of producing
+    /// guessable tokens. Use [`with_seed`](Self::with_seed) on those targets.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -470,10 +480,13 @@ impl SurrogateVault {
 
     /// Create a new [`SurrogateVault`] from an explicit 256-bit secret `seed`.
     ///
-    /// Intended for `no_std` callers supplying hardware-RNG entropy and deterministic unit tests.
+    /// The seed must come from a secure RNG. Intended for targets without an OS entropy source
+    /// (such as `no_std` callers with a hardware RNG) and for deterministic unit tests.
     #[must_use]
     pub fn with_seed(seed: [u8; 32]) -> Self {
-        Self(Arc::new(RwLock::new(SurrogateVaultInner::with_seed(seed))))
+        Self(Arc::new(RwLock::new(SurrogateVaultInner::with_seed(
+            VaultSeed::Ready(seed),
+        ))))
     }
 
     /// Return the number of distinct surrogate entries currently stored in this vault.
@@ -505,7 +518,8 @@ impl SurrogateVault {
     /// # Errors
     ///
     /// Returns [`ToolError`] if `kind` is invalid, `raw_value` is empty, the vault has reached
-    /// [`MAX_SURROGATE_VAULT_ENTRIES`], or the vault lock is poisoned.
+    /// [`MAX_SURROGATE_VAULT_ENTRIES`], the vault has no secure seed (see [`new`](Self::new)),
+    /// or the vault lock is poisoned.
     pub fn mint(
         &self,
         kind: &str,
@@ -537,12 +551,12 @@ impl SurrogateVault {
                 "SurrogateVault::mint: vault capacity exceeded (max {MAX_SURROGATE_VAULT_ENTRIES} entries)"
             )));
         }
-        guard.next_id = guard
+        let id = guard
             .next_id
             .checked_add(1)
             .ok_or_else(|| ToolError::new("SurrogateVault::mint: sequence counter exhausted"))?;
-        let id = guard.next_id;
-        let nonce_hex = derive_nonce_hex(&guard.seed, id, kind);
+        let nonce_hex = guard.seed.nonce_hex(id, kind)?;
+        guard.next_id = id;
         let handle = SurrogateHandle::new(kind.to_string(), id, &nonce_hex);
         let insert_idx = guard
             .sorted_pairs
@@ -848,6 +862,55 @@ mod tests {
     use super::*;
     use crate::ToolContext;
 
+    fn unseeded_vault(reason: &str) -> SurrogateVault {
+        SurrogateVault(Arc::new(RwLock::new(SurrogateVaultInner::with_seed(
+            VaultSeed::Unavailable(String::from(reason)),
+        ))))
+    }
+
+    #[test]
+    fn unseeded_vault_fails_closed_on_mint_but_still_resolves_and_redacts() {
+        let vault = unseeded_vault("test: no entropy");
+
+        let err = vault
+            .mint("api_key", "sk-live-secret-123")
+            .expect_err("a vault without a secure seed must refuse to mint");
+        let msg = err.to_string();
+        assert!(msg.contains("no secure seed available"), "{msg}");
+        assert!(msg.contains("test: no entropy"), "{msg}");
+        assert!(msg.contains("SurrogateVault::with_seed"), "{msg}");
+        assert!(vault.is_empty(), "a failed mint must not store the secret");
+
+        // Repeated attempts keep failing closed and never consume sequence numbers.
+        assert!(vault.mint("api_key", "sk-live-secret-123").is_err());
+        let seeded = SurrogateVault::with_seed([1u8; 32]);
+        let h = seeded.mint("api_key", "sk-live-secret-123").unwrap();
+        assert_eq!(h.id(), 1);
+
+        // Non-minting operations are unaffected and keep failing closed on unknown tokens.
+        assert_eq!(
+            vault.redact_str("nothing to hide").unwrap(),
+            "nothing to hide"
+        );
+        assert!(vault.resolve_token(h.token()).is_err());
+
+        let ctx = ToolContext::new().with_surrogate_vault(vault);
+        assert!(ctx.mint_surrogate("api_key", "sk-live-secret-123").is_err());
+    }
+
+    #[cfg(all(feature = "std", any(unix, windows)))]
+    #[test]
+    fn new_vault_is_seeded_from_os_entropy_source() {
+        let vault = SurrogateVault::new();
+        let guard = read_lock(&vault.0).expect("fresh vault lock is not poisoned");
+        match &guard.seed {
+            VaultSeed::Ready(seed) => assert_ne!(seed, &[0u8; 32]),
+            VaultSeed::Unavailable(reason) => {
+                panic!("OS entropy source must be available on this platform: {reason}")
+            }
+        }
+    }
+
     #[test]
     fn surrogate_vault_unpredictable_nonces_kind_binding_and_no_deserialize() {
         let seed = [0x42u8; 32];
@@ -871,10 +934,19 @@ mod tests {
             .unwrap();
         assert_eq!(h1.token(), peer_h1.token());
 
-        // Different OS-seeded vaults produce distinct unpredictable nonces.
-        let random_vault = SurrogateVault::new();
-        let rand_h1 = random_vault.mint("api_key", "sk-live-secret-123").unwrap();
-        assert_ne!(h1.token(), rand_h1.token());
+        #[cfg(feature = "std")]
+        {
+            // Different OS-seeded vaults produce distinct unpredictable nonces.
+            let random_vault = SurrogateVault::new();
+            let rand_h1 = random_vault.mint("api_key", "sk-live-secret-123").unwrap();
+            assert_ne!(h1.token(), rand_h1.token());
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            // Without `std`, default vaults fail closed because no OS RNG is available.
+            let unseeded = SurrogateVault::new();
+            assert!(unseeded.mint("api_key", "sk-live-secret-123").is_err());
+        }
 
         // Kind-bound resolution succeeds on matching kind and fails closed on wrong kind.
         assert_eq!(
@@ -917,7 +989,7 @@ mod tests {
 
     #[test]
     fn surrogate_vault_resolves_json_object_keys_and_rejects_malformed_tokens() {
-        let ctx = ToolContext::new();
+        let ctx = ToolContext::new().with_surrogate_vault(SurrogateVault::with_seed([9u8; 32]));
         let hk = ctx.mint_surrogate("hdr", "X-Api-Key").unwrap();
         let hv = ctx.mint_surrogate("api_key", "sk-live-secret-123").unwrap();
 

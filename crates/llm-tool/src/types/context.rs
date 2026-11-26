@@ -408,7 +408,8 @@ impl ToolContext {
     ///
     /// # Errors
     ///
-    /// Returns [`ToolError`] if `kind` or `raw_value` is invalid, capacity is exceeded, or a lock is poisoned.
+    /// Returns [`ToolError`] if `kind` or `raw_value` is invalid, capacity is exceeded, the vault
+    /// has no secure seed (see [`SurrogateVault::new`]), or a lock is poisoned.
     pub fn mint_surrogate(
         &self,
         kind: &str,

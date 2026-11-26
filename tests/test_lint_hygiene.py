@@ -13,6 +13,8 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -106,6 +108,40 @@ class TestLintHygieneGateR(unittest.TestCase):
     def test_real_workspace_is_green(self) -> None:
         failed, output = self._run_check(REPO_ROOT)
         self.assertFalse(failed, f"Real workspace failed lint_hygiene:\n{output}")
+
+    def test_readme_mirror_drift_is_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "README.md").write_text("# llm-tool\n\nhello\n", encoding="utf-8")
+            mirror = root / "crates" / "llm-tool" / "README.md"
+            mirror.parent.mkdir(parents=True, exist_ok=True)
+            mirror.write_text("../../README.md", encoding="utf-8")
+            failed, output = self._run_check(root)
+            self.assertTrue(failed, f"Expected failure on README symlink stub, got:\n{output}")
+            self.assertIn("crates/llm-tool/README.md", output)
+
+            mirror.write_bytes(b"# llm-tool\r\n\r\nhello\r\n")
+            failed, output = self._run_check(root)
+            self.assertFalse(failed, f"Expected synced README mirror to pass, got:\n{output}")
+
+    def test_cli_succeeds_under_cp1252_stdout(self) -> None:
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "cp1252"
+        env.pop("PYTHONUTF8", None)
+        proc = subprocess.run(
+            [sys.executable, "-X", "utf8=0", str(LINT_SCRIPT)],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(
+            proc.returncode,
+            0,
+            f"lint_hygiene.py failed under cp1252 stdout:\n"
+            f"stdout={proc.stdout.decode('utf-8', errors='replace')}\n"
+            f"stderr={proc.stderr.decode('utf-8', errors='replace')}",
+        )
 
 
 if __name__ == "__main__":

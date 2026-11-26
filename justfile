@@ -1,5 +1,6 @@
-# Read workspace version from root Cargo.toml
-version := `grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/'`
+set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
+
+python := if os_family() == "windows" { "python" } else { "python3" }
 
 # Default recipe: format, lint, and test
 default: fmt lint test
@@ -32,7 +33,7 @@ lint: lint-rust lint-toml lint-markdown lint-just lint-hygiene
 
 # Lint Rust with clippy (pedantic + all, deny warnings)
 lint-rust:
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
 
 # Lint TOML files
 lint-toml:
@@ -48,20 +49,26 @@ lint-just:
 
 # Run hygiene linter (flags suppression patterns, discarded errors, etc.) and its self-tests
 lint-hygiene:
-    python3 scripts/lint_hygiene.py
-    python3 -m unittest discover -s tests -p 'test_*.py'
+    {{ python }} scripts/lint_hygiene.py
+    {{ python }} -m unittest discover -s tests -p "test_*.py"
 
 # ── Test ──────────────────────────────────────────────────────────────
 
 # Run all tests
 test:
-    cargo test
+    cargo test --workspace
 
 # ── Docs ──────────────────────────────────────────────────────────────
 
 # Build documentation (checks for broken intra-doc links)
+[unix]
 doc:
-    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+# Build documentation (checks for broken intra-doc links)
+[windows]
+doc:
+    $env:RUSTDOCFLAGS = '-D warnings'; cargo doc --workspace --no-deps
 
 # ── Other ─────────────────────────────────────────────────────────────
 
@@ -79,8 +86,7 @@ ci: fmt-rust lint-rust test doc
 
 # Bump version across workspace Cargo.toml and all crates/*/Cargo.toml manifests
 bump new_version:
-    sed -i 's/^version = "{{ version }}"/version = "{{ new_version }}"/' Cargo.toml
-    sed -i 's/\(llm-tool\(-macros\)\? = {[^}]*\)version = "{{ version }}"/\1version = "{{ new_version }}"/' crates/*/Cargo.toml
+    {{ python }} scripts/bump_version.py {{ new_version }}
     cargo update -w
 
 # Publish all workspace crates in dependency order (macros → llm-tool → llm-tool-mcp)
@@ -89,8 +95,8 @@ publish: lint test publish-rust
 publish-rust:
     cargo publish -p llm-tool-macros
     @echo "Waiting for crates.io index..."
-    sleep 30
+    {{ python }} -c "import time; time.sleep(30)"
     cargo publish -p llm-tool
     @echo "Waiting for crates.io index..."
-    sleep 30
+    {{ python }} -c "import time; time.sleep(30)"
     cargo publish -p llm-tool-mcp

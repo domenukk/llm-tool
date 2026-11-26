@@ -25,6 +25,7 @@ use crate::protocol::{self, JsonRpcResponse};
 /// assert!(matches!(tcp, Transport::Tcp(_)));
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(not(unix), derive(Copy))]
 pub enum Transport {
     /// Serve on stdin/stdout — the standard MCP subprocess transport.
     Stdio,
